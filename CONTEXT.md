@@ -72,6 +72,18 @@ _Avoid_: Personalized feed, filter mode
 A named, reusable selection policy belonging to a Publication. A Section references a Policy Preset or inherits its parent’s choice; Coverage Policy is the root default.
 _Avoid_: Mode, algorithm
 
+**Source Weight**:
+An explicit relative preference for selecting eligible Articles from a Source. It expresses editorial preference, not factual truth or viewpoint balance.
+_Avoid_: Trust score, quality score
+
+**Essential Coverage Slice**:
+The highest-priority portion of a Section’s selection reserved for Articles identified by explicit, explainable importance signals.
+_Avoid_: Objectively important news, front page
+
+**Discovery Slice**:
+A reserved portion of an Interest Policy selection that is not influenced by prior Feedback Signals, preserving exposure beyond established preferences.
+_Avoid_: Random articles, filler
+
 **Budget**:
 An explicit limit on content selected for a Publication or Section. A Section without its own Budget inherits its parent’s Budget.
 _Avoid_: Quota, magic number
@@ -87,6 +99,10 @@ _Avoid_: Dislike, negative feedback
 **Publication Note**:
 A minimal reader-facing notice in an Edition describing omitted content or degraded generation without internal diagnostic detail.
 _Avoid_: Error, stack trace
+
+**Editorial Addition**:
+Clearly labelled generated prose, such as an Article Summary or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
+_Avoid_: Article, journalism, objective summary
 
 **Run ID**:
 A portable identifier correlating an Edition and its Publication Notes with private operational diagnostics.
