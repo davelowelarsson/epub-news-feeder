@@ -21,8 +21,12 @@ An ordered content placement nested beneath a Main Section or another Subsection
 _Avoid_: Sub-profile
 
 **Section**:
-The general term for either a Main Section or Subsection. A Section may inherit or override its parent selection policy.
+The general term for either a Main Section or Subsection. A Section may inherit or override its parent Policy Preset and Budget.
 _Avoid_: Category
+
+**Leaf Section**:
+A Section with no nested Subsections. Sources attach only to Leaf Sections; a Main Section may itself be a Leaf Section.
+_Avoid_: Feed section
 
 **Source**:
 An origin from which article metadata or journalistic content is discovered, such as an RSS or Atom feed and its linked publisher pages.
@@ -43,6 +47,14 @@ _Avoid_: Balanced mode, default mode
 **Interest Policy**:
 A Section selection policy that uses explicit operator preferences and feedback to adjust relevance.
 _Avoid_: Personalized feed, filter mode
+
+**Policy Preset**:
+A named, reusable selection policy belonging to a Publication. A Section references a Policy Preset or inherits its parent’s choice; Coverage Policy is the root default.
+_Avoid_: Mode, algorithm
+
+**Budget**:
+An explicit limit on content selected for a Publication or Section. A Section without its own Budget inherits its parent’s Budget.
+_Avoid_: Quota, magic number
 
 **Feedback Signal**:
 An operator-provided positive or negative example that softly influences Interest Policy selection without muting content.
