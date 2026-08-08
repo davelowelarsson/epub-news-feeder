@@ -44,6 +44,18 @@ _Avoid_: Publisher
 An attributed piece of journalism discovered from a Source. An Article is distinct from feed metadata and editorial annotations.
 _Avoid_: Feed item, story
 
+**Canonical Rendition**:
+The single complete rendering of an Article within an Edition, regardless of how many Sections consider it relevant.
+_Avoid_: Master copy, duplicated article
+
+**Primary Placement**:
+The Section position containing an Article’s Canonical Rendition, chosen by strongest Section relevance with configured order as the tie-breaker.
+_Avoid_: Owner, primary audience
+
+**Section Pointer**:
+A compact cross-reference at an Article’s ranked position in another relevant Section, linking to its Canonical Rendition without repeating its content.
+_Avoid_: Duplicate, summary
+
 **Content Revision**:
 A timestamped observation of an Article’s normalized body. Multiple Content Revisions retain one Article identity and distinguish unchanged, minor, and material updates.
 _Avoid_: New article, duplicate
