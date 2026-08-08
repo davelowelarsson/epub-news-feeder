@@ -4,6 +4,14 @@ The publication domain for assembling private, finite news digests from public a
 
 ## Language
 
+**Environment**:
+An isolated operational context, such as development, staging, or production, with independent state and history.
+_Avoid_: Instance, workspace
+
+**State Store**:
+The private durable record of Article identity, Content Revisions, Source health, Editions, Runs, and Publication history within one Environment.
+_Avoid_: Cache, config database
+
 **Publication**:
 A configured recurring news product with its own structure, selection rules, budgets, and delivery targets.
 _Avoid_: Digest configuration, family feed
@@ -35,6 +43,18 @@ _Avoid_: Publisher
 **Article**:
 An attributed piece of journalism discovered from a Source. An Article is distinct from feed metadata and editorial annotations.
 _Avoid_: Feed item, story
+
+**Content Revision**:
+A timestamped observation of an Article’s normalized body. Multiple Content Revisions retain one Article identity and distinguish unchanged, minor, and material updates.
+_Avoid_: New article, duplicate
+
+**Discovery Provenance**:
+The Sources, URLs, and source identifiers through which an Article was discovered. Equivalent content may carry multiple provenances while appearing once in an Edition.
+_Avoid_: Duplicate source
+
+**Article Reservation**:
+A temporary claim that prevents an Article from entering another Edition while a validated Edition awaits delivery.
+_Avoid_: Published article, lock
 
 **Story Cluster**:
 A group of Articles from one or more Sources that cover the same real-world development.
