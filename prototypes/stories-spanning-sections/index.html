@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cross-section story placement prototype</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="masthead">
+        <div>
+          <p class="kicker">EPUB News Feeder · placement study</p>
+          <h1>One story.<br>Two reading routes.</h1>
+        </div>
+        <p class="brief">
+          Three ways to show cross-section relevance without asking a reader to
+          page through the same Article twice.
+        </p>
+      </header>
+
+      <aside class="prototype-note" aria-label="Prototype note">
+        <strong>Illustrative copy only.</strong> This is a browser prototype of
+        static EPUB pages; the final Edition will not use interactive tabs.
+      </aside>
+
+      <fieldset class="pattern-picker">
+        <legend>Compare a placement pattern</legend>
+
+        <input type="radio" name="pattern" id="pattern-a" checked>
+        <label for="pattern-a">
+          <span>A</span>
+          Primary + pointer
+          <small>Recommended</small>
+        </label>
+
+        <input type="radio" name="pattern" id="pattern-b">
+        <label for="pattern-b">
+          <span>B</span>
+          Shared shelf
+          <small>Equal ownership</small>
+        </label>
+
+        <input type="radio" name="pattern" id="pattern-c">
+        <label for="pattern-c">
+          <span>C</span>
+          Story hub
+          <small>Multiple Articles</small>
+        </label>
+
+        <div class="prototype-grid">
+          <section class="pattern-panel" data-panel="a" aria-labelledby="a-title">
+            <header class="pattern-intro">
+              <div>
+                <p class="option-label">Pattern A</p>
+                <h2 id="a-title">Primary placement with a section pointer</h2>
+              </div>
+              <p>
+                Put the complete Article in its strongest Section. The other
+                Section gets a compact pointer to that canonical rendition.
+              </p>
+            </header>
+
+            <div class="route-map" role="img" aria-label="Story route from Dejvid and Anna to one Article body">
+              <span class="route route--dejvid">Dejvid</span>
+              <span class="route-knot" aria-hidden="true"></span>
+              <span class="route route--anna">Anna</span>
+              <strong>One Article body</strong>
+            </div>
+
+            <div class="reader-spread">
+              <article class="reader-page reader-page--full">
+                <header class="section-marker section-marker--dejvid">
+                  <span>Dejvid</span>
+                  <small>Technology &amp; infrastructure</small>
+                </header>
+                <p class="story-flag">Also relevant to Anna</p>
+                <h3>Cities test shared heat batteries for apartment blocks</h3>
+                <p class="byline">SVT Nyheter · 08:20 · 7 min read</p>
+                <p class="standfirst">
+                  A storage project links energy systems, household costs, and
+                  winter resilience—placing the same reporting naturally in two
+                  people’s reading routes.
+                </p>
+                <div class="article-lines" role="img" aria-label="Placeholder article body">
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </article>
+
+              <article class="reader-page reader-page--pointer">
+                <header class="section-marker section-marker--anna">
+                  <span>Anna</span>
+                  <small>Home, climate &amp; society</small>
+                </header>
+                <p class="pointer-label">Shared with Dejvid</p>
+                <h3>Cities test shared heat batteries for apartment blocks</h3>
+                <p>
+                  This Article appears in full under Dejvid. It is listed here
+                  because its household-cost and climate angles also match Anna.
+                </p>
+                <a href="#canonical-story">Read the Article in Dejvid <span>→</span></a>
+                <p class="source-note">SVT Nyheter · one canonical rendition</p>
+              </article>
+            </div>
+
+            <footer class="tradeoffs">
+              <p><strong>Best at:</strong> preserving configured Section order.</p>
+              <p><strong>Cost:</strong> one Section is designated primary.</p>
+            </footer>
+          </section>
+
+          <section class="pattern-panel" data-panel="b" aria-labelledby="b-title">
+            <header class="pattern-intro">
+              <div>
+                <p class="option-label">Pattern B</p>
+                <h2 id="b-title">A shared shelf before personal Sections</h2>
+              </div>
+              <p>
+                Promote cross-section Articles into a visible shared area. Both
+                Main Sections point upward instead of owning the body.
+              </p>
+            </header>
+
+            <div class="shared-shelf">
+              <div class="shelf-heading">
+                <p>Shared reading · 1 Article</p>
+                <div class="section-pills">
+                  <span class="pill pill--dejvid">Dejvid</span>
+                  <span class="pill pill--anna">Anna</span>
+                </div>
+              </div>
+              <h3>Cities test shared heat batteries for apartment blocks</h3>
+              <p class="byline">SVT Nyheter · 08:20 · 7 min read</p>
+              <p class="standfirst">
+                One full Article lives here, before the Main Sections begin.
+              </p>
+            </div>
+
+            <div class="toc-preview">
+              <div class="toc-row toc-row--dejvid">
+                <strong>Dejvid</strong>
+                <span>Shared reading ↑ · Technology · Science</span>
+              </div>
+              <div class="toc-row toc-row--anna">
+                <strong>Anna</strong>
+                <span>Shared reading ↑ · Home · Current affairs</span>
+              </div>
+            </div>
+
+            <footer class="tradeoffs">
+              <p><strong>Best at:</strong> equal ownership and obvious sharing.</p>
+              <p><strong>Cost:</strong> invents a new top-level placement.</p>
+            </footer>
+          </section>
+
+          <section class="pattern-panel" data-panel="c" aria-labelledby="c-title">
+            <header class="pattern-intro">
+              <div>
+                <p class="option-label">Pattern C</p>
+                <h2 id="c-title">A Story Cluster hub with section bridges</h2>
+              </div>
+              <p>
+                Use a hub when several distinct Articles cover one development.
+                Each relevant Section links to the same cluster.
+              </p>
+            </header>
+
+            <div class="cluster-layout">
+              <aside class="cluster-bridge cluster-bridge--dejvid" aria-label="Bridge from Dejvid to Story Cluster">
+                <span>From Dejvid</span>
+                <strong>Energy systems</strong>
+                <small>Go to Story Cluster →</small>
+              </aside>
+
+              <article class="cluster-hub">
+                <p class="story-flag">Story Cluster · 2 Articles</p>
+                <h3>Heat storage moves from industry into homes</h3>
+                <p class="cluster-summary">
+                  Two original reports, kept separate: Swedish deployment and
+                  the technology making thermal storage cheaper.
+                </p>
+                <ol>
+                  <li>
+                    <strong>Cities test shared heat batteries…</strong>
+                    <span>SVT Nyheter · Sweden</span>
+                  </li>
+                  <li>
+                    <strong>Why thermal storage is getting cheaper</strong>
+                    <span>Ars Technica · Technology</span>
+                  </li>
+                </ol>
+              </article>
+
+              <aside class="cluster-bridge cluster-bridge--anna" aria-label="Bridge from Anna to Story Cluster">
+                <span>From Anna</span>
+                <strong>Homes &amp; climate</strong>
+                <small>Go to Story Cluster →</small>
+              </aside>
+            </div>
+
+            <footer class="tradeoffs">
+              <p><strong>Best at:</strong> plural reporting on one development.</p>
+              <p><strong>Cost:</strong> heavier navigation for a single Article.</p>
+            </footer>
+          </section>
+        </div>
+      </fieldset>
+
+      <section class="decision-frame" id="canonical-story">
+        <p class="kicker">Decision frame</p>
+        <h2>What should the Edition promise?</h2>
+        <div>
+          <p><strong>One rendition:</strong> an Article body appears once.</p>
+          <p><strong>Visible relevance:</strong> every matching Main Section names it.</p>
+          <p><strong>Fast return:</strong> internal links work in both directions.</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
