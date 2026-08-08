@@ -97,8 +97,24 @@ A reserved portion of an Interest Policy selection that is not influenced by pri
 _Avoid_: Random articles, filler
 
 **Budget**:
-An explicit limit on content selected for a Publication or Section. A Section without its own Budget inherits its parent’s Budget.
+The desired and permitted amount of Article content selected for a Publication or Section, constrained by every ancestor Budget.
 _Avoid_: Quota, magic number
+
+**Article Slot**:
+One relevant Article counted within a Section Budget, whether represented by its Canonical Rendition or a Section Pointer. Ancestors count a repeated Article identity once across their subtree.
+_Avoid_: Page, file
+
+**Allocation Weight**:
+A relative preference used to distribute available Article Slots among sibling Sections after essential coverage and feasible minimums.
+_Avoid_: Priority, guarantee
+
+**Effective Budget**:
+The runtime Budget after ancestor constraints, minimum normalization, and deterministic redistribution are applied to configured intent.
+_Avoid_: Rewritten config, hidden default
+
+**Partial Edition**:
+An Edition that remains below its target Article count after eligible candidates are exhausted but meets its Publication minimum and is still delivered.
+_Avoid_: Failed Edition, broken digest
 
 **Feedback Signal**:
 An operator-provided positive or negative example that softly influences Interest Policy selection without muting content.
