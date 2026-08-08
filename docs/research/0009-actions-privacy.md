@@ -4,11 +4,14 @@ Status: recommendation for [issue #9](https://github.com/davelowelarsson/epub-ne
 
 ## Decision summary
 
-Keep source, workflow, and a nonsecret Publication configuration in the public
-repository. Run the real operation only from a dedicated production job on the
-default branch. Give that job individual Actions secrets or, preferably, a
-short-lived OIDC identity. Generate on an ephemeral GitHub-hosted runner and
-send the Edition plus durable state directly to an external private store.
+Keep source, workflow, and the operator's nonsecret config.yaml in the public
+repository. That tracked configuration may include Section names, interests,
+budgets, and feed URLs. Use environment placeholders only for credentials,
+delivery identifiers, and values the operator explicitly classifies as private.
+Run the real operation only from a dedicated production job on the default
+branch. Give that job individual Actions secrets or, preferably, a short-lived
+OIDC identity. Generate on an ephemeral GitHub-hosted runner and send the
+Edition plus durable state directly to an external private store.
 
 Nothing private may be committed, cached, uploaded as an Actions artifact or
 release, written to a job summary, or printed in logs. GitHub retains only
@@ -25,10 +28,14 @@ Google Drive ownership and Kobo delivery remain a decision for
 
 ## Scope and assumptions
 
-This report answers the one-public-repository question. “Private” includes the
-Edition full text, operator interests and feedback, source or article history,
-delivery identifiers, credentials, private diagnostics, and any metadata from
-which those values can reasonably be inferred.
+This report answers the one-public-repository question. Privacy is
+classification-based, not inferred from configuration field type. Section
+names, interests, budgets, feed URLs, feedback, and similar Publication
+configuration may be public in tracked config.yaml. Credentials and delivery
+identifiers are always private; any other configuration value is private only
+when the operator explicitly marks it so and replaces it with an environment
+placeholder. Generated Edition full text, durable operational state, private
+diagnostics, and metadata derived from values classified private remain private.
 
 The operator controls the repository and destination account. Contributors and
 fork owners are not trusted with the operator's credentials or private output.
@@ -40,10 +47,10 @@ necessarily trusted: merged code can use production credentials.
 
 | Threat | Consequence | Required control |
 | --- | --- | --- |
-| Public reader inspects Actions | Edition, interests, URLs, state, or diagnostics leak through logs, summaries, artifacts, caches, releases, or commits | Treat every GitHub-hosted output surface as public; external private storage only |
+| Public reader inspects Actions | Edition, durable state, private diagnostics, credentials, delivery identifiers, or operator-classified private configuration leak through logs, summaries, artifacts, caches, releases, or commits | Treat every GitHub-hosted output surface as public; external private storage only |
 | Fork or pull request runs attacker-controlled code | Credential or state exfiltration | Separate unprivileged PR CI from production; never expose production secrets, environment, or OIDC to PR jobs; do not use pull_request_target to execute PR code |
 | Malicious or compromised dependency/action | Reads job secrets or changes generated output | Minimal dependencies, full-SHA action pins, lockfile/hash verification, least-privilege credentials |
-| Accidental logging | Secret redaction misses transformed credentials, content, filenames, URLs, or structured data | Safe logger with allowlisted fields; no shell tracing; individual secrets; mask derived tokens before use; test logs on success and failure |
+| Accidental logging | Secret redaction misses transformed credentials, Edition content, delivery identifiers, private-classified configuration, or structured state | Classification-aware safe logger; no shell tracing; individual secrets; mask derived tokens before use; test logs on success and failure |
 | Overlapping or retried runs | Duplicate Edition or corrupted state | Workflow concurrency plus backend idempotency/compare-and-swap; stable Run ID |
 | Compromised maintainer/default branch | Production credential use | Branch protection, review of workflow/dependency/generator changes, narrow and revocable destination permissions |
 | Stale fork or inactive public repository | Expected schedule silently stops or runs vulnerable code | Fork enablement checklist, default-branch updates, monitoring, manual dispatch recovery; pin updates reviewed regularly |
@@ -135,28 +142,36 @@ and visibility; it cannot make malicious production code safe.
 
 ## Recommendations
 
-### 1. Public configuration, private values
+### 1. Tracked public configuration, explicit private placeholders
 
-Commit one example/default Publication configuration and allow the operator to
-commit their real **nonsecret** structure. The schema from issue #4 should allow
-symbolic environment references, not credential values:
+Commit the operator's real nonsecret config.yaml. The standing visibility
+decision explicitly permits Section names, interests, budgets, and feed URLs in
+that public file. Credentials and delivery identifiers must be symbolic
+environment references. The schema from issue #4 should also let the operator
+replace any other value they explicitly classify as private with a placeholder:
 
     delivery:
       adapter: google_drive
       folder_id_env: EPUB_NEWS_DRIVE_FOLDER_ID
-      credential_mode_env: EPUB_NEWS_GOOGLE_AUTH_MODE
+      credential_mode: oidc
     state:
-      adapter_env: EPUB_NEWS_STATE_ADAPTER
-      location_env: EPUB_NEWS_STATE_LOCATION
+      adapter: object_store
+      private_location_env: EPUB_NEWS_STATE_LOCATION
 
-This shape is illustrative, not a schema decision. Any sensitive destination
-identifier belongs in a secret even if the provider does not classify the ID as
-a credential. Section labels, feedback, or interests that the operator considers
-private likewise cannot appear in tracked YAML; simple values can use
-placeholders, while complex private configuration belongs in the external
-private store selected with issue #5. Non-sensitive, fork-specific switches may
-be Actions variables. GitHub warns that variables render unmasked, so they must
-never carry private values. [GitHub: variables][22]
+This shape is illustrative, not a schema decision. Classification attaches to
+the configured value, not to categories such as “interest,” “feedback,”
+“Section,” or “URL.” A public feed URL stays tracked; the same field uses a
+placeholder if the operator marks that particular value private. Credentials
+and delivery identifiers always use placeholders even if a provider does not
+classify an identifier as a credential. Simple private values can use individual
+Actions secrets. Complex private configuration should be decomposed into
+placeholders or loaded from the external private store through a secret
+reference; the exact representation depends on issues #4 and #5.
+
+Non-sensitive, fork-specific switches may be Actions variables, though stable
+Publication configuration belongs in config.yaml. GitHub warns that variables
+render unmasked, so they must never carry private-classified values.
+[GitHub: variables][22]
 
 Use one secret per sensitive value. For the OAuth fallback this is likely a
 client ID, client secret, refresh token, and private destination ID as separate
@@ -225,9 +240,10 @@ The tracked workflow should remain a thin, auditable adapter:
 
 The workflow must not call upload-artifact on production paths, cache state or
 content, create a release, commit generated files/state, or echo output paths
-containing private names. Cache only package-manager downloads keyed by a
-reviewed lockfile; treat restored cache data as untrusted. If caching offers
-little benefit, omit it.
+derived from private-classified values. Public config.yaml values are already
+public and are not reclassified merely because the workflow reads them. Cache
+only package-manager downloads keyed by a reviewed lockfile; treat restored
+cache data as untrusted. If caching offers little benefit, omit it.
 
 Set timeout-minutes. Do not cancel an in-progress stateful run: cancellation can
 occur between Edition upload and state commit. GitHub concurrency protects
@@ -279,13 +295,19 @@ long-lived-credential fallback, not equivalent to OIDC.
 
 ### 6. Logs and diagnostics
 
-Production logging must use an allowlist, not attempted redaction after the
-fact. Allowed public fields: Run ID, phase name, success/failure category,
-duration, and aggregate counts that issue #11 explicitly declares non-sensitive.
-Disallowed fields include Article titles/text/URLs, Section labels if
-operator-specific, configuration values, destination IDs, state rows, request
-or response bodies, exception locals, authentication output, and generated
-filenames derived from Publication data.
+Production logging must use a classification-aware allowlist, not attempted
+redaction after the fact. Always allowed fields are Run ID, phase name,
+success/failure category, duration, and aggregate counts that issue #11
+declares non-sensitive. Values intentionally committed to public config.yaml,
+including public Section names, interests, budgets, and feed URLs, are not
+secret by type; logging should still omit them unless operationally useful.
+
+Always disallowed fields include Article full text, credentials, delivery
+identifiers, state rows, request or response bodies, exception locals, and
+authentication output. Article URLs, Section labels, feedback, configuration
+values, and generated filenames are disallowed only when derived from private
+state or a value the operator classified private. Issue #11 must preserve this
+classification rather than declaring whole field types private.
 
 Disable shell tracing. Mask every generated token before any command can print
 it. Configure HTTP clients not to log headers/bodies. Test failure paths, because
@@ -321,9 +343,12 @@ the operator completes them:
 4. Create the dedicated service account and OIDC federation with exact
    repository/default-branch or environment trust, **or** create narrowly scoped
    OAuth credentials. Grant only destination/state access.
-5. Create the private-operation GitHub environment. Add individual secrets and
-   non-sensitive variables by the names documented in the sample configuration.
-   Do not copy values into tracked YAML.
+5. Review config.yaml as public data. Keep Section names, interests, budgets,
+   feed URLs, and other values the operator is willing to publish directly in
+   it. Replace credentials, delivery identifiers, and every explicitly private
+   value with the documented environment placeholder. Create the
+   private-operation GitHub environment and add the corresponding individual
+   secrets. Use Actions variables only for non-sensitive operational switches.
 6. Leave required reviewers off the environment if unattended schedules must
    run. Restrict its deployment branches to the default branch. Set
    PRIVATE_OPERATION_ENABLED only after configuration is complete.
@@ -354,6 +379,10 @@ The future implementation should not be considered safe until all are true:
 - Two overlapping dispatches demonstrate serialization and no state loss.
 - Every external action reference is a full commit SHA.
 - Removing one required secret causes a named, value-free preflight failure.
+- A configuration test proves public Section names, interests, budgets, and feed
+  URLs work directly from config.yaml, while a value explicitly marked private
+  is resolved only through its environment placeholder and never appears in
+  repository content or logs.
 
 ## Official sources
 
