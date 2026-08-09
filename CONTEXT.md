@@ -172,6 +172,54 @@ _Avoid_: Log line, Publication Note
 Clearly labelled generated prose, such as an Article Summary, Revision Summary, or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
 _Avoid_: Article, journalism, objective summary
 
+**Editorial Proposal**:
+A structured optional LLM response containing bounded ranking and clustering suggestions plus cited Editorial Additions. It has no authority until deterministic constraints and verification accept its parts.
+_Avoid_: Final selection, generated Edition
+
+**Verification Finding**:
+A private classification of one factual claim as supported, unsupported, or uncertain against only the Articles supplied for verification.
+_Avoid_: Confidence score, model opinion
+
+**Editorial Gate**:
+The boundary that admits independently verified Editorial Additions and bounded suggestions while omitting failures without weakening the deterministic Edition.
+_Avoid_: LLM approval, confidence threshold
+
+**Editorial Influence**:
+The configured, measurable effect an accepted Editorial Proposal may have on ranking and Story Cluster suggestions. It may increase through operator decision as evidence improves but never weakens deterministic constraints.
+_Avoid_: LLM authority, automatic trust
+
+**Editorial Model**:
+The configured LLM role that produces an Editorial Proposal.
+_Avoid_: Generator, editor agent
+
+**Verifier Model**:
+A separately configured LLM role that independently produces Verification Findings for an Editorial Proposal or its single repair.
+_Avoid_: Self-confidence, deterministic validator
+
+**Model Pair**:
+The pinned Editorial Model, Verifier Model, prompts, and schemas evaluated together. Quality and influence evidence never transfers implicitly to another pairing or version.
+_Avoid_: Latest models, provider default
+
+**Editorial Evaluation**:
+The adversarial, operational, and human-review evidence accumulated for a Model Pair and editorial capability, used by an operator to change Editorial Influence.
+_Avoid_: Self-assessment, automatic promotion
+
+**LLM Cost Envelope**:
+The Publication-specific call, token, and optional monetary limits reserved for a complete Editorial Proposal and verification loop.
+_Avoid_: Article Budget, provider bill
+
+**LLM Processing Policy**:
+A Source-level permission distinguishing disabled, local-only, and explicitly allowed remote processing of acquired Article content.
+_Avoid_: robots permission, Publication opt-in
+
+**LLM Evidence Record**:
+A size- and time-bounded private record of structured proposals, Verification Findings, usage, costs, and operator judgments for one Run, excluding Article bodies and full prompts.
+_Avoid_: Diagnostic Event, training dataset
+
+**Editorial Language**:
+The language used for an Editorial Addition, derived from its Article or Section unless explicitly configured.
+_Avoid_: Source language, translation policy
+
 **Revision Summary**:
 An optional verified Editorial Addition that explains material differences between a Delivered Revision and a newer Content Revision, including why the Article appears again.
 _Avoid_: Publisher correction, deterministic diff
