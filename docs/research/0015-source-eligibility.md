@@ -1,8 +1,11 @@
 # Research 0015: Source acquisition and LLM processing eligibility
 
-**Issue:** [#15 — Define Source acquisition and LLM processing eligibility](https://github.com/davelowelarsson/epub-news-feeder/issues/15)  
-**Observed:** 2026-08-09  
-**Fetch identity:** `epub-news-feeder research contact: https://github.com/davelowelarsson/epub-news-feeder`  
+**Issue:** [#15 — Define Source acquisition and LLM processing eligibility](https://github.com/davelowelarsson/epub-news-feeder/issues/15)
+
+**Observed:** 2026-08-09
+
+**Fetch identity:** `epub-news-feeder research contact: https://github.com/davelowelarsson/epub-news-feeder`
+
 **Scope:** project policy and implementation gates, not legal advice or a representation that copyright exceptions apply in every operator's jurisdiction.
 
 ## Decision
