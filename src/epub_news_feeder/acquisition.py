@@ -227,6 +227,33 @@ def _has_full_article_cta(fragment: str) -> bool:
     )
 
 
+def _decoded_feed(payload: bytes) -> str | bytes:
+    """Decode a feed as UTF-8, degrading one bad byte rather than the whole document.
+
+    Feeds in the wild are not always the encoding they declare. Danstidningen's, for
+    instance, declares UTF-8 and is UTF-8 apart from a stray latin-1 byte, and a parser
+    left to sniff the payload gives up on UTF-8 and re-reads *every* character through a
+    guessed single-byte codepage — so one broken byte turns every "å" and "ö" in the
+    article into mojibake.
+
+    Decoding strictly first keeps the correct 99% correct; only the genuinely undecodable
+    bytes become replacement characters. Payloads that are honestly some other encoding
+    still reach the parser as bytes, so its detection is preserved for them.
+    """
+
+    try:
+        return payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    replaced = payload.decode("utf-8-sig", errors="replace")
+    # Only rescue a payload that is overwhelmingly UTF-8 already. A genuine latin-1 or
+    # cp1252 feed would be riddled with replacements, and belongs with the parser's own
+    # charset detection instead.
+    if replaced.count("\ufffd") <= max(4, len(replaced) // 2000):
+        return replaced
+    return payload
+
+
 def _page_content(
     document: bytes, base_url: httpx.URL
 ) -> tuple[str, tuple[BodyBlock, ...], str | None]:
@@ -452,7 +479,7 @@ class SourceClient:
         except _RouteDenied as error:
             return AcquisitionOutcome(request.source_id, error.code, ())
 
-        parsed: Any = feedparser.parse(feed.content)
+        parsed: Any = feedparser.parse(_decoded_feed(feed.content))
         if bool(getattr(parsed, "bozo", False)) and not getattr(parsed, "entries", []):
             return AcquisitionOutcome(request.source_id, "SOURCE_FEED_INVALID", ())
 

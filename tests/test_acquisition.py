@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import feedparser
 import pytest
 
 from epub_news_feeder.acquisition import (
@@ -15,6 +16,7 @@ from epub_news_feeder.acquisition import (
     EligibilityEvidence,
     SourceClient,
     SourceRequest,
+    _decoded_feed,
 )
 
 
@@ -838,3 +840,41 @@ def test_ticket_05_access_control_responses_are_never_retried(status: int) -> No
 
     assert outcome.code == "SOURCE_ACCESS_CONTROLLED"
     assert site.hits == ["/robots.txt", "/feed.xml"]
+
+
+def test_a_single_bad_byte_does_not_corrupt_an_otherwise_utf8_feed() -> None:
+    """One stray latin-1 byte must not re-read the whole feed through a guessed codepage.
+
+    Observed live in Danstidningen's feed: it declares UTF-8 and is UTF-8 apart from a
+    single 0xf6, and a parser left to sniff the payload abandoned UTF-8 for the entire
+    document — turning every "å" and "ö" in the delivered Edition into mojibake.
+    """
+
+    payload = (
+        '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item>'
+        "<title>Lyssna på koreografen</title>"
+        "<description>Det kan ses på Schweizisk tv och börjar direkt.</description>"
+        "</item></channel></rss>"
+    ).encode()
+    # Splice in the raw latin-1 byte the publisher actually emits.
+    corrupted = payload.replace(b"direkt", b"direkt\xf6")
+
+    parsed = feedparser.parse(_decoded_feed(corrupted))
+
+    assert parsed.entries
+    assert parsed.entries[0].title == "Lyssna på koreografen"
+    assert "på Schweizisk" in parsed.entries[0].description
+    assert "börjar" in parsed.entries[0].description
+
+
+def test_a_feed_that_is_honestly_another_encoding_still_reaches_the_parser_as_bytes() -> None:
+    """A genuinely latin-1 feed is riddled with undecodable bytes, so the parser's own
+    charset detection must be left to handle it rather than replacing half the text."""
+
+    payload = (
+        '<?xml version="1.0" encoding="ISO-8859-1"?><rss version="2.0"><channel><item>'
+        "<title>Sm\xf6rg\xe5sbord i K\xf6penhamn n\xe4r v\xe5ren b\xf6rjar och \xe5skan g\xe5r"
+        "</title></channel></rss>"
+    ).encode("latin-1")
+
+    assert isinstance(_decoded_feed(payload), bytes)
