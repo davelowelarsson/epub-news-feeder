@@ -267,43 +267,43 @@
         happy: {
           title: "Grounded addition",
           description: "A useful overview and ranking suggestion cite only supplied Articles. Watch generated prose appear without changing the deterministic Article set.",
-          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.25, estimatedWorstCase: 0.07,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
         },
         authority: {
           title: "Hard-rule conflict",
           description: "The editor tries to revive a muted Article and overrule Essential Coverage. Local validation must reject the proposal before verification.",
-          proposal: "authority_violation", verification: "unused", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          proposal: "authority_violation", verification: "unused", repair: "none", costCap: 0.25, estimatedWorstCase: 0.07,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "APPLY_GATE"]
         },
         repair: {
           title: "One repair loop",
           description: "One unsupported claim is found. The editor gets one repair, and the repaired prose must pass a second verification before publication.",
-          proposal: "unsupported", verification: "unsupported", repair: "successful", costCap: 0.10, estimatedWorstCase: 0.09,
+          proposal: "unsupported", verification: "unsupported", repair: "successful", costCap: 0.25, estimatedWorstCase: 0.09,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "REPAIR", "REVERIFY", "APPLY_GATE"]
         },
         failedRepair: {
           title: "Failed repair omitted",
           description: "The single repair still contains an unsupported claim. No second repair is allowed; all optional output is omitted.",
-          proposal: "unsupported", verification: "unsupported", repair: "failed", costCap: 0.10, estimatedWorstCase: 0.09,
+          proposal: "unsupported", verification: "unsupported", repair: "failed", costCap: 0.25, estimatedWorstCase: 0.09,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "REPAIR", "REVERIFY", "APPLY_GATE"]
         },
         malformed: {
           title: "Malformed response",
           description: "The provider returns invalid structured output. No verifier call is made and the deterministic Edition remains untouched.",
-          proposal: "malformed", verification: "unused", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          proposal: "malformed", verification: "unused", repair: "none", costCap: 0.25, estimatedWorstCase: 0.07,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "APPLY_GATE"]
         },
         privacy: {
           title: "Privacy allowlist",
           description: "Sensitive sentinels exist in private state but are excluded from both editor and verifier receipts. Only explicitly allowed fields cross the boundary.",
-          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.25, estimatedWorstCase: 0.07,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
         },
         verifier: {
           title: "Verifier unavailable",
           description: "The proposal is structurally valid but cannot be verified. The optional layer stays silent; the baseline Edition still publishes.",
-          proposal: "grounded", verification: "unavailable", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          proposal: "grounded", verification: "unavailable", repair: "none", costCap: 0.25, estimatedWorstCase: 0.07,
           steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
         },
         cost: {
@@ -332,6 +332,15 @@
             evaluatedPair: true
           },
           editorialInfluence: "bounded",
+          contract: {
+            schemaVersion: 1,
+            sourceProcessing: "local_only",
+            editorialLanguage: "auto",
+            wordLimits: { articleSummary: 80, revisionSummary: 120, mainSectionOverview: 180 },
+            evidenceRetentionDays: 90,
+            evidenceBytesPerRun: 262144,
+            totalTokenCeiling: 40000
+          },
           manifest: {
             sent: ["candidate IDs", "allowlisted current Article text + metadata", "six-day delivered history", "deterministic selection reasons"],
             withheld: ["Drive refresh token", "folder ID", "raw diagnostics", "operator private note", "history older than seven days", "unlisted Feedback Signal"],
@@ -550,6 +559,8 @@
         ["Withheld", state.manifest.withheld.join(" · ")],
         ["Editorial Model", state.models.editorial],
         ["Verifier Model", state.models.verifier],
+        ["Schema + policy", `v${state.contract.schemaVersion} · ${state.contract.sourceProcessing} · language ${state.contract.editorialLanguage}`],
+        ["Daily envelope", `${state.contract.totalTokenCeiling.toLocaleString()} total tokens · ${state.calls.ceiling.toFixed(2)} cloud ceiling`],
         ["Editor receipt", state.manifest.editorReceipt.length ? state.manifest.editorReceipt.join(" · ") : "No request yet"],
         ["Verifier receipt", state.manifest.verifierReceipt.length ? state.manifest.verifierReceipt.join(" · ") : "No request yet"]
       ];
