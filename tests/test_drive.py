@@ -23,13 +23,34 @@ class FakeDriveClient:
         file_id, content = entry
         return DriveFile(file_id=file_id, sha256=sha256(content).hexdigest())
 
-    def upload(self, *, folder_id: str, filename: str, content: bytes) -> str:
-        del folder_id
+    def upload(
+        self,
+        *,
+        folder_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/epub+zip",
+    ) -> str:
+        del folder_id, content_type
         self.upload_calls += 1
         self._next_id += 1
         file_id = f"drive-file-{self._next_id}"
         self.files[filename] = (file_id, content)
         return file_id
+
+    def update(self, *, file_id: str, content: bytes, content_type: str) -> str:
+        del content_type
+        for filename, (existing_id, _content) in self.files.items():
+            if existing_id == file_id:
+                self.files[filename] = (existing_id, content)
+                return existing_id
+        raise KeyError(file_id)
+
+    def download(self, *, file_id: str) -> bytes:
+        for _filename, (existing_id, content) in self.files.items():
+            if existing_id == file_id:
+                return content
+        raise KeyError(file_id)
 
 
 def test_uploads_a_new_delivery_copy_and_acknowledges_a_verified_digest() -> None:

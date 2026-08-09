@@ -63,6 +63,7 @@ from epub_news_feeder.state import (
     StateStore,
 )
 from epub_news_feeder.state import brief_id as durable_brief_id
+from epub_news_feeder.state_sync import StateSyncError, restore_state, save_state
 from epub_news_feeder.validation import EpubValidationError, validate_epub
 
 
@@ -83,6 +84,15 @@ class DriveTarget:
 
     client: DriveClient
     folder_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class StateSyncTarget:
+    """Opt-in scheduled State Store persistence via Drive, surviving an empty runner disk."""
+
+    client: DriveClient
+    folder_id: str
+    environment: str = "local"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,11 +151,15 @@ def generate_edition(
     publication_id: str | None = None,
     epubcheck_jar: Path | None = None,
     drive_target: DriveTarget | None = None,
+    state_sync_target: StateSyncTarget | None = None,
 ) -> GenerationResult:
     publication = _publication(configuration, publication_id)
     edition_id = f"{publication.id}@{generated_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
     diagnostics = Diagnostics(diagnostics_directory, run_id)
     diagnostics.emit("RUN_STARTED", phase="run", publication_id=publication.id)
+
+    if state_sync_target is not None:
+        _restore_state(state_sync_target, state_path, diagnostics)
 
     with StateStore(state_path, environment="local") as state:
         try:
@@ -168,6 +182,8 @@ def generate_edition(
             )
             if drive_target is not None:
                 _deliver_to_drive(result, drive_target, diagnostics)
+            if state_sync_target is not None:
+                _save_state(state, state_sync_target, diagnostics)
             return result
         except RetryableGenerationError as error:
             with suppress(OSError):
@@ -184,6 +200,57 @@ def generate_edition(
             with suppress(OSError):
                 diagnostics.emit("GENERATION_FAILED", phase="run", outcome="failed")
             raise GenerationError("GENERATION_FAILED", "Edition generation failed") from error
+
+
+def _restore_state(
+    state_sync_target: StateSyncTarget, state_path: Path, diagnostics: Diagnostics
+) -> None:
+    """Restore the scheduled State Store from Drive before it is ever opened, fail-closed.
+
+    A verified archive, or a legitimate first run (a clean absence), both proceed. Anything
+    else — a download failure, a digest mismatch, or an ambiguous existence check — aborts:
+    proceeding with an empty store would silently re-deliver everything already delivered.
+    """
+
+    try:
+        restore_state(
+            client=state_sync_target.client,
+            folder_id=state_sync_target.folder_id,
+            state_path=state_path,
+            environment=state_sync_target.environment,
+            diagnostics=diagnostics,
+        )
+    except StateSyncError as error:
+        with suppress(OSError):
+            diagnostics.emit("STATE_RESTORE_FAILED", phase="state", outcome="failed")
+        raise GenerationError(
+            "STATE_RESTORE_FAILED", "Scheduled State Store restore could not be verified"
+        ) from error
+
+
+def _save_state(
+    state: StateStore, state_sync_target: StateSyncTarget, diagnostics: Diagnostics
+) -> None:
+    """Save the State Store to Drive only after the Edition has been delivered and finalized.
+
+    A save failure must be loud rather than silent: it raises RetryableGenerationError so the
+    already-finalized Run is not reported as a clean success, without abandoning it — the next
+    attempt can retry the save without re-delivering the Edition.
+    """
+
+    try:
+        save_state(
+            client=state_sync_target.client,
+            folder_id=state_sync_target.folder_id,
+            state_path=state.path,
+            environment=state_sync_target.environment,
+            connection=state.connection,
+            diagnostics=diagnostics,
+        )
+    except StateSyncError as error:
+        raise RetryableGenerationError(
+            "STATE_SAVE_PENDING", "Scheduled State Store save to Drive remains pending"
+        ) from error
 
 
 def _deliver_to_drive(
