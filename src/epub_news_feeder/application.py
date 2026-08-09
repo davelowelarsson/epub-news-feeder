@@ -21,7 +21,12 @@ from epub_news_feeder.acquisition import (
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
 from epub_news_feeder.drive import DriveClient, DriveError, deliver_drive
-from epub_news_feeder.editorial import ArticleEvidence, generate_editorial
+from epub_news_feeder.editorial import (
+    ArticleEvidence,
+    StructuredProvider,
+    StructuredProviderError,
+    generate_editorial,
+)
 from epub_news_feeder.epub import (
     ArticleInput,
     BodyBlock,
@@ -41,12 +46,14 @@ from epub_news_feeder.epub import (
 )
 from epub_news_feeder.models import (
     Configuration,
+    EditorialConfig,
     MatchRule,
     PolicyPreset,
     Publication,
     Section,
 )
-from epub_news_feeder.ollama import OllamaError, OllamaStructuredProvider
+from epub_news_feeder.ollama import OllamaStructuredProvider
+from epub_news_feeder.openai_responses import OpenAIResponsesProvider
 from epub_news_feeder.selection import (
     AncestorBudget,
     BriefCandidate,
@@ -581,7 +588,12 @@ def _run(
         ),
         briefs=tuple(briefs[item.brief_id].brief for item in selection.selected_briefs),
         editorial_excluded_sources=_editorial_excluded_sources(
-            publication, configuration, records, selection.unique_article_ids
+            publication, configuration, records, selection.unique_article_ids, generated_at
+        ),
+        editorial_route=(
+            "remote"
+            if publication.editorial is not None and publication.editorial.remote_processing
+            else "local"
         ),
         edition_date=generated_at.astimezone(UTC).date().isoformat(),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1142,11 +1154,20 @@ def _apply_editorial(
     editorial = publication.editorial
     if editorial is None or not editorial.enabled or editorial.model_pair is None:
         return
+    remote = editorial.remote_processing
+    diagnostics.emit(
+        "EDITORIAL_ROUTE",
+        phase="editorial",
+        route="remote" if remote else "local",
+        provider=editorial.provider or "unknown",
+    )
     eligible_records = [
         record
         for article_id in selected_ids
         if isinstance((record := records[article_id]), _ArticleRecord)
-        and _allows_local_editorial(configuration, record.source_id)
+        and _allows_editorial(
+            configuration, record.source_id, remote=remote, generated_at=generated_at
+        )
         and record.article.language is not None
     ]
     if not eligible_records:
@@ -1169,8 +1190,8 @@ def _apply_editorial(
         for record in eligible_records
     )
     try:
-        provider = OllamaStructuredProvider(host=editorial.ollama_host, timeout=300)
-    except OllamaError:
+        provider = _editorial_provider(editorial)
+    except StructuredProviderError:
         diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=0)
         return
     results = []
@@ -1256,30 +1277,71 @@ def _editorial_excluded_sources(
     configuration: Configuration,
     records: dict[str, _SelectableRecord],
     selected_ids: tuple[str, ...],
+    generated_at: datetime,
 ) -> tuple[str, ...]:
     """Name the Sources in this Edition whose publishers do not permit generated summaries.
 
     A silently absent summary is indistinguishable from a failed one, so a deliberate policy
     outcome is stated once in end matter rather than marked on every Article.
+
+    The disclosure follows the route this Edition actually took. A publisher who permits a
+    local model but not a remote one is excluded from a remote Edition and named as such,
+    which is the honest statement — not the one a local Edition would have made.
     """
 
     if publication.editorial is None or not publication.editorial.enabled:
         return ()
+    remote = publication.editorial.remote_processing
     excluded = {
         records[article_id].source_id
         for article_id in selected_ids
-        if not _allows_local_editorial(configuration, records[article_id].source_id)
+        if not _allows_editorial(
+            configuration, records[article_id].source_id, remote=remote, generated_at=generated_at
+        )
     }
     return tuple(sorted(configuration.sources[source_id].title for source_id in excluded))
 
 
-def _allows_local_editorial(configuration: Configuration, source_id: str) -> bool:
+def _allows_editorial(
+    configuration: Configuration,
+    source_id: str,
+    *,
+    remote: bool,
+    generated_at: datetime,
+) -> bool:
+    """Decide, per Source, whether this Edition's editorial route may read that Source.
+
+    The two limbs are deliberately not one relaxed rule. Local processing asks only whether
+    the operator's own machine may run a model over the text. Remote processing asks
+    something categorically different — whether the text may leave the machine at all — so
+    it requires the publisher's own recorded `remote_llm` allowance, an operator policy that
+    says so in as many words, a rights basis, and evidence still inside its review window.
+
+    Silence is never permission on the remote limb: `conditional` and `unknown` both refuse.
+    """
+
     source = configuration.sources[source_id]
+    if source.llm_processing == "disabled" or source.eligibility is None:
+        return False
+    if not remote:
+        return source.eligibility.local_llm == "allow"
+    # Acquisition already refuses an expired Source, so this can only fire as defence in
+    # depth — which is exactly what the one route that leaves the machine should have.
+    expires_at = datetime.combine(source.eligibility.review_expires_at, time.max, tzinfo=UTC)
     return (
-        source.llm_processing != "disabled"
-        and source.eligibility is not None
-        and source.eligibility.local_llm == "allow"
+        source.llm_processing == "remote_allowed"
+        and source.eligibility.remote_llm == "allow"
+        and source.rights is not None
+        and expires_at > generated_at
     )
+
+
+def _editorial_provider(editorial: EditorialConfig) -> StructuredProvider:
+    """Build the provider the configuration names; never fall back to the other route."""
+
+    if editorial.remote_processing:
+        return OpenAIResponsesProvider(timeout=300)
+    return OllamaStructuredProvider(host=editorial.ollama_host, timeout=300)
 
 
 def _lead_passage(body: str) -> str:

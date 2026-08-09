@@ -17,8 +17,7 @@ from epub_news_feeder import application
 from epub_news_feeder.application import GenerationError, RetryableGenerationError, generate_edition
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
-from epub_news_feeder.editorial import ArticleEvidence, StructuredCall
-from epub_news_feeder.ollama import CallUsage
+from epub_news_feeder.editorial import ArticleEvidence, CallUsage, StructuredCall
 from epub_news_feeder.state import brief_id as compute_brief_id
 
 
@@ -745,6 +744,8 @@ publications:
             archive.read(name).decode() for name in archive.namelist() if name.endswith(".xhtml")
         )
     assert "AI-generated summary" in xhtml
+    assert "generated on this device" in xhtml
+    assert "remote provider" not in xhtml
     assert "The harbour investigation is continuing." in xhtml
     assert "https://publisher.example/harbour" in xhtml
     diagnostics = (tmp_path / "diagnostics" / "20260809T081000Z-DDDDDDDD.jsonl").read_text()
@@ -1115,3 +1116,235 @@ publications:
         server.server_close()
 
     assert result.brief_count == 1
+
+
+class RemoteEditorialFixtureHandler(BaseHTTPRequestHandler):
+    """Two full-text publishers whose bodies are distinguishable by a single token."""
+
+    granted_body = " ".join(f"granted-token-{index}" for index in range(180))
+    withheld_body = " ".join(f"withheld-token-{index}" for index in range(180))
+
+    def do_GET(self) -> None:
+        if self.path == "/robots.txt":
+            content_type, status = "text/plain", 200
+            payload = b"User-agent: *\nAllow: /\n"
+        elif self.path in {"/granted.xml", "/withheld.xml"}:
+            granted = self.path == "/granted.xml"
+            body = type(self).granted_body if granted else type(self).withheld_body
+            name = "Granted Publisher" if granted else "Withheld Publisher"
+            slug = "granted" if granted else "withheld"
+            content_type, status = "application/rss+xml", 200
+            payload = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>{name}</title><item>
+<title>A {slug} report</title>
+<link>https://{slug}.example/report</link><guid>{slug}-report</guid>
+<author>Jamie Reporter</author><pubDate>Sat, 08 Aug 2026 08:00:00 GMT</pubDate>
+<content:encoded><![CDATA[<p>{body}</p>]]></content:encoded>
+</item></channel></rss>""".encode()
+        else:
+            content_type, status = "text/plain", 404
+            payload = b"not found"
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+def _remote_editorial_config(port: int) -> str:
+    return f"""
+version: 1
+remote_providers:
+  openai:
+    training_opt_in: false
+    store: false
+    application_state_retention_days: 0
+    max_abuse_retention_days: 30
+    tools: none
+sources:
+  granted:
+    title: Granted Publisher
+    default_article_language: en
+    publisher_id: granted.example
+    allowed_publisher_origins: [https://granted.example]
+    feed_url: http://127.0.0.1:{port}/granted.xml
+    acquisition: feed
+    llm_processing: remote_allowed
+    rights:
+      basis: rightsholder_granted_fixture
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: granted-fixture
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: allow
+  withheld:
+    title: Withheld Publisher
+    default_article_language: en
+    publisher_id: withheld.example
+    allowed_publisher_origins: [https://withheld.example]
+    feed_url: http://127.0.0.1:{port}/withheld.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: withheld-fixture
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 2, min_articles: 1}}
+    editorial:
+      enabled: true
+      remote_processing: true
+      provider: openai
+      model_pair:
+        editorial_model: gpt-5.4-2026-03-05
+        verifier_model: gpt-5.4-mini-2026-03-17
+        editorial_prompt_version: article-summary-v1
+        verifier_prompt_version: evidence-check-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      cost_envelope: {{max_calls: 8, max_tokens: 12000}}
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [granted, withheld]
+""".lstrip()
+
+
+@pytest.mark.security
+@pytest.mark.epubcheck
+def test_editorial_preflight_sends_only_the_source_that_granted_remote_processing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remote route reads `remote_llm`, and a Source that permits only local processing
+    never leaves the machine.
+
+    Both publishers here permit a local model. Only one permits a remote one. The difference
+    has to be visible in what crosses the provider boundary, not merely in a policy field, so
+    this asserts on the calls themselves: the withheld publisher's body token must appear
+    nowhere in any request, and the reader must be told which Source was left out.
+    """
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RemoteEditorialFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = tmp_path / "publication.yaml"
+    config.write_text(_remote_editorial_config(server.server_port), encoding="utf-8")
+    seen: list[StructuredCall] = []
+
+    class StubProvider:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def drain_usage(self) -> tuple[CallUsage, ...]:
+            return (
+                CallUsage(
+                    role="editorial",
+                    model="gpt-5.4-2026-03-05",
+                    total_duration_ms=0,
+                    load_duration_ms=0,
+                    input_tokens=800,
+                    output_tokens=60,
+                ),
+            )
+
+        def complete(self, call: StructuredCall) -> object:
+            seen.append(call)
+            if call.role == "editorial":
+                articles = cast(list[dict[str, object]], call.input["articles"])
+                article_id = str(articles[0]["article_id"])
+                return {
+                    "summaries": [
+                        {
+                            "article_id": article_id,
+                            "sentences": [
+                                {
+                                    "text": "The granted report sets out what happened next.",
+                                    "citations": [article_id],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]}
+
+    monkeypatch.setattr(application, "OpenAIResponsesProvider", StubProvider)
+    monkeypatch.setattr(
+        application,
+        "OllamaStructuredProvider",
+        _unreachable_provider("the remote route must never fall back to the local provider"),
+    )
+    try:
+        result = generate_edition(
+            load_config(config),
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260809T081000Z-REMOTEAA",
+            generated_at=datetime(2026, 8, 9, 8, 10, tzinfo=UTC),
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result.article_count == 2, "both Articles belong in the Edition either way"
+    assert seen, "the remote provider must have been called"
+    sent = json.dumps([call.model_dump(mode="json") for call in seen])
+    assert "granted-token-0" in sent
+    assert "withheld-token-0" not in sent
+    assert "Withheld Publisher" not in sent
+
+    with ZipFile(result.receipt.path) as archive:
+        xhtml = " ".join(
+            archive.read(name).decode() for name in archive.namelist() if name.endswith(".xhtml")
+        )
+    assert "The granted report sets out what happened next." in xhtml
+    # The reader is told which Source was excluded, and it is the route actually taken that
+    # decides: a publisher permitting local but not remote processing is named here.
+    assert "Withheld Publisher" in xhtml
+    # And the method note states the route honestly. A remote Edition claiming its summaries
+    # were produced on the device would be the most misleading sentence in the book.
+    assert "generated by a remote provider" in xhtml
+    assert "generated on this device" not in xhtml
+
+    diagnostics = [
+        json.loads(line)
+        for line in (tmp_path / "diagnostics" / "20260809T081000Z-REMOTEAA.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    route = next(event for event in diagnostics if event["code"] == "EDITORIAL_ROUTE")
+    assert route["route"] == "remote"
+    assert route["provider"] == "openai"
+
+
+def _unreachable_provider(message: str) -> type:
+    class Unreachable:
+        def __init__(self, **_kwargs: object) -> None:
+            raise AssertionError(message)
+
+    return Unreachable

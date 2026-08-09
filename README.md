@@ -30,6 +30,25 @@ Back up the SQLite file and its adjacent `.key` sidecar together.
 If final delivery is interrupted, rerun with the same `--run-id` and `--at`; the validated
 private spool is revalidated and delivered without reacquiring Sources.
 
+## Remote verified summaries
+
+`llm_processing: remote_allowed` and `eligibility.remote_llm: allow` are two separate gates and
+both must say yes before an Article leaves the machine — the publisher's recorded position and the
+operator's policy are different questions. `conditional` and `unknown` refuse: silence is not
+permission. Today exactly one Source passes both, the operator's own site.
+
+The provider profile is a load-time gate, not a runtime one. A profile declaring `training_opt_in`
+or `store` refuses to load the configuration at all, before a Source is fetched, because there is
+no correcting it once text has been sent. Requests set `store: false`, `tools: []`, and
+`prompt_cache_retention: in_memory` — the default is a 24-hour prompt cache, and with `store` off
+that cache is the only remaining server-side copy.
+
+Model Pairs are pinned to dated snapshots. A floating alias would change the Edition under a
+schedule with nobody reading the diff.
+
+The Edition's end matter states which route produced its summaries and names every Source left out
+of it, so a reader can tell a policy exclusion from a failure.
+
 ## Local verified summaries
 
 The example configuration uses `gemma4:12b-mlx` as editor and `gemma4:e4b-mlx` as an independent
@@ -51,8 +70,9 @@ Set `editorial.enabled: false` for the fully deterministic no-LLM path.
 
 `.github/workflows/daily-edition.yml` builds one Edition every day at 04:00 UTC — 06:00 in
 Stockholm through the summer, 05:00 through the winter, since GitHub cron does not observe DST.
-It runs the `daily` Publication of `examples/reality-check.yaml`: the deterministic core, with no
-LLM call at all, because a hosted runner has no Ollama.
+It runs the `daily` Publication of `examples/reality-check.yaml`. A hosted runner has no Ollama,
+so its summaries come from the remote editorial route — which reaches exactly one Source, the one
+whose rightsholder granted it.
 
 A hosted runner also starts with an empty disk, so the State Store is restored from Google Drive
 before the run and saved back after delivery. Without it every morning would re-deliver the
@@ -66,7 +86,7 @@ Six repository secrets, named identically to the local `.env` keys — no mappin
 | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | Desktop OAuth client, `drive.file` scope only |
 | `GOOGLE_DRIVE_FOLDER_ID` | Where Editions land, inside the folder that syncs to the device |
 | `GOOGLE_DRIVE_FOLDER_DB` | The State Store archive, outside the synced tree |
-| `OPENAI_API_KEY` | Reserved for remote editorial; nothing reads it yet |
+| `OPENAI_API_KEY` | The remote editorial route |
 
 Delivery Copies are named `<date>-<publication>-<run>.epub`, date first, because a reader that
 truncates a long filename truncates it from the right.
@@ -87,7 +107,7 @@ CI runs this exact gate — `.github/workflows/quality-gate.yml` executes the sa
 against a verified EPUBCheck 5.3.0, so the local gate and CI cannot drift.
 
 Implementation follows the project specification in GitHub issue #16. Physical Kobo acceptance
-and OpenAI editorial integration remain subsequent milestones.
+remains the outstanding milestone.
 
 ## Prototypes
 

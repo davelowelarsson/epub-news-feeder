@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from .editorial import StructuredProviderError
+from .editorial import CallUsage, StructuredProviderError
 
 if TYPE_CHECKING:
     from .editorial import StructuredCall
@@ -19,18 +18,6 @@ if TYPE_CHECKING:
 
 class OllamaError(StructuredProviderError):
     """Safe local provider failure."""
-
-
-@dataclass(frozen=True, slots=True)
-class CallUsage:
-    """Body-free measurement of one local structured call."""
-
-    role: str
-    model: str
-    total_duration_ms: int
-    load_duration_ms: int
-    input_tokens: int
-    output_tokens: int
 
 
 _READY_SCHEMA: dict[str, Any] = {

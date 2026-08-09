@@ -23,9 +23,11 @@ _ALLOWED_FIELDS = {
     "outcome",
     "output_tokens",
     "partial",
+    "provider",
     "publication_id",
     "read_items",
     "reason",
+    "route",
     "source_id",
 }
 

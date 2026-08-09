@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from epub_news_feeder.config import load_config
+from epub_news_feeder.config import ConfigError, load_config
 
 RUN_ID = re.compile(r"\b\d{8}T\d{6}Z-[A-Z2-7]{8}\b")
 
@@ -372,6 +372,17 @@ def test_reality_check_configuration_records_the_recorded_rights_matrix() -> Non
     assert sources["svt"].eligibility is not None
     assert sources["svt"].eligibility.remote_llm == "conditional"
 
+    # The two gates must agree before anything is sent. `remote_llm` is the publisher's
+    # recorded position; `llm_processing` is the operator's policy. Exactly one Source has
+    # both, and it is the site the operator owns — every third-party publisher stays at
+    # `local_only` or below, whatever their evidence says.
+    remote_routed = {
+        source_id
+        for source_id, source in sources.items()
+        if source.llm_processing == "remote_allowed"
+    }
+    assert remote_routed == {"david"}
+
 
 @pytest.mark.security
 def test_reality_check_svt_basis_cites_its_published_content_signal() -> None:
@@ -431,12 +442,13 @@ def _scheduled_generate_command() -> list[str]:
 
 
 @pytest.mark.security
-def test_scheduled_workflow_names_a_publication_that_exists_and_makes_no_llm_call() -> None:
+def test_scheduled_workflow_names_a_publication_that_exists_and_can_run_unattended() -> None:
     """The one run nobody watches must not drift away from the configuration it names.
 
-    Renaming the Publication, moving the configuration file, or enabling editorial on the
-    scheduled Publication would each surface only as a 04:00 failure — or, worse, as an
-    unattended LLM call nobody decided to make. All three fail here instead.
+    Renaming the Publication or moving the configuration file would surface only as a 04:00
+    failure. So would enabling the local editorial route: a GitHub-hosted runner has no
+    Ollama, so a scheduled Publication that asks for it degrades silently to no summaries
+    every morning. Both fail here instead.
     """
 
     command = _scheduled_generate_command()
@@ -448,8 +460,118 @@ def test_scheduled_workflow_names_a_publication_that_exists_and_makes_no_llm_cal
         (item for item in configuration.publications if item.id == publication_id), None
     )
     assert publication is not None, f"{config_path} defines no Publication {publication_id!r}"
-    assert publication.editorial is None or not publication.editorial.enabled
+    if publication.editorial is not None and publication.editorial.enabled:
+        assert publication.editorial.remote_processing, "a hosted runner has no local model"
+        assert publication.editorial.provider in configuration.remote_providers
 
     # State persistence is what keeps a daily run from re-delivering yesterday's reading. A
     # scheduled run without it is worse than no scheduled run at all.
     assert "--state-environment" in command
+
+
+REMOTE_EDITORIAL_CONFIG = """
+version: 1
+remote_providers:
+  openai:
+    training_opt_in: {training_opt_in}
+    store: {store}
+    max_abuse_retention_days: 30
+    tools: none
+sources:
+  source-one:
+    title: Source one
+    feed_url: https://example.com/feed.xml
+publications:
+  - id: publication-one
+    title: Publication one
+    editorial:
+      enabled: true
+      remote_processing: {remote_processing}
+      provider: {provider}
+      model_pair:
+        editorial_model: gpt-5.4-2026-03-05
+        verifier_model: gpt-5.4-mini-2026-03-17
+        editorial_prompt_version: article-summary-v1
+        verifier_prompt_version: evidence-check-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      cost_envelope: {{max_calls: 8, max_tokens: 12000}}
+    sections:
+      - id: section-one
+        title: Section one
+        sources: [source-one]
+"""
+
+
+def _remote_editorial_config(
+    tmp_path: Path,
+    *,
+    training_opt_in: str = "false",
+    store: str = "false",
+    provider: str = "openai",
+    remote_processing: str = "true",
+) -> Path:
+    path = tmp_path / "remote-editorial.yaml"
+    path.write_text(
+        REMOTE_EDITORIAL_CONFIG.format(
+            training_opt_in=training_opt_in,
+            store=store,
+            provider=provider,
+            remote_processing=remote_processing,
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.security
+def test_editorial_preflight_accepts_a_private_remote_provider_profile(tmp_path: Path) -> None:
+    configuration = load_config(_remote_editorial_config(tmp_path))
+    editorial = configuration.publications[0].editorial
+
+    assert editorial is not None
+    assert editorial.remote_processing is True
+    assert editorial.provider == "openai"
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("training_opt_in", "true"), ("store", "true")],
+)
+def test_editorial_preflight_refuses_a_provider_profile_that_keeps_the_text(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """The privacy gate is at load, before a Source is fetched — not at call time.
+
+    A profile that opts in to training, or that stores responses on the provider's side,
+    cannot be corrected once Article text has been sent, so the configuration never loads.
+    """
+
+    path = _remote_editorial_config(tmp_path, **{field: value})
+
+    with pytest.raises(ConfigError):
+        load_config(path)
+
+
+@pytest.mark.security
+@pytest.mark.parametrize(
+    ("provider", "remote_processing"),
+    [("ollama", "true"), ("openai", "false")],
+)
+def test_editorial_refuses_a_route_that_contradicts_its_provider(
+    tmp_path: Path, provider: str, remote_processing: str
+) -> None:
+    """`remote_processing` states which route the provider is, and must agree with it.
+
+    A configuration claiming local processing through a remote provider — or the reverse —
+    is a configuration that disagrees with itself about whether Article text leaves the
+    machine, which is the one ambiguity that must never load.
+    """
+
+    path = _remote_editorial_config(
+        tmp_path, provider=provider, remote_processing=remote_processing
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(path)
