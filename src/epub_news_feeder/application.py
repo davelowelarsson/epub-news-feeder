@@ -19,6 +19,7 @@ from epub_news_feeder.acquisition import (
 )
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
+from epub_news_feeder.drive import DriveClient, DriveError, deliver_drive
 from epub_news_feeder.editorial import ArticleEvidence, generate_editorial
 from epub_news_feeder.epub import (
     ArticleInput,
@@ -77,6 +78,14 @@ class RetryableGenerationError(GenerationError):
 
 
 @dataclass(frozen=True, slots=True)
+class DriveTarget:
+    """An opt-in additional Delivery Target; local delivery always happens first."""
+
+    client: DriveClient
+    folder_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationResult:
     receipt: DeliveryReceipt
     article_count: int
@@ -131,6 +140,7 @@ def generate_edition(
     generated_at: datetime,
     publication_id: str | None = None,
     epubcheck_jar: Path | None = None,
+    drive_target: DriveTarget | None = None,
 ) -> GenerationResult:
     publication = _publication(configuration, publication_id)
     edition_id = f"{publication.id}@{generated_at.strftime('%Y-%m-%dT%H:%M:%SZ')}"
@@ -145,7 +155,7 @@ def generate_edition(
                 "RUN_STATE_FAILED", "Run state could not be initialized"
             ) from error
         try:
-            return _run(
+            result = _run(
                 configuration,
                 publication,
                 state,
@@ -156,6 +166,9 @@ def generate_edition(
                 output_directory,
                 epubcheck_jar,
             )
+            if drive_target is not None:
+                _deliver_to_drive(result, drive_target, diagnostics)
+            return result
         except RetryableGenerationError as error:
             with suppress(OSError):
                 diagnostics.emit(error.code, phase="run", outcome="pending")
@@ -171,6 +184,32 @@ def generate_edition(
             with suppress(OSError):
                 diagnostics.emit("GENERATION_FAILED", phase="run", outcome="failed")
             raise GenerationError("GENERATION_FAILED", "Edition generation failed") from error
+
+
+def _deliver_to_drive(
+    result: GenerationResult, drive_target: DriveTarget, diagnostics: Diagnostics
+) -> None:
+    """Deliver the already-locally-delivered Edition to Drive as an additional target.
+
+    Local delivery has already completed by the time this runs. A Drive failure must not
+    abandon the Run: it raises RetryableGenerationError so the validated, already-delivered
+    Edition remains available for a retry to reconcile, mirroring the local-delivery-pending
+    path.
+    """
+
+    try:
+        receipt = deliver_drive(
+            result.receipt.path.read_bytes(),
+            client=drive_target.client,
+            folder_id=drive_target.folder_id,
+            filename=result.receipt.path.name,
+        )
+    except (DriveError, OSError, ValueError) as error:
+        raise RetryableGenerationError(
+            "DRIVE_DELIVERY_PENDING", "Validated Drive Delivery remains pending"
+        ) from error
+    with suppress(OSError):
+        diagnostics.emit("DRIVE_DELIVERED", phase="delivery", digest=receipt.sha256)
 
 
 def _run(
