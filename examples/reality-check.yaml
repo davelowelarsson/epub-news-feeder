@@ -124,3 +124,17 @@ publications:
       - id: current
         title: Current reporting
         sources: [david, ars, svt, ekot]
+  # The scheduled Edition. It shares the Sources above rather than restating them, so a
+  # rights review recorded once governs both Publications and cannot drift between them.
+  # No editorial block: a GitHub-hosted runner has no Ollama, and the deterministic core
+  # is the whole of what runs unattended today.
+  - id: daily
+    title: Daily News
+    language: en
+    budget:
+      max_articles: 8
+      min_articles: 1
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [david, ars, svt, ekot]

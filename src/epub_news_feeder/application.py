@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
@@ -610,7 +611,9 @@ def _run(
     )
     output_directory.mkdir(parents=True, exist_ok=True)
     output_directory.chmod(0o700)
-    filename = f"epub-news--{generated_at.strftime('%Y-%m-%dT%H%M%SZ')}--{run_id}.epub"
+    filename = edition_filename(
+        publication_id=publication.id, generated_at=generated_at, run_id=run_id
+    )
     spool_directory = state.path.parent / "pending-editions"
     spool_directory.mkdir(parents=True, exist_ok=True)
     spool_directory.chmod(0o700)
@@ -702,6 +705,28 @@ def _run(
     )
 
 
+_MAXIMUM_SLUG_LENGTH = 20
+
+
+def edition_filename(*, publication_id: str, generated_at: datetime, run_id: str) -> str:
+    """Name a Delivery Copy date-first, so a reader sees the date before the name is cut.
+
+    A Kobo shows a filename truncated from the right, and the Drive folder is read by eye:
+    the date is the one part that must always survive, the Publication next, and the Run's
+    random suffix last — it exists only to keep two Editions of one day from colliding.
+    """
+
+    slug = _slugify(publication_id)[:_MAXIMUM_SLUG_LENGTH].strip("-") or "edition"
+    return f"{generated_at.strftime('%Y-%m-%d')}-{slug}-{run_id.rsplit('-', 1)[-1]}.epub"
+
+
+def _slugify(value: str) -> str:
+    """Fold to ASCII (so ``väder`` becomes ``vader``) and keep only filename-safe runs."""
+
+    folded = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "-", folded.casefold()).strip("-")
+
+
 def _resume_spooled_delivery(
     state: StateStore,
     diagnostics: Diagnostics,
@@ -714,7 +739,9 @@ def _resume_spooled_delivery(
     pending = state.pending_deliveries(publication.id)
     current = next((delivery for delivery in pending if delivery.run_id == run_id), None)
     spool_path = state.path.parent / "pending-editions" / f"{run_id}.epub"
-    filename = f"epub-news--{generated_at.strftime('%Y-%m-%dT%H%M%SZ')}--{run_id}.epub"
+    filename = edition_filename(
+        publication_id=publication.id, generated_at=generated_at, run_id=run_id
+    )
     target = output_directory / filename
     status, delivered_digest = state.run_delivery_status(run_id)
     if status == "delivered":

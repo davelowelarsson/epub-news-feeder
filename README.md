@@ -47,6 +47,32 @@ uv run epub-news-feeder ollama-check --model gemma4:e4b-mlx
 
 Set `editorial.enabled: false` for the fully deterministic no-LLM path.
 
+## The scheduled Edition
+
+`.github/workflows/daily-edition.yml` builds one Edition every day at 04:00 UTC — 06:00 in
+Stockholm through the summer, 05:00 through the winter, since GitHub cron does not observe DST.
+It runs the `daily` Publication of `examples/reality-check.yaml`: the deterministic core, with no
+LLM call at all, because a hosted runner has no Ollama.
+
+A hosted runner also starts with an empty disk, so the State Store is restored from Google Drive
+before the run and saved back after delivery. Without it every morning would re-deliver the
+same reading. Runs queue rather than overlap (`concurrency: edition`, never cancelled): a
+cancelled run can deliver an Edition whose state was never saved.
+
+Six repository secrets, named identically to the local `.env` keys — no mapping layer:
+
+| Secret | Purpose |
+| --- | --- |
+| `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `GOOGLE_OAUTH_REFRESH_TOKEN` | Desktop OAuth client, `drive.file` scope only |
+| `GOOGLE_DRIVE_FOLDER_ID` | Where Editions land, inside the folder that syncs to the device |
+| `GOOGLE_DRIVE_FOLDER_DB` | The State Store archive, outside the synced tree |
+| `OPENAI_API_KEY` | Reserved for remote editorial; nothing reads it yet |
+
+Delivery Copies are named `<date>-<publication>-<run>.epub`, date first, because a reader that
+truncates a long filename truncates it from the right.
+
+Run it by hand from the Actions tab (`workflow_dispatch`) before trusting the schedule.
+
 ## Quality gate
 
 ```bash
@@ -60,9 +86,8 @@ uv run pytest
 CI runs this exact gate — `.github/workflows/quality-gate.yml` executes the same four commands
 against a verified EPUBCheck 5.3.0, so the local gate and CI cannot drift.
 
-Implementation follows the project specification in GitHub issue #16. Google Drive, scheduled
-private state, physical Kobo acceptance, and OpenAI editorial integration remain subsequent
-milestones.
+Implementation follows the project specification in GitHub issue #16. Physical Kobo acceptance
+and OpenAI editorial integration remain subsequent milestones.
 
 ## Prototypes
 
