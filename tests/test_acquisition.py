@@ -17,6 +17,7 @@ from epub_news_feeder.acquisition import (
     SourceClient,
     SourceRequest,
     _decoded_feed,
+    _html_blocks,
 )
 
 
@@ -878,3 +879,45 @@ def test_a_feed_that_is_honestly_another_encoding_still_reaches_the_parser_as_by
     ).encode("latin-1")
 
     assert isinstance(_decoded_feed(payload), bytes)
+
+
+def _blocks(fragment: str) -> tuple[str, ...]:
+    return tuple(block.text for block in _html_blocks(fragment))
+
+
+def test_a_fixture_table_rendered_as_a_list_is_not_body_text() -> None:
+    """Observed live: an SVT Sport report ended in a hundred four-word list items - a whole
+    season's results - which read as three pages of nothing after the actual report."""
+
+    fixtures = "".join(f"<li>Pitea vs Hacken {day}/8</li>" for day in range(1, 41))
+    fragment = f"<div><p>Häcken gjorde processen kort med Piteå.</p><ul>{fixtures}</ul></div>"
+
+    assert _blocks(fragment) == ("Häcken gjorde processen kort med Piteå.",)
+
+
+def test_a_short_list_a_reader_wants_survives() -> None:
+    steps = "".join(f"<li>Step {index}</li>" for index in range(1, 6))
+    fragment = f"<div><p>Do this.</p><ol>{steps}</ol></div>"
+
+    assert _blocks(fragment) == ("Do this.", *[f"Step {index}" for index in range(1, 6)])
+
+
+def test_a_long_list_of_substantial_items_survives() -> None:
+    """Length alone must not condemn a list — only a long run of uniformly tiny items."""
+
+    items = "".join(
+        f"<li>Point {index} explains something at a length a reader would actually "
+        f"read, running well past a scoreline.</li>"
+        for index in range(1, 21)
+    )
+    fragment = f"<div><ul>{items}</ul></div>"
+
+    assert len(_blocks(fragment)) == 20
+
+
+def test_a_bare_all_capitals_label_is_not_body_text() -> None:
+    """Observed live: Open Source Malware articles opened with a styled bare "BLOG"."""
+
+    fragment = "<div><p>BLOG</p><p>A new npm worm hit Keyv and cacheable this week.</p></div>"
+
+    assert _blocks(fragment) == ("A new npm worm hit Keyv and cacheable this week.",)

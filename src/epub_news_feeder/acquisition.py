@@ -197,7 +197,7 @@ def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[Bod
         if text:
             blocks.append(BodyBlock(_block_kind(element, text), text))
     if blocks or not fallback_to_root_text:
-        return tuple(blocks)
+        return _without_furniture(tuple(blocks))
     fallback = " ".join(root.text_content().split())
     return (BodyBlock("paragraph", fallback),) if fallback else ()
 
@@ -225,6 +225,62 @@ def _has_full_article_cta(fragment: str) -> bool:
         and " ".join(paragraph.text_content().split()).casefold() == "read full article"
         for paragraph in paragraphs
     )
+
+
+_MAXIMUM_LIST_RUN = 12
+_SHORT_LIST_ITEM_WORDS = 8
+
+
+def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
+    """Drop the two kinds of publisher furniture that read as body text but are not.
+
+    A first cut, deliberately narrow — the general question of separating article text
+    from furniture is open (issue #85). These two were observed corrupting a delivered
+    Edition and have signatures precise enough to act on now:
+
+    - **Fixture tables.** An SVT Sport report ended in a hundred consecutive list items of
+      four words each - a whole season's results, one scoreline per item - rendered as
+      prose. A long run of uniformly tiny list items is a table, not a list a reader wants.
+      A numbered how-to is short, and a genuine list of substantial items has long items,
+      so both survive.
+    - **Section labels.** A bare ``BLOG`` on its own, which is a heading the page styles
+      and a reader cannot place.
+    """
+
+    kept: list[BodyBlock] = []
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        if block.kind != "list":
+            if not _is_bare_label(block):
+                kept.append(block)
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(blocks) and blocks[run_end].kind == "list":
+            run_end += 1
+        run = blocks[index:run_end]
+        if not _is_tabular_run(run):
+            kept.extend(item for item in run if not _is_bare_label(item))
+        index = run_end
+    return tuple(kept)
+
+
+def _is_tabular_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A long run of uniformly tiny list items is a table rendered as a list."""
+
+    if len(run) <= _MAXIMUM_LIST_RUN:
+        return False
+    lengths = sorted(len(item.text.split()) for item in run)
+    median = lengths[len(lengths) // 2]
+    return median <= _SHORT_LIST_ITEM_WORDS
+
+
+def _is_bare_label(block: BodyBlock) -> bool:
+    """A single all-capitals token is a styled section heading, not a sentence."""
+
+    text = block.text.strip()
+    return len(text) <= 12 and text.isupper() and len(text.split()) == 1
 
 
 def _decoded_feed(payload: bytes) -> str | bytes:

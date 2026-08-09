@@ -119,8 +119,11 @@ sources:
     title: Runner's World Sverige
     default_article_language: sv
     publisher_id: runnersworld.se
-    allowed_publisher_origins: [https://www.runnersworld.se]
-    feed_url: https://www.runnersworld.se/feed
+    # The www host 301s to the apex for both robots.txt and the feed, and a redirected
+    # robots fetch is treated as unavailable rather than followed — deliberately, so a
+    # redirect cannot be used to reach a different site's rules. Address the apex directly.
+    allowed_publisher_origins: [https://runnersworld.se, https://www.runnersworld.se]
+    feed_url: https://runnersworld.se/feed/
     acquisition: auto
     llm_processing: disabled
     rights:
