@@ -52,6 +52,24 @@ are defined in `CONTEXT.md`.
   separately accepted diagram/image policy exists, it is omitted while the canonical publisher
   route remains available.
 
+## Body block rendering
+
+Acquisition classifies every unit of an Article's publisher body into a Body Block kind; rendering
+decides what to do with each kind. The two representations deliberately disagree on one thing: the
+plain-text body excludes diagram source, while the Body Blocks include it, so diagram source never
+reaches the revision hash, rule matching, or an LLM prompt, yet survives for a future renderer.
+
+- A `paragraph` block renders as a paragraph.
+- A `quote` block renders as a block quotation.
+- Consecutive `list` blocks render as one unordered list; an isolated `list` block renders as a
+  single-item list.
+- A `code` block renders monospace, one size step down, with `white-space: pre-wrap` and a hanging
+  indent on continuation lines, because e-ink cannot scroll horizontally and a long line must wrap
+  rather than clip.
+- A `diagram` block is retained in the data and omitted at render, preserving today's reader-visible
+  behavior while keeping the source available to a future renderer.
+- An unrecognised block kind is omitted; it is never rendered as text.
+
 ## Publisher Link Briefs
 
 - A Publisher Link Brief is a headline and a route back to its publisher. It does not reproduce or

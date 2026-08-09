@@ -13,6 +13,7 @@ from lxml import etree
 from epub_news_feeder.delivery import deliver_local
 from epub_news_feeder.epub import (
     ArticleInput,
+    BodyBlock,
     BriefInput,
     CorrectionInput,
     EditionInput,
@@ -207,7 +208,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "b6cb295a0648b9a2e3559ca743fc7f83b663ae40794405130f76d0977d7cd273"
+    assert receipt.sha256 == "ddc5111e1d9d882edbe5028f1bf7149b1d4f56715f968585cd9467d177d960f4"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -952,3 +953,107 @@ def test_cover_is_deterministic_and_greyscale_safe() -> None:
     # Only black, white and greys: colour never carries meaning on e-ink.
     colours = set(re.findall(r'(?:fill|stroke)="([^"]+)"', raw))
     assert colours <= {"none", "#000000", "#ffffff", "#f4f4f4", "#767676"}, colours
+
+
+def test_publisher_body_blocks_render_with_kind_specific_semantics() -> None:
+    article = replace(
+        _edition().sections[0].articles[0],
+        body=(
+            "Intro paragraph.\n\nA pull quote.\n\nFirst item.\n\nSecond item.\n\ngit status --short"
+        ),
+        blocks=(
+            BodyBlock("paragraph", "Intro paragraph."),
+            BodyBlock("quote", "A pull quote."),
+            BodyBlock("list", "First item."),
+            BodyBlock("list", "Second item."),
+            BodyBlock("code", "git status --short"),
+            BodyBlock("diagram", "flowchart TD task-->result"),
+        ),
+    )
+    edition = replace(_edition(), sections=(replace(_edition().sections[0], articles=(article,)),))
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+
+    publisher = cast(
+        list[etree._Element], section.xpath("//*[contains(@class, 'publisher-content')]")
+    )[0]
+    rendered = " ".join(text for text in publisher.itertext() if isinstance(text, str))
+    assert "flowchart" not in rendered
+    quote_paragraphs = cast(
+        list[etree._Element],
+        publisher.xpath(".//*[local-name()='blockquote']/*[local-name()='p']"),
+    )
+    assert [paragraph.text for paragraph in quote_paragraphs] == ["A pull quote."]
+    list_elements = cast(list[etree._Element], publisher.xpath(".//*[local-name()='ul']"))
+    assert len(list_elements) == 1
+    list_items = cast(list[etree._Element], list_elements[0].xpath("./*[local-name()='li']"))
+    assert [item.text for item in list_items] == ["First item.", "Second item."]
+    code_blocks = cast(list[etree._Element], publisher.xpath(".//*[local-name()='pre']"))
+    assert [block.text for block in code_blocks] == ["git status --short"]
+    assert code_blocks[0].get("class") == "publisher-code"
+    assert publisher.xpath(".//*[local-name()='a']/@href") == ["https://example.test/articles/1"]
+
+
+def test_isolated_list_block_renders_as_a_single_item_list() -> None:
+    article = replace(
+        _edition().sections[0].articles[0],
+        blocks=(
+            BodyBlock("paragraph", "Before."),
+            BodyBlock("list", "Only item."),
+            BodyBlock("paragraph", "After."),
+        ),
+    )
+    edition = replace(_edition(), sections=(replace(_edition().sections[0], articles=(article,)),))
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+
+    lists = cast(list[etree._Element], section.xpath("//*[local-name()='ul']"))
+    assert len(lists) == 1
+    items = cast(list[etree._Element], lists[0].xpath("./*[local-name()='li']"))
+    assert [item.text for item in items] == ["Only item."]
+
+
+def test_unrecognised_body_block_kind_is_omitted_never_rendered_as_text() -> None:
+    article = replace(
+        _edition().sections[0].articles[0],
+        blocks=(
+            BodyBlock("paragraph", "Visible paragraph."),
+            BodyBlock("table", "Should never appear."),
+        ),
+    )
+    edition = replace(_edition(), sections=(replace(_edition().sections[0], articles=(article,)),))
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        rendered = archive.read(section_path).decode()
+
+    assert "Visible paragraph." in rendered
+    assert "Should never appear." not in rendered
+
+
+@pytest.mark.epubcheck
+def test_diagram_block_is_omitted_but_canonical_route_remains_and_epub_validates() -> None:
+    article = replace(
+        _edition().sections[0].articles[0],
+        blocks=(
+            BodyBlock("paragraph", "Reported context."),
+            BodyBlock("diagram", "flowchart TD a-->b"),
+        ),
+    )
+    edition = replace(_edition(), sections=(replace(_edition().sections[0], articles=(article,)),))
+
+    epub_bytes = build_epub(edition)
+    validate_epub(epub_bytes)
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+
+    rendered = " ".join(text for text in section.itertext() if isinstance(text, str))
+    assert "flowchart" not in rendered
+    assert section.xpath(
+        "//*[local-name()='a' and text()='Read full article at publisher']/@href"
+    ) == ["https://example.test/articles/1"]

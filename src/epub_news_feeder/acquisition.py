@@ -54,6 +54,14 @@ class SourceRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BodyBlock:
+    """One classified unit of publisher body text; rendering decides its treatment."""
+
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class AcquiredArticle:
     source_id: str
     publisher_id: str
@@ -66,6 +74,7 @@ class AcquiredArticle:
     categories: tuple[str, ...]
     language: str | None
     body: str | None
+    blocks: tuple[BodyBlock, ...]
     classification: str
 
 
@@ -137,33 +146,37 @@ def _parse_robots(body: str) -> _RobotsRules:
     return _RobotsRules(tuple(groups))
 
 
-def _html_text(fragment: str) -> str:
-    try:
-        root = html.fragment_fromstring(fragment, create_parent="div")
-    except (ValueError, TypeError):
-        return ""
+_DIAGRAM_PREFIXES = (
+    "flowchart ",
+    "graph ",
+    "sequencediagram",
+    "classdiagram",
+    "statediagram",
+    "erdiagram",
+    "journey ",
+    "gantt ",
+    "pie ",
+)
+
+
+def _block_kind(element: HtmlElement, text: str) -> str:
+    if element.tag == "blockquote":
+        return "quote"
+    if element.tag == "li":
+        return "list"
+    if element.tag == "pre":
+        if element.xpath("./code") and text.casefold().startswith(_DIAGRAM_PREFIXES):
+            return "diagram"
+        return "code"
+    return "paragraph"
+
+
+def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[BodyBlock, ...]:
     unwanted = cast(
         list[HtmlElement], root.xpath(".//script|.//style|.//nav|.//footer|.//aside|.//form")
     )
     for element in unwanted:
         element.drop_tree()
-    code_blocks = cast(list[HtmlElement], root.xpath(".//pre[code]"))
-    for block in code_blocks:
-        code = " ".join(block.text_content().split()).casefold()
-        if code.startswith(
-            (
-                "flowchart ",
-                "graph ",
-                "sequencediagram",
-                "classdiagram",
-                "statediagram",
-                "erdiagram",
-                "journey ",
-                "gantt ",
-                "pie ",
-            )
-        ):
-            block.drop_tree()
     terminal_controls = cast(
         list[HtmlElement],
         root.xpath(".//p[count(*) = 1 and a and not(normalize-space(text())) and not(a/*)]"),
@@ -174,15 +187,31 @@ def _html_text(fragment: str) -> str:
             "comments",
         }:
             paragraph.drop_tree()
-    blocks = cast(
+    elements = cast(
         list[HtmlElement],
         root.xpath(".//p | .//blockquote | .//li[not(.//p)] | .//pre"),
     )
-    paragraphs = [" ".join(block.text_content().split()) for block in blocks]
-    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
-    if paragraphs:
-        return "\n\n".join(paragraphs)
-    return " ".join(root.text_content().split())
+    blocks: list[BodyBlock] = []
+    for element in elements:
+        text = " ".join(element.text_content().split())
+        if text:
+            blocks.append(BodyBlock(_block_kind(element, text), text))
+    if blocks or not fallback_to_root_text:
+        return tuple(blocks)
+    fallback = " ".join(root.text_content().split())
+    return (BodyBlock("paragraph", fallback),) if fallback else ()
+
+
+def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
+    try:
+        root = html.fragment_fromstring(fragment, create_parent="div")
+    except (ValueError, TypeError):
+        return ()
+    return _root_blocks(root, fallback_to_root_text=True)
+
+
+def _body_text(blocks: tuple[BodyBlock, ...]) -> str:
+    return "\n\n".join(block.text for block in blocks if block.kind != "diagram")
 
 
 def _has_full_article_cta(fragment: str) -> bool:
@@ -198,7 +227,9 @@ def _has_full_article_cta(fragment: str) -> bool:
     )
 
 
-def _page_content(document: bytes, base_url: httpx.URL) -> tuple[str, str | None]:
+def _page_content(
+    document: bytes, base_url: httpx.URL
+) -> tuple[str, tuple[BodyBlock, ...], str | None]:
     root = cast(HtmlElement, html.fromstring(document))
     canonical_values = cast(
         list[str],
@@ -221,13 +252,8 @@ def _page_content(document: bytes, base_url: httpx.URL) -> tuple[str, str | None
         containers = cast(list[HtmlElement], root.xpath("//main"))
     if not containers:
         containers = [root]
-    paragraphs: list[str] = []
-    for container in containers[:1]:
-        for paragraph in cast(list[HtmlElement], container.xpath(".//p")):
-            value = " ".join(paragraph.text_content().split())
-            if value:
-                paragraphs.append(value)
-    return "\n\n".join(paragraphs), canonical_url
+    blocks = _root_blocks(containers[0], fallback_to_root_text=False)
+    return _body_text(blocks), blocks, canonical_url
 
 
 def _entry_datetime(value: object) -> datetime | None:
@@ -512,10 +538,12 @@ class SourceClient:
                 categories,
                 language,
                 None,
+                (),
                 "metadata_only",
             )
 
         body: str | None = None
+        blocks: tuple[BodyBlock, ...] = ()
         classification: str | None = None
         content = entry.get("content")
         if request.mode in {AcquisitionMode.FEED, AcquisitionMode.AUTO} and isinstance(
@@ -524,16 +552,25 @@ class SourceClient:
             for item in content:
                 if isinstance(item, Mapping):
                     fragment = str(item.get("value", ""))
-                    candidate = _html_text(fragment)
+                    candidate_blocks = _html_blocks(fragment)
+                    candidate = _body_text(candidate_blocks)
                     if request.mode == AcquisitionMode.AUTO and _has_full_article_cta(fragment):
                         continue
                     if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
                         continue
                     if len(candidate.split()) >= request.minimum_full_words:
-                        body, classification = candidate, "verified_feed_body"
+                        body, blocks, classification = (
+                            candidate,
+                            candidate_blocks,
+                            "verified_feed_body",
+                        )
                         break
                     if candidate and request.allow_short_as_published:
-                        body, classification = candidate, "short_as_published"
+                        body, blocks, classification = (
+                            candidate,
+                            candidate_blocks,
+                            "short_as_published",
+                        )
                         break
         if body is None and request.mode in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
             try:
@@ -544,7 +581,7 @@ class SourceClient:
                 )
             except _RouteDenied:
                 return None
-            candidate, canonical = _page_content(response.content, response.url)
+            candidate, candidate_blocks, canonical = _page_content(response.content, response.url)
             if canonical is not None:
                 try:
                     canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
@@ -562,9 +599,9 @@ class SourceClient:
             if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
                 return None
             if len(candidate.split()) >= request.minimum_full_words:
-                body, classification = candidate, "verified_page_body"
+                body, blocks, classification = candidate, candidate_blocks, "verified_page_body"
             elif candidate and request.allow_short_as_published:
-                body, classification = candidate, "short_as_published"
+                body, blocks, classification = candidate, candidate_blocks, "short_as_published"
         if body is None or classification is None:
             return None
         return AcquiredArticle(
@@ -579,6 +616,7 @@ class SourceClient:
             categories,
             language,
             body,
+            blocks,
             classification,
         )
 
