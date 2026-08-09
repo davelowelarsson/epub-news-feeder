@@ -72,6 +72,14 @@ _Avoid_: Duplicate, summary
 A timestamped observation of an Article’s normalized body. Multiple Content Revisions retain one Article identity and distinguish unchanged, minor, and material updates.
 _Avoid_: New article, duplicate
 
+**Delivered Revision**:
+The Content Revision most recently delivered for an Article within one Publication. It is the reader-relative baseline for deciding whether accumulated changes are material.
+_Avoid_: Latest fetch, global revision
+
+**Correction Signal**:
+An explicit publisher correction or retraction, or an operator instruction, that makes an Article eligible despite a smaller-than-material Content Revision.
+_Avoid_: Modified timestamp, minor edit
+
 **Discovery Provenance**:
 The Sources, URLs, and source identifiers through which an Article was discovered. Equivalent content may carry multiple provenances while appearing once in an Edition.
 _Avoid_: Duplicate source
@@ -81,8 +89,20 @@ A temporary claim that prevents an Article from entering another Edition while a
 _Avoid_: Published article, lock
 
 **Story Cluster**:
-A group of Articles from one or more Sources that cover the same real-world development.
-_Avoid_: Merged article
+A non-selectable grouping of distinct Articles covering the same concrete real-world development. Its continuity never makes an unchanged Article eligible again.
+_Avoid_: Merged article, topic
+
+**Story Hub**:
+A reader-facing navigation page for one Story Cluster, presenting its current Articles and compact metadata pointers to prior coverage without repeating old Article bodies.
+_Avoid_: Article, shared section, archive
+
+**Cluster Override**:
+A private operator decision that corrects future Story Cluster membership while leaving delivered Editions unchanged.
+_Avoid_: Feedback Signal, rewritten history
+
+**Coverage Timeline**:
+The Publication-specific history of distinct delivered Articles associated with a Story Cluster. It is separate from the Environment-wide identity and membership of the cluster.
+_Avoid_: Article revision history, global cluster history
 
 **Coverage Policy**:
 A Section selection policy that prioritizes broad, plural current-affairs coverage. It is the inherited default when no policy is configured.
@@ -140,13 +160,21 @@ _Avoid_: Dislike, negative feedback
 A minimal reader-facing notice in an Edition describing omitted content or degraded generation without internal diagnostic detail. Repeated failures are aggregated by Source, Section, and category.
 _Avoid_: Error, stack trace
 
+**Correction Notice**:
+A required reader-facing notice that carries a publisher’s explicit correction or retraction for an Article previously delivered by the Publication, even when the current Article is not selected again.
+_Avoid_: Publication Note, rewritten correction
+
 **Diagnostic Event**:
 A structured private observation emitted during a Run, carrying enough sanitized context to understand and reproduce an operational outcome.
 _Avoid_: Log line, Publication Note
 
 **Editorial Addition**:
-Clearly labelled generated prose, such as an Article Summary or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
+Clearly labelled generated prose, such as an Article Summary, Revision Summary, or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
 _Avoid_: Article, journalism, objective summary
+
+**Revision Summary**:
+An optional verified Editorial Addition that explains material differences between a Delivered Revision and a newer Content Revision, including why the Article appears again.
+_Avoid_: Publisher correction, deterministic diff
 
 **Run ID**:
 A portable identifier created for one generation attempt before validation, correlating its output, Publication Notes, diagnostics, workflow run, and provider requests.
