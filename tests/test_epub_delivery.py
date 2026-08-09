@@ -1057,3 +1057,88 @@ def test_diagram_block_is_omitted_but_canonical_route_remains_and_epub_validates
     assert section.xpath(
         "//*[local-name()='a' and text()='Read full article at publisher']/@href"
     ) == ["https://example.test/articles/1"]
+
+
+def _about_ai(epub_bytes: bytes) -> str:
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        document = etree.fromstring(archive.read("OEBPS/about-ai-summaries.xhtml"))
+    return " ".join(" ".join(text for text in document.itertext() if isinstance(text, str)).split())
+
+
+def _summarised_article() -> ArticleInput:
+    return replace(
+        _edition().sections[0].articles[0],
+        editorial_summary=EditorialSummaryInput(
+            (EditorialSentenceInput("A generated orientation.", ()),)
+        ),
+    )
+
+
+def test_end_matter_names_the_sources_excluded_from_summaries() -> None:
+    edition = replace(
+        _edition(),
+        sections=(replace(_edition().sections[0], articles=(_summarised_article(),)),),
+        editorial_excluded_sources=("Ars Technica",),
+    )
+
+    rendered = _about_ai(build_epub(edition))
+
+    assert "Ars Technica" in rendered
+    # Factual, not a complaint about the publisher.
+    assert "refuse" not in rendered.casefold()
+    assert "unfortunately" not in rendered.casefold()
+
+
+def test_no_excluded_source_means_no_exclusion_line() -> None:
+    edition = replace(
+        _edition(),
+        sections=(replace(_edition().sections[0], articles=(_summarised_article(),)),),
+    )
+
+    rendered = _about_ai(build_epub(edition))
+
+    assert "not generated" not in rendered.casefold()
+    assert "Ars Technica" not in rendered
+
+
+def test_end_matter_appears_for_an_excluded_source_even_with_no_summary() -> None:
+    edition = replace(_edition(), editorial_excluded_sources=("Ars Technica",))
+
+    epub_bytes = build_epub(edition)
+
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        assert "OEBPS/about-ai-summaries.xhtml" in archive.namelist()
+    assert "Ars Technica" in _about_ai(epub_bytes)
+
+
+def test_no_summaries_and_no_exclusions_omits_the_end_matter() -> None:
+    with ZipFile(BytesIO(build_epub(_edition()))) as archive:
+        assert "OEBPS/about-ai-summaries.xhtml" not in archive.namelist()
+
+
+def test_excluded_sources_carry_no_per_article_marker() -> None:
+    edition = replace(
+        _edition(),
+        sections=(replace(_edition().sections[0], articles=(_summarised_article(),)),),
+        editorial_excluded_sources=("Ars Technica",),
+    )
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = archive.read(section_path).decode()
+
+    assert "Ars Technica" not in section
+
+
+def test_exclusion_line_follows_the_publication_language() -> None:
+    edition = replace(
+        _edition(),
+        language="sv",
+        sections=(replace(_edition().sections[0], articles=(_summarised_article(),)),),
+        editorial_excluded_sources=("Ars Technica",),
+    )
+
+    rendered = _about_ai(build_epub(edition))
+
+    assert "Sammanfattningar" in rendered
+    assert "Ars Technica" in rendered

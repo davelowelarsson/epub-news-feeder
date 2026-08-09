@@ -156,6 +156,7 @@ class EditionInput:
     notes: tuple[str, ...] = ()
     corrections: tuple[CorrectionInput, ...] = ()
     briefs: tuple[BriefInput, ...] = ()
+    editorial_excluded_sources: tuple[str, ...] = ()
     edition_date: str = "1980-01-01"
     modified_at: str = "1980-01-01T00:00:00Z"
 
@@ -656,6 +657,13 @@ def _about_ai_document(edition: EditionInput) -> bytes:
     heading.text = _localized(edition.language, "about_ai")
     paragraph = etree.SubElement(section, f"{{{_XHTML_NS}}}p")
     paragraph.text = _localized(edition.language, "ai_method")
+    if edition.editorial_excluded_sources:
+        excluded = etree.SubElement(section, f"{{{_XHTML_NS}}}p")
+        excluded.text = _localized(
+            edition.language,
+            "ai_excluded",
+            sources=", ".join(edition.editorial_excluded_sources),
+        )
     return _serialize(html)
 
 
@@ -1074,7 +1082,13 @@ def _serialize(element: etree._Element) -> bytes:
 
 
 def _has_editorial_summaries(edition: EditionInput) -> bool:
-    return any(
+    """Whether the AI end matter belongs in this Edition.
+
+    It appears when a summary was generated, and also when a Source was excluded but produced
+    none — otherwise the disclosure disappears in exactly the case it exists to explain.
+    """
+
+    return bool(edition.editorial_excluded_sources) or any(
         article.editorial_summary is not None
         for section in edition.sections
         for article in section.articles
@@ -1087,6 +1101,10 @@ _ENGLISH_LABELS = {
         "AI summaries are generated from cited publisher reporting and independently "
         "checked by a local verifier. Citation links identify the reporting used for each "
         "sentence."
+    ),
+    "ai_excluded": (
+        "Summaries are not generated for reporting from {sources}, whose publishers do not "
+        "permit it."
     ),
     "ai_summary": "AI-generated summary",
     "also_in_edition": "Also in this Edition",
@@ -1135,6 +1153,10 @@ _SWEDISH_LABELS = {
         "AI-sammanfattningar skapas från citerad publicistisk text och granskas "
         "oberoende av en lokal verifierare. Citatlänkarna visar vilket underlag som "
         "användes för varje mening."
+    ),
+    "ai_excluded": (
+        "Sammanfattningar skapas inte för rapportering från {sources}, vars publicister inte "
+        "tillåter det."
     ),
     "ai_summary": "AI-genererad sammanfattning",
     "also_in_edition": "Även i den här utgåvan",

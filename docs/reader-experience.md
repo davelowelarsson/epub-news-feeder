@@ -41,6 +41,11 @@ are defined in `CONTEXT.md`.
   publisher text begins under its own label and must not appear to continue the summary.
 - The short disclosure explaining generation and independent verification appears once in Edition
   end matter, not once per Article.
+- The end matter names the Sources in the Edition whose publishers do not permit generated
+  summaries, stated factually. A silently absent summary is otherwise indistinguishable from a
+  failed one, and a deliberate policy outcome would read as a defect. The end matter appears for an
+  excluded Source even when no summary was generated at all. There is no per-Article marker: that
+  would put chrome on every page of an affected Source.
 - Every generated sentence keeps descriptive publisher citations.
 - A summary must add orientation or compression. A proposal that substantially repeats the
   publisher lead without adding reader value is omitted.

@@ -462,6 +462,9 @@ def _run(
             for correction in state.pending_corrections(publication.id)
         ),
         briefs=tuple(briefs[item.brief_id].brief for item in selection.selected_briefs),
+        editorial_excluded_sources=_editorial_excluded_sources(
+            publication, configuration, records, selection.unique_article_ids
+        ),
         edition_date=generated_at.astimezone(UTC).date().isoformat(),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
@@ -1063,6 +1066,28 @@ def _editorial_batches(
         language = item.language.casefold().split("-", 1)[0]
         by_language.setdefault(language, []).append(item)
     return tuple((item,) for language in sorted(by_language) for item in by_language[language])
+
+
+def _editorial_excluded_sources(
+    publication: Publication,
+    configuration: Configuration,
+    records: dict[str, _SelectableRecord],
+    selected_ids: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Name the Sources in this Edition whose publishers do not permit generated summaries.
+
+    A silently absent summary is indistinguishable from a failed one, so a deliberate policy
+    outcome is stated once in end matter rather than marked on every Article.
+    """
+
+    if publication.editorial is None or not publication.editorial.enabled:
+        return ()
+    excluded = {
+        records[article_id].source_id
+        for article_id in selected_ids
+        if not _allows_local_editorial(configuration, records[article_id].source_id)
+    }
+    return tuple(sorted(configuration.sources[source_id].title for source_id in excluded))
 
 
 def _allows_local_editorial(configuration: Configuration, source_id: str) -> bool:
