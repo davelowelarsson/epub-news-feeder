@@ -18,6 +18,7 @@ from epub_news_feeder.application import RetryableGenerationError, generate_edit
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
 from epub_news_feeder.editorial import ArticleEvidence, StructuredCall
+from epub_news_feeder.ollama import CallUsage
 
 
 def test_editorial_evidence_is_batched_by_article_language() -> None:
@@ -472,6 +473,18 @@ publications:
         def __init__(self, **_kwargs: object) -> None:
             pass
 
+        def drain_usage(self) -> tuple[CallUsage, ...]:
+            return (
+                CallUsage(
+                    role="editorial",
+                    model="gemma4:12b-mlx",
+                    total_duration_ms=4500,
+                    load_duration_ms=500,
+                    input_tokens=1200,
+                    output_tokens=90,
+                ),
+            )
+
         def complete(self, call: StructuredCall) -> object:
             if call.role == "editorial":
                 articles = cast(list[dict[str, object]], call.input["articles"])
@@ -517,6 +530,16 @@ publications:
     diagnostics = (tmp_path / "diagnostics" / "20260809T081000Z-DDDDDDDD.jsonl").read_text()
     assert "EDITORIAL_ACCEPTED" in diagnostics
     assert "The harbour investigation is continuing" not in diagnostics
+    measured = [
+        json.loads(line)
+        for line in diagnostics.splitlines()
+        if json.loads(line)["code"] == "EDITORIAL_MEASURED"
+    ]
+    assert measured, "the editorial path must record a body-free measurement"
+    assert measured[0]["input_tokens"] == 1200
+    assert measured[0]["output_tokens"] == 90
+    assert measured[0]["input_characters"] > 0
+    assert measured[0]["duration_ms"] >= 0
 
 
 @pytest.mark.acceptance

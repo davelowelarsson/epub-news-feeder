@@ -8,6 +8,7 @@ from epub_news_feeder.editorial import (
     ArticleEvidence,
     ModelPair,
     StructuredCall,
+    StructuredProviderError,
     generate_editorial,
 )
 
@@ -300,3 +301,42 @@ def test_same_model_cannot_propose_and_independently_verify_its_own_summary() ->
     assert result.evidence.status == "omitted"
     assert result.evidence.calls == 0
     assert provider.calls == []
+
+
+@pytest.mark.editorial
+def test_evidence_records_one_wall_clock_duration_for_every_provider_call() -> None:
+    provider = FakeProvider(
+        [
+            {
+                "summaries": [
+                    {
+                        "article_id": "article-1",
+                        "sentences": [
+                            {
+                                "text": "Two people were brought ashore during the search.",
+                                "citations": ["article-1"],
+                            }
+                        ],
+                    }
+                ]
+            },
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.evidence.status == "accepted"
+    assert len(result.evidence.call_durations_ms) == result.evidence.calls == 2
+    assert all(duration >= 0 for duration in result.evidence.call_durations_ms)
+
+
+@pytest.mark.editorial
+def test_evidence_records_durations_for_calls_made_before_a_provider_failure() -> None:
+    provider = FakeProvider([StructuredProviderError("provider is down")])
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.evidence.status == "omitted"
+    assert result.evidence.failure_code == "provider_failure"
+    assert len(result.evidence.call_durations_ms) == result.evidence.calls == 1

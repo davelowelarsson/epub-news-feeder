@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from ipaddress import ip_address
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -18,6 +19,18 @@ if TYPE_CHECKING:
 
 class OllamaError(StructuredProviderError):
     """Safe local provider failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class CallUsage:
+    """Body-free measurement of one local structured call."""
+
+    role: str
+    model: str
+    total_duration_ms: int
+    load_duration_ms: int
+    input_tokens: int
+    output_tokens: int
 
 
 _READY_SCHEMA: dict[str, Any] = {
@@ -41,6 +54,14 @@ class OllamaStructuredProvider:
         self._host = _local_host(host)
         self._timeout = timeout
         self._transport = transport
+        self._usage: list[CallUsage] = []
+
+    def drain_usage(self) -> tuple[CallUsage, ...]:
+        """Return measurements recorded since the previous drain, and clear them."""
+
+        drained = tuple(self._usage)
+        self._usage.clear()
+        return drained
 
     def complete(self, call: StructuredCall) -> object:
         """Return one parsed JSON response, or a safe provider error."""
@@ -79,7 +100,9 @@ class OllamaStructuredProvider:
                     },
                 )
                 response.raise_for_status()
-                return _structured_content(response)
+                content = _structured_content(response)
+                self._usage.append(_call_usage(call, response))
+                return content
         except OllamaError:
             raise
         except (
@@ -179,6 +202,29 @@ def _require_installed_model(client: httpx.Client, model: str) -> None:
     names = {item.get("name") for item in models if isinstance(item, dict)}
     if model not in names:
         raise OllamaError("The requested Ollama model is not installed")
+
+
+def _call_usage(call: StructuredCall, response: httpx.Response) -> CallUsage:
+    """Read Ollama's own timing and token counters; absent counters measure as zero."""
+
+    payload = response.json()
+    metadata = payload if isinstance(payload, dict) else {}
+    return CallUsage(
+        role=call.role,
+        model=call.model,
+        total_duration_ms=_nanoseconds_to_ms(metadata.get("total_duration")),
+        load_duration_ms=_nanoseconds_to_ms(metadata.get("load_duration")),
+        input_tokens=_counter(metadata.get("prompt_eval_count")),
+        output_tokens=_counter(metadata.get("eval_count")),
+    )
+
+
+def _nanoseconds_to_ms(value: object) -> int:
+    return _counter(value) // 1_000_000
+
+
+def _counter(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _structured_content(response: httpx.Response) -> dict[str, object]:

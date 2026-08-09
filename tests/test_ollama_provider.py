@@ -120,3 +120,51 @@ def test_local_provider_normalizes_gemma_json_fence_without_accepting_prose() ->
     )
 
     assert provider.complete(_call()) == {"summaries": []}
+
+
+@pytest.mark.contract
+def test_local_provider_captures_and_drains_per_call_usage() -> None:
+    def ollama(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma4:12b-mlx"}]})
+        return httpx.Response(
+            200,
+            json={
+                "message": {"content": '{"summaries":[]}'},
+                "total_duration": 4_500_000_000,
+                "load_duration": 500_000_000,
+                "prompt_eval_count": 1200,
+                "eval_count": 90,
+            },
+        )
+
+    provider = OllamaStructuredProvider(transport=httpx.MockTransport(ollama))
+    provider.complete(_call())
+    provider.complete(_call())
+
+    usage = provider.drain_usage()
+    assert len(usage) == 2
+    assert usage[0].role == "editorial"
+    assert usage[0].model == "gemma4:12b-mlx"
+    assert usage[0].total_duration_ms == 4500
+    assert usage[0].load_duration_ms == 500
+    assert usage[0].input_tokens == 1200
+    assert usage[0].output_tokens == 90
+    assert provider.drain_usage() == ()
+
+
+@pytest.mark.contract
+def test_local_provider_usage_tolerates_absent_metadata() -> None:
+    def ollama(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma4:12b-mlx"}]})
+        return httpx.Response(200, json={"message": {"content": '{"summaries":[]}'}})
+
+    provider = OllamaStructuredProvider(transport=httpx.MockTransport(ollama))
+    provider.complete(_call())
+
+    usage = provider.drain_usage()
+    assert len(usage) == 1
+    assert usage[0].input_tokens == 0
+    assert usage[0].output_tokens == 0
+    assert usage[0].total_duration_ms == 0

@@ -956,7 +956,19 @@ def _apply_editorial(
             budget_omissions += 1
             continue
         reserved_calls += 4
-        results.append(generate_editorial(batch, editorial.model_pair, provider))
+        result = generate_editorial(batch, editorial.model_pair, provider)
+        results.append(result)
+        usage = provider.drain_usage()
+        diagnostics.emit(
+            "EDITORIAL_MEASURED",
+            phase="editorial",
+            articles=len(batch),
+            calls=result.evidence.calls,
+            duration_ms=sum(result.evidence.call_durations_ms),
+            input_tokens=sum(item.input_tokens for item in usage),
+            output_tokens=sum(item.output_tokens for item in usage),
+            input_characters=sum(len(item.body) for item in batch),
+        )
     additions = [addition for result in results for addition in result.additions]
     calls = sum(result.evidence.calls for result in results)
     failure_codes = [

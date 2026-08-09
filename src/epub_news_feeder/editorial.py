@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from copy import deepcopy
 from typing import Literal, Protocol
 
@@ -90,6 +91,7 @@ class LLMEvidenceRecord(StrictModel):
     model_pair: ModelPair
     proposal_sha256: str | None = None
     findings: list[EvidenceFinding] = Field(default_factory=list)
+    call_durations_ms: list[int] = Field(default_factory=list)
     failure_code: (
         Literal["provider_failure", "invalid_model_output", "verification_rejected"] | None
     ) = None
@@ -146,6 +148,16 @@ _REPAIR_SYSTEM_PROMPT = (
 )
 
 
+def _timed(provider: StructuredProvider, call: StructuredCall, durations: list[int]) -> object:
+    """Measure one provider call's wall clock, whether it returns or raises."""
+
+    started = time.monotonic()
+    try:
+        return provider.complete(call)
+    finally:
+        durations.append(max(0, round((time.monotonic() - started) * 1000)))
+
+
 def generate_editorial(
     evidence: tuple[ArticleEvidence, ...],
     model_pair: ModelPair,
@@ -154,9 +166,10 @@ def generate_editorial(
     """Return only independently supported additions; omit editorial output on failure."""
 
     if not evidence or model_pair.editorial_model == model_pair.verifier_model:
-        return _empty_result(model_pair, 0)
+        return _empty_result(model_pair, 0, durations=[])
 
     calls = 0
+    durations: list[int] = []
     evidence_findings: list[EvidenceFinding] = []
     try:
         proposal_call = StructuredCall(
@@ -168,7 +181,7 @@ def generate_editorial(
             response_schema=_proposal_schema(evidence),
         )
         calls += 1
-        proposal = _EditorialProposal.model_validate(provider.complete(proposal_call))
+        proposal = _EditorialProposal.model_validate(_timed(provider, proposal_call, durations))
         _validate_citations(proposal, evidence)
         _validate_summary_languages(proposal, evidence)
 
@@ -176,7 +189,9 @@ def generate_editorial(
             evidence=evidence, proposal=proposal, model_pair=model_pair
         )
         calls += 1
-        verification = _VerificationResponse.model_validate(provider.complete(verification_call))
+        verification = _VerificationResponse.model_validate(
+            _timed(provider, verification_call, durations)
+        )
         _validate_finding_coverage(proposal, verification)
         evidence_findings.extend(_evidence_findings(verification, verification_round=1))
         if any(finding.status != "supported" for finding in verification.findings):
@@ -193,7 +208,7 @@ def generate_editorial(
                 response_schema=_proposal_schema(evidence),
             )
             calls += 1
-            proposal = _EditorialProposal.model_validate(provider.complete(repair_call))
+            proposal = _EditorialProposal.model_validate(_timed(provider, repair_call, durations))
             _validate_citations(proposal, evidence)
             _validate_summary_languages(proposal, evidence)
 
@@ -202,7 +217,7 @@ def generate_editorial(
             )
             calls += 1
             verification = _VerificationResponse.model_validate(
-                provider.complete(fresh_verification_call)
+                _timed(provider, fresh_verification_call, durations)
             )
             _validate_finding_coverage(proposal, verification)
             evidence_findings.extend(_evidence_findings(verification, verification_round=2))
@@ -212,6 +227,7 @@ def generate_editorial(
                     calls,
                     evidence_findings,
                     failure_code="verification_rejected",
+                    durations=durations,
                 )
 
         serialized = json.dumps(
@@ -228,13 +244,24 @@ def generate_editorial(
                 model_pair=model_pair,
                 proposal_sha256=hashlib.sha256(serialized).hexdigest(),
                 findings=evidence_findings,
+                call_durations_ms=durations,
             ),
         )
     except StructuredProviderError:
-        return _empty_result(model_pair, calls, evidence_findings, failure_code="provider_failure")
+        return _empty_result(
+            model_pair,
+            calls,
+            evidence_findings,
+            failure_code="provider_failure",
+            durations=durations,
+        )
     except Exception:
         return _empty_result(
-            model_pair, calls, evidence_findings, failure_code="invalid_model_output"
+            model_pair,
+            calls,
+            evidence_findings,
+            failure_code="invalid_model_output",
+            durations=durations,
         )
 
 
@@ -392,6 +419,7 @@ def _empty_result(
     findings: list[EvidenceFinding] | None = None,
     failure_code: Literal["provider_failure", "invalid_model_output", "verification_rejected"]
     | None = None,
+    durations: list[int] | None = None,
 ) -> EditorialResult:
     return EditorialResult(
         additions=[],
@@ -401,5 +429,6 @@ def _empty_result(
             model_pair=model_pair,
             findings=findings or [],
             failure_code=failure_code,
+            call_durations_ms=durations or [],
         ),
     )
