@@ -154,14 +154,18 @@ class EditorialConfig(StrictModel):
         if not self.enabled:
             return self
         if (
-            self.provider != "ollama"
-            or self.remote_processing
+            self.provider is None
             or self.model_pair is None
             or self.cost_envelope is None
             or "article_summary" not in self.capabilities
             or self.model_pair.editorial_model == self.model_pair.verifier_model
         ):
-            raise ValueError("enabled local editorial configuration is incomplete")
+            raise ValueError("enabled editorial configuration is incomplete")
+        # `remote_processing` is not an independent switch: it states which route the named
+        # provider is, and a configuration that disagrees with itself about whether Article
+        # text leaves the machine is the one thing that must never load.
+        if self.remote_processing != (self.provider != "ollama"):
+            raise ValueError("editorial remote_processing contradicts the configured provider")
         return self
 
 
@@ -216,6 +220,8 @@ class Configuration(StrictModel):
                 provider = publication.editorial.provider
                 if provider is not None and provider != "ollama" and provider not in provider_ids:
                     raise ValueError("editorial configuration references an unknown provider")
+                if provider is not None and provider in provider_ids:
+                    _require_private_provider_profile(self.remote_providers[provider])
 
             section_ids: set[str] = set()
             self._validate_sections(publication.sections, section_ids, source_ids, policy_ids)
@@ -245,3 +251,17 @@ class Configuration(StrictModel):
                 raise ValueError("sources attach only to leaf sections")
 
             cls._validate_sections(section.sections, section_ids, source_ids, policy_ids)
+
+
+def _require_private_provider_profile(profile: RemoteProviderProfile) -> None:
+    """Refuse to load a configuration whose remote provider profile is not private enough.
+
+    This is the earliest possible gate: a profile declaring training opt-in or server-side
+    storage fails at load, before a Source is fetched, rather than at the moment Article
+    text would already be in flight. `tools` is typed to `none` and needs no check here.
+    """
+
+    if profile.training_opt_in:
+        raise ValueError("a remote editorial provider must not opt in to training")
+    if profile.store:
+        raise ValueError("a remote editorial provider must not store responses")

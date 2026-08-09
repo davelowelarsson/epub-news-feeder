@@ -1,4 +1,4 @@
-"""Provider-neutral gate for optional, locally generated editorial additions."""
+"""Provider-neutral gate for optional, verified editorial additions."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import re
 import time
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
@@ -15,6 +16,7 @@ from .models import ModelPair, NonEmptyString, StrictModel
 
 __all__ = [
     "ArticleEvidence",
+    "CallUsage",
     "EditorialAddition",
     "EditorialResult",
     "ModelPair",
@@ -121,10 +123,28 @@ class StructuredCall(StrictModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class CallUsage:
+    """Body-free measurement of one structured call, identical across providers.
+
+    Every field is a counter or a duration. Nothing here can carry Article text, a prompt,
+    or a credential, which is what makes it safe to write to diagnostics.
+    """
+
+    role: str
+    model: str
+    total_duration_ms: int
+    load_duration_ms: int
+    input_tokens: int
+    output_tokens: int
+
+
 class StructuredProvider(Protocol):
-    """Injected boundary implemented by a local structured-output provider."""
+    """Injected boundary implemented by a local or remote structured-output provider."""
 
     def complete(self, call: StructuredCall) -> object: ...
+
+    def drain_usage(self) -> tuple[CallUsage, ...]: ...
 
 
 _EDITORIAL_SYSTEM_PROMPT = (

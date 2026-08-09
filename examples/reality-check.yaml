@@ -1,4 +1,19 @@
 version: 1
+# The only remote editorial provider, and the terms it is recorded as operating under.
+# `training_opt_in` and `store` are gates: a profile asserting either refuses to load at all,
+# before a Source is fetched. `application_state_retention_days: 0` matches the adapter's
+# `prompt_cache_retention: in_memory`, which turns off the default 24-hour prompt cache;
+# `max_abuse_retention_days` is OpenAI's published standard abuse-monitoring window, and is
+# the reason SVT stays ineligible — closing it needs a sales-approved Zero Data Retention
+# agreement, not a configuration change. See docs/remote-llm-eligibility.md.
+remote_providers:
+  openai:
+    training_opt_in: false
+    store: false
+    application_state_retention_days: 0
+    max_abuse_retention_days: 30
+    region: global
+    tools: none
 sources:
   david:
     title: David Lowe Larsson
@@ -8,7 +23,10 @@ sources:
     allowed_publisher_origins: [https://davidlowelarsson.com]
     feed_url: https://davidlowelarsson.com/rss.xml
     acquisition: feed
-    llm_processing: local_only
+    # The rightsholder is the operator, and granted remote processing in #67. `remote_llm:
+    # allow` recorded the grant; this line is the operator policy limb finally agreeing with
+    # it. Both gates must say yes, which is why they are separate fields.
+    llm_processing: remote_allowed
     rights:
       basis: operator_owned_site_attested_private_use
       audience: single_operator
@@ -126,14 +144,29 @@ publications:
         sources: [david, ars, svt, ekot]
   # The scheduled Edition. It shares the Sources above rather than restating them, so a
   # rights review recorded once governs both Publications and cannot drift between them.
-  # No editorial block: a GitHub-hosted runner has no Ollama, and the deterministic core
-  # is the whole of what runs unattended today.
+  # Editorial runs remotely here because a GitHub-hosted runner has no Ollama. Dated model
+  # pins, not floating aliases: a Model Pair that silently changed under a schedule would
+  # change the Edition with nobody reading the diff.
   - id: daily
     title: Daily News
     language: en
     budget:
       max_articles: 8
       min_articles: 1
+    editorial:
+      enabled: true
+      remote_processing: true
+      provider: openai
+      model_pair:
+        editorial_model: gpt-5.4-2026-03-05
+        verifier_model: gpt-5.4-mini-2026-03-17
+        editorial_prompt_version: article-summary-v1
+        verifier_prompt_version: evidence-check-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      cost_envelope:
+        max_calls: 12
+        max_tokens: 12000
     sections:
       - id: current
         title: Current reporting

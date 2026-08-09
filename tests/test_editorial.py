@@ -6,6 +6,7 @@ import pytest
 
 from epub_news_feeder.editorial import (
     ArticleEvidence,
+    CallUsage,
     ModelPair,
     StructuredCall,
     StructuredProviderError,
@@ -24,6 +25,9 @@ class FakeProvider:
         if isinstance(response, Exception):
             raise response
         return response
+
+    def drain_usage(self) -> tuple[CallUsage, ...]:
+        return ()
 
 
 def _evidence() -> tuple[ArticleEvidence, ...]:
