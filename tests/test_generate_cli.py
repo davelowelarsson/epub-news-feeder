@@ -14,11 +14,12 @@ import pytest
 from lxml import etree
 
 from epub_news_feeder import application
-from epub_news_feeder.application import RetryableGenerationError, generate_edition
+from epub_news_feeder.application import GenerationError, RetryableGenerationError, generate_edition
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
 from epub_news_feeder.editorial import ArticleEvidence, StructuredCall
 from epub_news_feeder.ollama import CallUsage
+from epub_news_feeder.state import brief_id as compute_brief_id
 
 
 def test_editorial_evidence_is_batched_by_article_language() -> None:
@@ -426,6 +427,208 @@ publications:
     assert "articles=1 briefs=3 read_items=4" in repeated.stdout
 
 
+class BriefSuppressionFixtureHandler(BaseHTTPRequestHandler):
+    """Serves a Brief feed whose content changes across requests to model two Editions.
+
+    ``phase`` is mutated by the test between subprocess invocations of the CLI: the server
+    itself lives in the test process and stays up across every ``generate`` call.
+    """
+
+    phase: ClassVar[str] = "day-one"
+
+    def do_GET(self) -> None:
+        if self.path == "/robots.txt":
+            content_type = "text/plain"
+            payload = b"User-agent: *\nAllow: /\n"
+            status = 200
+        elif self.path == "/briefs.xml":
+            content_type = "application/rss+xml"
+            server = cast(ThreadingHTTPServer, self.server)
+            origin = f"http://127.0.0.1:{server.server_port}"
+            if type(self).phase == "day-one":
+                items = f"""
+<item><title>Harbour spill under investigation</title>
+<link>{origin}/brief/spill</link>
+<guid>brief-spill-day-one</guid><pubDate>Sun, 09 Aug 2026 06:00:00 GMT</pubDate></item>
+"""
+            else:
+                items = f"""
+<item><title>Harbour spill investigation continues</title>
+<link>{origin}/brief/spill</link>
+<guid>brief-spill-day-two</guid><pubDate>Mon, 10 Aug 2026 06:00:00 GMT</pubDate></item>
+<item><title>New coastal report emerges</title>
+<link>{origin}/brief/new-report</link>
+<guid>brief-new-day-two</guid><pubDate>Mon, 10 Aug 2026 06:05:00 GMT</pubDate></item>
+"""
+            payload = f"""<rss version="2.0"><channel><title>Ekot Fixture</title>{items}
+</channel></rss>""".encode()
+            status = 200
+        else:
+            content_type = "text/plain"
+            payload = b"not found"
+            status = 404
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_brief_delivery_suppresses_repeats_but_not_new_urls_or_other_publications(
+    tmp_path: Path,
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BriefSuppressionFixtureHandler)
+    BriefSuppressionFixtureHandler.phase = "day-one"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = tmp_path / "publication.yaml"
+    config.write_text(
+        f"""
+version: 1
+sources:
+  briefs:
+    title: Sveriges Radio Ekot
+    publisher_id: fixture-ekot
+    feed_url: http://127.0.0.1:{server.server_port}/briefs.xml
+    acquisition: metadata_only
+    llm_processing: disabled
+    rights:
+      basis: link-only
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: brief-fixture
+      feed_acquisition: allow
+      page_acquisition: deny
+      retention: deny
+      private_distribution: conditional
+      local_llm: deny
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 6, min_articles: 0}}
+    max_briefs: 6
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [briefs]
+  - id: weekend
+    title: Weekend Edition
+    language: en
+    budget: {{max_articles: 6, min_articles: 0}}
+    max_briefs: 6
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [briefs]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+
+    def run(*, publication: str, run_id: str, at: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "epub-news-feeder",
+                "generate",
+                "--config",
+                str(config),
+                "--state",
+                str(state),
+                "--output",
+                str(output),
+                "--publication",
+                publication,
+                "--run-id",
+                run_id,
+                "--at",
+                at,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    try:
+        day_one = run(
+            publication="daily",
+            run_id="20260809T060000Z-DAYONEAA",
+            at="2026-08-09T06:00:00Z",
+        )
+        assert day_one.returncode == 0, day_one.stderr
+        assert "briefs=1" in day_one.stdout
+        with ZipFile(next(output.glob("*DAYONEAA*.epub"))) as archive:
+            xhtml = " ".join(
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.endswith(".xhtml")
+            )
+        assert "Harbour spill under investigation" in xhtml
+
+        BriefSuppressionFixtureHandler.phase = "day-two"
+        day_two = run(
+            publication="daily",
+            run_id="20260810T060000Z-DAYTWOAA",
+            at="2026-08-10T06:00:00Z",
+        )
+        assert day_two.returncode == 0, day_two.stderr
+        # The spill is the same report under a reworded headline: it stays suppressed. Only
+        # the genuinely new canonical URL is delivered.
+        assert "briefs=1" in day_two.stdout
+        with ZipFile(next(output.glob("*DAYTWOAA*.epub"))) as archive:
+            xhtml = " ".join(
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.endswith(".xhtml")
+            )
+        assert "New coastal report emerges" in xhtml
+        assert "Harbour spill under investigation" not in xhtml
+        assert "Harbour spill investigation continues" not in xhtml
+
+        BriefSuppressionFixtureHandler.phase = "day-one"
+        weekend = run(
+            publication="weekend",
+            run_id="20260809T060000Z-WEEKENDA",
+            at="2026-08-09T06:00:00Z",
+        )
+        assert weekend.returncode == 0, weekend.stderr
+        # Suppression is scoped per Publication: "daily" having delivered the spill report
+        # does not suppress it for "weekend".
+        assert "briefs=1" in weekend.stdout
+        with ZipFile(next(output.glob("*WEEKENDA*.epub"))) as archive:
+            xhtml = " ".join(
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.endswith(".xhtml")
+            )
+        assert "Harbour spill under investigation" in xhtml
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    with sqlite3.connect(state) as connection:
+        counts = dict(
+            connection.execute(
+                "SELECT publication_id, COUNT(*) FROM brief_deliveries GROUP BY publication_id"
+            ).fetchall()
+        )
+        # "daily" delivered the spill report on day one and the new report on day two;
+        # "weekend" independently delivered the spill report once.
+        assert counts == {"daily": 2, "weekend": 1}
+        assert connection.execute("SELECT COUNT(*) FROM articles").fetchone() == (0,)
+
+
 @pytest.mark.acceptance
 @pytest.mark.epubcheck
 def test_local_editorial_summary_is_verified_and_rendered(
@@ -667,3 +870,248 @@ publications:
     )
     assert repeated.receipt == result.receipt
     assert EditionFixtureHandler.hits == hits_before_resume
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_brief_delivery_recorded_correctly_through_spooled_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MixedEditionFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config_path = tmp_path / "publication.yaml"
+    config_path.write_text(
+        f"""
+version: 1
+sources:
+  full:
+    title: Full Publisher
+    default_article_language: en
+    publisher_id: publisher.example
+    feed_url: http://127.0.0.1:{server.server_port}/full.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: full-fixture
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: deny
+  briefs:
+    title: Sveriges Radio Ekot
+    publisher_id: fixture-ekot
+    feed_url: http://127.0.0.1:{server.server_port}/briefs.xml
+    acquisition: metadata_only
+    llm_processing: disabled
+    rights:
+      basis: link-only
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: brief-fixture
+      feed_acquisition: allow
+      page_acquisition: deny
+      retention: deny
+      private_distribution: conditional
+      local_llm: deny
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 2, min_articles: 1}}
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [full, briefs]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    configuration = load_config(config_path)
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+    diagnostics = tmp_path / "diagnostics"
+    run_id = "20260809T080000Z-RESUMEAAA"
+    generated_at = datetime(2026, 8, 9, 8, tzinfo=UTC)
+    original_delivery = application.deliver_local  # type: ignore[attr-defined]
+
+    def fail_final_delivery(
+        epub_bytes: bytes, *, output_directory: Path, filename: str
+    ) -> DeliveryReceipt:
+        if output_directory == output:
+            raise OSError("simulated unavailable final target")
+        return original_delivery(epub_bytes, output_directory=output_directory, filename=filename)
+
+    monkeypatch.setattr(application, "deliver_local", fail_final_delivery)
+    try:
+        with pytest.raises(RetryableGenerationError, match="Delivery remains pending"):
+            generate_edition(
+                configuration,
+                state_path=state,
+                output_directory=output,
+                diagnostics_directory=diagnostics,
+                run_id=run_id,
+                generated_at=generated_at,
+            )
+
+        # A validated-but-undelivered Run must suppress nothing yet: the crash happened before
+        # finalization, so no Brief has been recorded.
+        with sqlite3.connect(state) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM brief_deliveries").fetchone() == (0,)
+
+        monkeypatch.setattr(application, "deliver_local", original_delivery)
+        result = generate_edition(
+            configuration,
+            state_path=state,
+            output_directory=output,
+            diagnostics_directory=diagnostics,
+            run_id=run_id,
+            generated_at=generated_at,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result.brief_count == 3
+    # The spooled-resume path (not the normal in-process path) is what finalized this Run, so
+    # the identities recorded prove recording happens correctly there too.
+    expected_ids = {
+        compute_brief_id(f"http://127.0.0.1:{server.server_port}/brief/{slug}")
+        for slug in ("new", "old", "unrelated")
+    }
+    with sqlite3.connect(state) as connection:
+        recorded_ids = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT brief_id FROM brief_deliveries WHERE publication_id = 'daily'"
+            )
+        }
+    assert recorded_ids == expected_ids
+
+
+class OneBriefFixtureHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        if self.path == "/robots.txt":
+            content_type = "text/plain"
+            payload = b"User-agent: *\nAllow: /\n"
+            status = 200
+        elif self.path == "/briefs.xml":
+            content_type = "application/rss+xml"
+            server = cast(ThreadingHTTPServer, self.server)
+            origin = f"http://127.0.0.1:{server.server_port}"
+            payload = f"""<rss version="2.0"><channel><title>Ekot Fixture</title>
+<item><title>Coastal watch issued</title><link>{origin}/brief/coastal-watch</link>
+<guid>brief-coastal-watch</guid><pubDate>Sun, 09 Aug 2026 06:00:00 GMT</pubDate></item>
+</channel></rss>""".encode()
+            status = 200
+        else:
+            content_type = "text/plain"
+            payload = b"not found"
+            status = 404
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+@pytest.mark.acceptance
+def test_brief_suppression_ignores_an_abandoned_run(tmp_path: Path) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), OneBriefFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def config(*, min_articles: int) -> str:
+        return f"""
+version: 1
+sources:
+  briefs:
+    title: Sveriges Radio Ekot
+    publisher_id: fixture-ekot
+    feed_url: http://127.0.0.1:{server.server_port}/briefs.xml
+    acquisition: metadata_only
+    llm_processing: disabled
+    rights:
+      basis: link-only
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: brief-fixture
+      feed_acquisition: allow
+      page_acquisition: deny
+      retention: deny
+      private_distribution: conditional
+      local_llm: deny
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 6, min_articles: {min_articles}}}
+    max_briefs: 6
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [briefs]
+""".lstrip()
+
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+    diagnostics = tmp_path / "diagnostics"
+    generated_at = datetime(2026, 8, 9, 6, tzinfo=UTC)
+    try:
+        # A Brief alone never meets an Article minimum, so this Run is abandoned outright —
+        # never validated, never delivered.
+        unmet_path = tmp_path / "unmet.yaml"
+        unmet_path.write_text(config(min_articles=1), encoding="utf-8")
+        unmet_config = load_config(unmet_path)
+        with pytest.raises(GenerationError, match="did not meet the publication minimum"):
+            generate_edition(
+                unmet_config,
+                state_path=state,
+                output_directory=output,
+                diagnostics_directory=diagnostics,
+                run_id="20260809T060000Z-ABANDONAA",
+                generated_at=generated_at,
+            )
+        with sqlite3.connect(state) as connection:
+            assert connection.execute("SELECT COUNT(*) FROM brief_deliveries").fetchone() == (0,)
+            assert connection.execute("SELECT status FROM runs").fetchone() == ("failed",)
+
+        # The same Brief, in a Run that can succeed, is not suppressed by the abandoned attempt.
+        met_path = tmp_path / "met.yaml"
+        met_path.write_text(config(min_articles=0), encoding="utf-8")
+        met_config = load_config(met_path)
+        result = generate_edition(
+            met_config,
+            state_path=state,
+            output_directory=output,
+            diagnostics_directory=diagnostics,
+            run_id="20260809T060000Z-SUCCEEDAA",
+            generated_at=generated_at,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result.brief_count == 1
