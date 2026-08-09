@@ -330,7 +330,8 @@ def test_reality_check_configuration_records_the_recorded_rights_matrix() -> Non
     """
     configuration = load_config(REALITY_CHECK_CONFIG)
     sources = configuration.sources
-    assert set(sources) == {"david", "ars", "svt", "ekot"}
+    # The original four keep their recorded gates whatever else joins them (issue #73's Wave 1).
+    assert {"david", "ars", "svt", "ekot"} <= set(sources)
 
     # Every Source carries both a rights policy and dated eligibility evidence — the two gates
     # `application.py` requires before a Source is ever considered for acquisition.
@@ -366,11 +367,36 @@ def test_reality_check_configuration_records_the_recorded_rights_matrix() -> Non
         for source_id, source in sources.items()
         if source.eligibility is not None and source.eligibility.remote_llm == "allow"
     }
-    assert allowed == {"david"}
+    # Remote allowance is not a list to append to — it is a consequence of the recorded basis.
+    # Assert the *reason* rather than the names, so adding a Source can only widen remote
+    # eligibility by citing one of these bases, and never by being added to an allowlist.
+    permissive_bases = {
+        "operator_owned_site_attested_private_use",
+        "united_states_government_work_public_domain",
+        "published_creative_commons_attribution_4_0",
+    }
+    for source_id in allowed:
+        rights = sources[source_id].rights
+        assert rights is not None, source_id
+        assert rights.basis in permissive_bases, (
+            f"{source_id} allows remote processing without a rightsholder grant or a "
+            f"permissive licence: {rights.basis}"
+        )
+    assert "david" in allowed
     assert sources["david"].rights is not None
     assert sources["david"].rights.basis == "operator_owned_site_attested_private_use"
     assert sources["svt"].eligibility is not None
     assert sources["svt"].eligibility.remote_llm == "conditional"
+
+    # The operator's rule of 2026-08-09: a publisher blocking AI crawlers has stated an AI
+    # position, not a reproduction position. Such a Source is reproduced in full with both
+    # LLM limbs denied — so no Source may ever deny reproduction while permitting a model.
+    for source_id, source in sources.items():
+        evidence = source.eligibility
+        assert evidence is not None, source_id
+        if evidence.page_acquisition == "deny":
+            assert evidence.local_llm != "allow", source_id
+            assert evidence.remote_llm != "allow", source_id
 
     # The two gates must agree before anything is sent. `remote_llm` is the publisher's
     # recorded position; `llm_processing` is the operator's policy. Exactly one Source has
@@ -381,7 +407,14 @@ def test_reality_check_configuration_records_the_recorded_rights_matrix() -> Non
         for source_id, source in sources.items()
         if source.llm_processing == "remote_allowed"
     }
-    assert remote_routed == {"david"}
+    # The operator policy limb may never reach further than the publisher limb, and both are
+    # held to the same short list of bases. A Source cannot be routed remotely by policy while
+    # its evidence withholds permission.
+    assert remote_routed <= allowed
+    for source_id in remote_routed:
+        rights = sources[source_id].rights
+        assert rights is not None and rights.basis in permissive_bases, source_id
+    assert "david" in remote_routed
 
 
 @pytest.mark.security
@@ -425,7 +458,14 @@ def test_reality_check_svt_basis_upgrade_changes_no_gate_or_eligibility_value(
     # The only difference the basis edit may introduce is the free-text basis string itself. Patch
     # it back to the previous value and assert every other field of the loaded configuration —
     # every Source's eligibility matrix, every Publication, every Edition input — is unchanged.
-    upgraded_dump["sources"]["svt"]["rights"]["basis"] = "operator_attested_private_use"
+    # Several SVT Sources now share the basis, so every one of them is patched back, not just the
+    # first: the point of the test is that basis is inert, whichever Sources cite it.
+    patched = 0
+    for source in upgraded_dump["sources"].values():
+        if source["rights"] and source["rights"]["basis"] == SVT_CONTENT_SIGNAL_BASIS:
+            source["rights"]["basis"] = "operator_attested_private_use"
+            patched += 1
+    assert patched >= 1
     assert upgraded_dump == previous_dump
 
 
