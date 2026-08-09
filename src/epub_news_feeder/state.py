@@ -59,6 +59,20 @@ class ClusterOverride:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingBrief:
+    """A Brief carried by a validated-but-undelivered Run, staged for delivery recording.
+
+    This is bookkeeping only: it lets a resumed Run recover which Briefs it selected without
+    re-acquiring Sources. Suppression itself is decided solely by ``brief_deliveries``, written
+    at finalization.
+    """
+
+    brief_id: str
+    source_id: str
+    published_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PendingDelivery:
     run_id: str
     publication_id: str
@@ -66,6 +80,7 @@ class PendingDelivery:
     delivery_target: str
     delivery_digest: str
     prepared_at: datetime
+    briefs: tuple[PendingBrief, ...] = ()
 
 
 def normalize_url(url: str) -> str:
@@ -96,6 +111,18 @@ def normalize_text(text: str) -> str:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def brief_id(canonical_url: str) -> str:
+    """A Brief's durable, body-free identity: the unkeyed hash of its normalized canonical URL.
+
+    Mirrors ``article_id``'s derivation. Unkeyed deliberately — the fingerprint key exists for
+    body token hashes, and a canonical URL is not publisher text, so keying it would tie Brief
+    suppression to key survival for no privacy gain. Not the feed GUID either, so identity
+    survives a Source changing its GUID scheme.
+    """
+
+    return _hash(normalize_url(canonical_url))[:24]
 
 
 def _token_hashes(text: str, key: bytes) -> list[str]:
@@ -362,6 +389,15 @@ class StateStore:
                 prepared_at TEXT NOT NULL,
                 UNIQUE(publication_id, edition_id, delivery_target)
             );
+            CREATE TABLE IF NOT EXISTS brief_deliveries (
+                publication_id TEXT NOT NULL,
+                brief_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                published_at TEXT NOT NULL,
+                delivered_at TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES runs(run_id),
+                PRIMARY KEY(publication_id, brief_id)
+            );
             INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);
             """
         )
@@ -397,6 +433,15 @@ class StateStore:
             """
         )
         self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)")
+        pending_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(pending_deliveries)").fetchall()
+        }
+        if "briefs" not in pending_columns:
+            self.connection.execute(
+                "ALTER TABLE pending_deliveries ADD COLUMN briefs TEXT NOT NULL DEFAULT '[]'"
+            )
+        self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)")
 
     def observe_article(
         self,
@@ -1182,6 +1227,7 @@ class StateStore:
         delivery_target: str,
         delivery_digest: str,
         prepared_at: datetime,
+        briefs: Iterable[PendingBrief] = (),
     ) -> PendingDelivery:
         run = self.connection.execute(
             "SELECT publication_id, edition_id, status FROM runs WHERE run_id = ?", (run_id,)
@@ -1197,11 +1243,12 @@ class StateStore:
             delivery_target=delivery_target,
             delivery_digest=delivery_digest,
             prepared_at=prepared_at,
+            briefs=tuple(briefs),
         )
         existing = self.connection.execute(
             """
             SELECT run_id, publication_id, edition_id, delivery_target,
-                   delivery_digest, prepared_at
+                   delivery_digest, prepared_at, briefs
             FROM pending_deliveries WHERE run_id = ?
             """,
             (run_id,),
@@ -1215,8 +1262,8 @@ class StateStore:
             """
             INSERT INTO pending_deliveries(
                 run_id, publication_id, edition_id, delivery_target,
-                delivery_digest, prepared_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                delivery_digest, prepared_at, briefs
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 delivery.run_id,
@@ -1225,6 +1272,16 @@ class StateStore:
                 delivery.delivery_target,
                 delivery.delivery_digest,
                 delivery.prepared_at.isoformat(),
+                json.dumps(
+                    [
+                        {
+                            "brief_id": brief.brief_id,
+                            "source_id": brief.source_id,
+                            "published_at": brief.published_at.isoformat(),
+                        }
+                        for brief in delivery.briefs
+                    ]
+                ),
             ),
         )
         return delivery
@@ -1233,7 +1290,7 @@ class StateStore:
         rows = self.connection.execute(
             """
             SELECT run_id, publication_id, edition_id, delivery_target,
-                   delivery_digest, prepared_at
+                   delivery_digest, prepared_at, briefs
             FROM pending_deliveries
             WHERE publication_id = ? ORDER BY prepared_at, run_id
             """,
@@ -1250,6 +1307,47 @@ class StateStore:
             delivery_target=str(row["delivery_target"]),
             delivery_digest=str(row["delivery_digest"]),
             prepared_at=datetime.fromisoformat(str(row["prepared_at"])),
+            briefs=tuple(
+                PendingBrief(
+                    brief_id=str(item["brief_id"]),
+                    source_id=str(item["source_id"]),
+                    published_at=datetime.fromisoformat(str(item["published_at"])),
+                )
+                for item in json.loads(str(row["briefs"]))
+            ),
+        )
+
+    def delivered_brief_ids(self, publication_id: str) -> frozenset[str]:
+        rows = self.connection.execute(
+            "SELECT brief_id FROM brief_deliveries WHERE publication_id = ?",
+            (publication_id,),
+        ).fetchall()
+        return frozenset(str(row["brief_id"]) for row in rows)
+
+    def record_brief_delivery(
+        self,
+        *,
+        publication_id: str,
+        brief_id: str,
+        source_id: str,
+        published_at: datetime,
+        delivered_at: datetime,
+        run_id: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO brief_deliveries(
+                publication_id, brief_id, source_id, published_at, delivered_at, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                publication_id,
+                brief_id,
+                source_id,
+                published_at.isoformat(),
+                delivered_at.isoformat(),
+                run_id,
+            ),
         )
 
     @contextmanager

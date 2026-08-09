@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 import stat
 from dataclasses import fields
 from datetime import UTC, datetime, timedelta
@@ -8,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from epub_news_feeder.state import StateStore
+from epub_news_feeder.state import StateStore, brief_id, normalize_url
 
 
 @pytest.mark.acceptance
@@ -692,3 +693,92 @@ def test_ticket_06_abandoning_delivery_releases_reservations(tmp_path: Path) -> 
         state.abandon_run("run", reason="DELIVERY_TERMINAL")
 
         assert state.active_reservations("publication") == []
+
+
+def test_brief_delivery_identity_is_unkeyed_hash_of_normalized_canonical_url() -> None:
+    canonical = "https://publisher.example/report?utm_source=newsletter"
+    expected = hashlib.sha256(normalize_url(canonical).encode()).hexdigest()[:24]
+
+    assert brief_id(canonical) == expected
+    # Tracking noise and a trailing slash normalize away, same as an Article's identity.
+    assert brief_id("https://publisher.example/report/?utm_source=other") == expected
+    # A different report is a different identity.
+    assert brief_id("https://publisher.example/other-report") != expected
+    # Not keyed: it does not depend on the fingerprint key sidecar at all.
+    assert brief_id(canonical) == hashlib.sha256(normalize_url(canonical).encode()).hexdigest()[:24]
+
+
+@pytest.mark.security
+def test_brief_delivery_table_stores_no_headline_or_canonical_url(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    delivered_at = datetime(2026, 8, 9, 6, tzinfo=UTC)
+    canonical_url = "https://publisher.example/harbour-spill-investigation"
+    headline = "Exclusive: harbour spill investigation widens"
+    identity = brief_id(canonical_url)
+
+    with StateStore(state_path, environment="test") as state:
+        state.begin_run("run", "daily", "edition", delivered_at)
+        state.record_brief_delivery(
+            publication_id="daily",
+            brief_id=identity,
+            source_id="ekot",
+            published_at=delivered_at,
+            delivered_at=delivered_at,
+            run_id="run",
+        )
+
+    with sqlite3.connect(state_path) as connection:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(brief_deliveries)")}
+        assert columns == {
+            "publication_id",
+            "brief_id",
+            "source_id",
+            "published_at",
+            "delivered_at",
+            "run_id",
+        }
+        row = connection.execute(
+            "SELECT publication_id, brief_id, source_id, run_id FROM brief_deliveries"
+        ).fetchone()
+        assert row == ("daily", identity, "ekot", "run")
+
+    database_bytes = state_path.read_bytes()
+    assert headline.encode() not in database_bytes
+    assert canonical_url.encode() not in database_bytes
+    assert b"harbour-spill" not in database_bytes
+
+
+def test_brief_delivery_suppression_is_permanent_and_scoped_per_publication(
+    tmp_path: Path,
+) -> None:
+    delivered_at = datetime(2026, 8, 9, 6, tzinfo=UTC)
+    identity = brief_id("https://publisher.example/harbour-report")
+
+    with StateStore(tmp_path / "state.sqlite3", environment="test") as state:
+        state.begin_run("run", "daily", "edition", delivered_at)
+        assert state.delivered_brief_ids("daily") == frozenset()
+
+        state.record_brief_delivery(
+            publication_id="daily",
+            brief_id=identity,
+            source_id="ekot",
+            published_at=delivered_at,
+            delivered_at=delivered_at,
+            run_id="run",
+        )
+
+        assert state.delivered_brief_ids("daily") == frozenset({identity})
+        # Scoped per Publication: delivery to "daily" leaves "weekend" untouched.
+        assert state.delivered_brief_ids("weekend") == frozenset()
+
+        # Permanent: recording again (e.g. a resumed Run recovering its own staged Brief)
+        # neither raises nor prunes, and the identity remains suppressed.
+        state.record_brief_delivery(
+            publication_id="daily",
+            brief_id=identity,
+            source_id="ekot",
+            published_at=delivered_at,
+            delivered_at=delivered_at + timedelta(days=1),
+            run_id="run",
+        )
+        assert state.delivered_brief_ids("daily") == frozenset({identity})

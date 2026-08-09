@@ -56,7 +56,12 @@ from epub_news_feeder.selection import (
     place_articles,
     select_publication,
 )
-from epub_news_feeder.state import ArticleObservation, StateStore
+from epub_news_feeder.state import (
+    ArticleObservation,
+    PendingBrief,
+    StateStore,
+)
+from epub_news_feeder.state import brief_id as durable_brief_id
 from epub_news_feeder.validation import EpubValidationError, validate_epub
 
 
@@ -264,13 +269,10 @@ def _run(
             for acquired in outcome.articles:
                 if acquired.body is None:
                     # A body-free item only ever reaches here from a metadata_only Source, so a
-                    # Brief stays a rights outcome and never becomes a failure outcome.
-                    brief_id = sha256(
-                        (
-                            f"publisher-link:v1:{source_id}:"
-                            f"{acquired.guid or acquired.canonical_url}"
-                        ).encode()
-                    ).hexdigest()[:24]
+                    # Brief stays a rights outcome and never becomes a failure outcome. Identity
+                    # is the durable, body-free brief_id: it is also the in-run element id, so
+                    # there is one identity rather than two.
+                    brief_id = durable_brief_id(acquired.canonical_url)
                     briefs[brief_id] = _BriefRecord(
                         brief=BriefInput(
                             identifier=brief_id,
@@ -339,6 +341,15 @@ def _run(
                 source_records[source_id].append(observation.article_id)
     finally:
         client.close()
+
+    # A Brief already delivered to this Publication is suppressed at candidacy, before it ever
+    # reaches selection: a reworded headline on the same report is not new.
+    delivered_brief_ids = state.delivered_brief_ids(publication.id)
+    briefs = {
+        brief_id: record
+        for brief_id, record in briefs.items()
+        if brief_id not in delivered_brief_ids
+    }
 
     request = _selection_request(
         publication, leaves, configuration, records, source_records, briefs, generated_at
@@ -506,6 +517,14 @@ def _run(
         delivery_target=str(output_directory / filename),
         delivery_digest=spool_receipt.sha256,
         prepared_at=generated_at,
+        briefs=[
+            PendingBrief(
+                brief_id=selected_brief.brief_id,
+                source_id=selected_brief.source_id,
+                published_at=selected_brief.published_at,
+            )
+            for selected_brief in selected_briefs
+        ],
     )
     try:
         receipt = deliver_local(
@@ -548,6 +567,15 @@ def _run(
                 canonical_url=record.article.canonical_url,
                 publisher_published_at=record.publisher_published_at,
                 delivered_at=generated_at,
+            )
+        for selected_brief in selected_briefs:
+            state.record_brief_delivery(
+                publication_id=publication.id,
+                brief_id=selected_brief.brief_id,
+                source_id=selected_brief.source_id,
+                published_at=selected_brief.published_at,
+                delivered_at=generated_at,
+                run_id=run_id,
             )
     with suppress(OSError):
         diagnostics.emit(
@@ -629,6 +657,16 @@ def _resume_spooled_delivery(
                 delivered_at=generated_at,
                 delivery_digest=receipt.sha256,
             )
+            with suppress(sqlite3.Error):
+                for pending_brief in current.briefs:
+                    state.record_brief_delivery(
+                        publication_id=publication.id,
+                        brief_id=pending_brief.brief_id,
+                        source_id=pending_brief.source_id,
+                        published_at=pending_brief.published_at,
+                        delivered_at=generated_at,
+                        run_id=run_id,
+                    )
             article_count, publisher_link_count = state.run_item_counts(run_id)
             _, publication_maximum = _publication_limits(publication)
             return GenerationResult(
@@ -656,7 +694,9 @@ def _resume_spooled_delivery(
             "DELIVERY_SPOOL_MISMATCH", "Validated Delivery spool is immutable"
         )
     if current is None:
-        state.prepare_delivery(
+        # The prior attempt crashed before its own Brief selection could be staged: nothing
+        # durable records which Briefs it chose, so none are recorded here either.
+        current = state.prepare_delivery(
             run_id=run_id,
             publication_id=publication.id,
             delivery_target=str(target),
@@ -674,6 +714,16 @@ def _resume_spooled_delivery(
         raise RetryableGenerationError(
             "DELIVERY_FINALIZATION_PENDING", "Delivered copy awaits State finalization"
         ) from error
+    with suppress(sqlite3.Error):
+        for pending_brief in current.briefs:
+            state.record_brief_delivery(
+                publication_id=publication.id,
+                brief_id=pending_brief.brief_id,
+                source_id=pending_brief.source_id,
+                published_at=pending_brief.published_at,
+                delivered_at=generated_at,
+                run_id=run_id,
+            )
     article_count, publisher_link_count = state.run_item_counts(run_id)
     _, publication_maximum = _publication_limits(publication)
     with suppress(OSError):

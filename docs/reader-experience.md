@@ -107,6 +107,11 @@ reaches the revision hash, rule matching, or an LLM prompt, yet survives for a f
   Mute Rule exists to prevent. Relevance ranking, Source Weight, Essential Coverage and Feedback
   Signals do not apply.
 - Unselected metadata candidates never appear in the Edition or durable State.
+- A delivered Brief never comes back. Its durable identity is the unkeyed hash of its normalized
+  canonical URL, so a reworded headline on the same report stays suppressed while a genuinely new
+  report — a different canonical URL — is unaffected. Suppression is permanent and scoped per
+  Publication; it is applied before selection, and the durable State carries only the hash, the
+  Source, and the publication and delivery times — no headline, no URL, no body.
 
 ## Reader-generated copy notices
 
