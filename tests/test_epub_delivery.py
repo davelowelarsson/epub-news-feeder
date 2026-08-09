@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import cast
@@ -10,6 +11,7 @@ from zipfile import ZIP_STORED, ZipFile
 import pytest
 from lxml import etree
 
+from epub_news_feeder.application import edition_filename
 from epub_news_feeder.delivery import deliver_local
 from epub_news_feeder.epub import (
     ArticleInput,
@@ -211,6 +213,70 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
     assert receipt.sha256 == "ddc5111e1d9d882edbe5028f1bf7149b1d4f56715f968585cd9467d177d960f4"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
+
+
+def test_edition_filename_leads_with_the_date_and_names_the_publication() -> None:
+    """A Kobo truncates a long filename from the right, so the date has to come first."""
+
+    filename = edition_filename(
+        publication_id="daily",
+        generated_at=datetime(2026, 8, 9, 6, 0, tzinfo=UTC),
+        run_id="20260809T060000Z-AAAAAAAA",
+    )
+
+    assert filename == "2026-08-09-daily-AAAAAAAA.epub"
+
+
+def test_edition_filename_slugifies_a_publication_identifier() -> None:
+    filename = edition_filename(
+        publication_id="Local Reality Check!",
+        generated_at=datetime(2026, 8, 9, 6, 0, tzinfo=UTC),
+        run_id="20260809T060000Z-AAAAAAAA",
+    )
+
+    assert filename == "2026-08-09-local-reality-check-AAAAAAAA.epub"
+
+
+@pytest.mark.parametrize(
+    "publication_id",
+    ["a-publication-identifier-far-longer-than-any-reader-can-see", "—", ""],
+)
+def test_edition_filename_stays_short_and_never_degenerates(publication_id: str) -> None:
+    """Whatever the identifier, the name stays readable and keeps its three parts."""
+
+    filename = edition_filename(
+        publication_id=publication_id,
+        generated_at=datetime(2026, 8, 9, 6, 0, tzinfo=UTC),
+        run_id="20260809T060000Z-AAAAAAAA",
+    )
+
+    assert filename.startswith("2026-08-09-")
+    assert filename.endswith("-AAAAAAAA.epub")
+    assert len(filename) <= 48
+    assert "--" not in filename
+
+
+def test_edition_filename_sorts_chronologically_and_stays_unique_within_a_day() -> None:
+    """Two Editions of one Publication on one day must not collide, and must sort by date."""
+
+    morning = edition_filename(
+        publication_id="daily",
+        generated_at=datetime(2026, 8, 9, 6, 0, tzinfo=UTC),
+        run_id="20260809T060000Z-AAAAAAAA",
+    )
+    evening = edition_filename(
+        publication_id="daily",
+        generated_at=datetime(2026, 8, 9, 18, 0, tzinfo=UTC),
+        run_id="20260809T180000Z-BBBBBBBB",
+    )
+    tomorrow = edition_filename(
+        publication_id="daily",
+        generated_at=datetime(2026, 8, 10, 6, 0, tzinfo=UTC),
+        run_id="20260810T060000Z-CCCCCCCC",
+    )
+
+    assert morning != evening
+    assert sorted([tomorrow, evening, morning])[-1] == tomorrow
 
 
 @pytest.mark.property

@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
 
 from epub_news_feeder.config import load_config
 
@@ -15,6 +16,7 @@ RUN_ID = re.compile(r"\b\d{8}T\d{6}Z-[A-Z2-7]{8}\b")
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 REALITY_CHECK_CONFIG = REPOSITORY_ROOT / "examples" / "reality-check.yaml"
+SCHEDULED_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "daily-edition.yml"
 
 # The rights basis SVT's configuration is upgraded to by this ticket: a published Content-Signal
 # permission for AI retrieval, rather than bare operator attestation. See issue #57 / #51 / #44.
@@ -414,3 +416,40 @@ def test_reality_check_svt_basis_upgrade_changes_no_gate_or_eligibility_value(
     # every Source's eligibility matrix, every Publication, every Edition input — is unchanged.
     upgraded_dump["sources"]["svt"]["rights"]["basis"] = "operator_attested_private_use"
     assert upgraded_dump == previous_dump
+
+
+def _scheduled_generate_command() -> list[str]:
+    """The generate invocation the scheduled workflow actually runs, as a token list."""
+
+    workflow = yaml.safe_load(SCHEDULED_WORKFLOW.read_text(encoding="utf-8"))
+    script: str = next(
+        step["run"]
+        for step in workflow["jobs"]["edition"]["steps"]
+        if "epub-news-feeder generate" in step.get("run", "")
+    )
+    return script.replace("\\\n", " ").split()
+
+
+@pytest.mark.security
+def test_scheduled_workflow_names_a_publication_that_exists_and_makes_no_llm_call() -> None:
+    """The one run nobody watches must not drift away from the configuration it names.
+
+    Renaming the Publication, moving the configuration file, or enabling editorial on the
+    scheduled Publication would each surface only as a 04:00 failure — or, worse, as an
+    unattended LLM call nobody decided to make. All three fail here instead.
+    """
+
+    command = _scheduled_generate_command()
+    config_path = REPOSITORY_ROOT / command[command.index("--config") + 1]
+    publication_id = command[command.index("--publication") + 1]
+
+    configuration = load_config(config_path)
+    publication = next(
+        (item for item in configuration.publications if item.id == publication_id), None
+    )
+    assert publication is not None, f"{config_path} defines no Publication {publication_id!r}"
+    assert publication.editorial is None or not publication.editorial.enabled
+
+    # State persistence is what keeps a daily run from re-delivering yesterday's reading. A
+    # scheduled run without it is worse than no scheduled run at all.
+    assert "--state-environment" in command

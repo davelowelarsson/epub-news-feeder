@@ -1,0 +1,116 @@
+name: Daily Edition
+
+# The only thing that runs with nobody watching. It restores the State Store from Drive,
+# builds one Edition, delivers it to the Kobo folder, and saves the State Store back.
+#
+# GitHub cron is UTC and does not observe DST: 04:00 UTC is 06:00 in Stockholm through the
+# summer and 05:00 through the winter. Either way the Edition is on the device before the
+# reader wakes, which is the requirement; an hour of drift is not worth a second schedule.
+on:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The State Store is a single mutable archive, read at the start of a run and written at
+# the end. Two overlapping runs would silently lose one run's deliveries, so runs queue
+# instead: never cancel one, because a cancelled run can leave a delivered Edition whose
+# state was never saved.
+concurrency:
+  group: edition
+  cancel-in-progress: false
+
+env:
+  EPUBCHECK_VERSION: "5.3.0"
+  # SHA-256 of the extracted epubcheck.jar, matching README.md and
+  # src/epub_news_feeder/validation.py. Verified before every use; a
+  # mismatch fails the job rather than being swallowed.
+  EPUBCHECK_JAR_SHA256: "f7f96617c929371821609b88c8484d6dc9f24fe916499863c46094c5fb778a65"
+
+jobs:
+  edition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+
+      - name: Set up Java (for EPUBCheck)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Cache EPUBCheck
+        id: cache-epubcheck
+        uses: actions/cache@v6
+        with:
+          path: .local/tools/epubcheck-${{ env.EPUBCHECK_VERSION }}
+          key: epubcheck-${{ env.EPUBCHECK_VERSION }}
+
+      - name: Download EPUBCheck
+        if: steps.cache-epubcheck.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sSL -o epubcheck.zip \
+            "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
+          mkdir -p .local/tools
+          unzip -q epubcheck.zip -d .local/tools
+          rm epubcheck.zip
+
+      - name: Verify EPUBCheck digest
+        run: |
+          set -euo pipefail
+          jar=".local/tools/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar"
+          if [ ! -f "$jar" ]; then
+            echo "::error::EPUBCheck jar not found at $jar"
+            exit 1
+          fi
+          actual="$(sha256sum "$jar" | cut -d' ' -f1)"
+          if [ "$actual" != "$EPUBCHECK_JAR_SHA256" ]; then
+            echo "::error::EPUBCheck jar digest mismatch: expected $EPUBCHECK_JAR_SHA256, got $actual"
+            exit 1
+          fi
+          echo "EPUBCHECK_JAR=${GITHUB_WORKSPACE}/${jar}" >> "$GITHUB_ENV"
+
+      - name: Generate and deliver the Edition
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          # Read by the CLI as the Edition Delivery Target and the State Store folder.
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_DRIVE_FOLDER_DB: ${{ secrets.GOOGLE_DRIVE_FOLDER_DB }}
+          # Present for the remote editorial provider that does not exist yet. Nothing reads
+          # it today; the scheduled Edition is deterministic and makes no LLM call at all.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          uv run epub-news-feeder generate \
+            --config examples/reality-check.yaml \
+            --publication daily \
+            --state "${RUNNER_TEMP}/state/state.sqlite3" \
+            --output "${RUNNER_TEMP}/editions" \
+            --diagnostics "${RUNNER_TEMP}/diagnostics" \
+            --state-environment production
+
+      # Codes only, never titles or URLs: this log is world-readable on a public repository.
+      - name: Report diagnostic codes
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -d "${RUNNER_TEMP}/diagnostics" ]; then
+            grep -ho '"code":"[A-Z_]*"' "${RUNNER_TEMP}"/diagnostics/*.jsonl | sort | uniq -c
+          else
+            echo "No diagnostics were written."
+          fi
