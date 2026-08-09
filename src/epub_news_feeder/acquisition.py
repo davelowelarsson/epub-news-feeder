@@ -171,11 +171,7 @@ def _block_kind(element: HtmlElement, text: str) -> str:
     return "paragraph"
 
 
-def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
-    try:
-        root = html.fragment_fromstring(fragment, create_parent="div")
-    except (ValueError, TypeError):
-        return ()
+def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[BodyBlock, ...]:
     unwanted = cast(
         list[HtmlElement], root.xpath(".//script|.//style|.//nav|.//footer|.//aside|.//form")
     )
@@ -200,10 +196,18 @@ def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
         text = " ".join(element.text_content().split())
         if text:
             blocks.append(BodyBlock(_block_kind(element, text), text))
-    if blocks:
+    if blocks or not fallback_to_root_text:
         return tuple(blocks)
     fallback = " ".join(root.text_content().split())
     return (BodyBlock("paragraph", fallback),) if fallback else ()
+
+
+def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
+    try:
+        root = html.fragment_fromstring(fragment, create_parent="div")
+    except (ValueError, TypeError):
+        return ()
+    return _root_blocks(root, fallback_to_root_text=True)
 
 
 def _body_text(blocks: tuple[BodyBlock, ...]) -> str:
@@ -248,14 +252,8 @@ def _page_content(
         containers = cast(list[HtmlElement], root.xpath("//main"))
     if not containers:
         containers = [root]
-    paragraphs: list[str] = []
-    for container in containers[:1]:
-        for paragraph in cast(list[HtmlElement], container.xpath(".//p")):
-            value = " ".join(paragraph.text_content().split())
-            if value:
-                paragraphs.append(value)
-    blocks = tuple(BodyBlock("paragraph", paragraph) for paragraph in paragraphs)
-    return "\n\n".join(paragraphs), blocks, canonical_url
+    blocks = _root_blocks(containers[0], fallback_to_root_text=False)
+    return _body_text(blocks), blocks, canonical_url
 
 
 def _entry_datetime(value: object) -> datetime | None:

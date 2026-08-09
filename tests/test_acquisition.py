@@ -509,6 +509,114 @@ def test_auto_route_rejects_a_feed_teaser_and_fetches_the_complete_page() -> Non
 
 
 @pytest.mark.acceptance
+def test_web_page_body_stays_byte_identical_to_paragraph_only_extraction() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    first = " ".join(f"page-first-{index}" for index in range(80))
+    second = " ".join(f"page-second-{index}" for index in range(80))
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (
+                200,
+                "application/rss+xml",
+                b'<rss version="2.0"><channel><title>Page</title><item>'
+                b"<title>Page report</title><link>REPLACE/article</link>"
+                b"<guid>page-body-1</guid></item></channel></rss>",
+            ),
+            "/article": (
+                200,
+                "text/html",
+                (
+                    f"<html><body><article><nav>Skip to content</nav>"
+                    f"<p>{first}</p><p>{second}</p>"
+                    f"</article></body></html>"
+                ).encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            site.routes["/feed.xml"][2].replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="page-body",
+                publisher_id="publisher",
+                title="Page",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].body == f"{first}\n\n{second}"
+    assert "Skip to content" not in outcome.articles[0].body
+
+
+@pytest.mark.acceptance
+def test_web_page_article_classifies_body_blocks_by_kind() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    page = b"""<html><body><article>
+      <p>Intro paragraph text.</p>
+      <blockquote>A pull quote from a source.</blockquote>
+      <ul><li>First list item.</li><li>Second list item.</li></ul>
+      <pre><code>git status --short</code></pre>
+      <pre><code>flowchart TD task--&gt;result</code></pre>
+    </article></body></html>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (
+                200,
+                "application/rss+xml",
+                b'<rss version="2.0"><channel><title>Page</title><item>'
+                b"<title>Structured page</title><link>REPLACE/article</link>"
+                b"<guid>page-blocks-1</guid></item></channel></rss>",
+            ),
+            "/article": (200, "text/html", page),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            site.routes["/feed.xml"][2].replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="page-blocks",
+                publisher_id="publisher",
+                title="Page",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+                minimum_full_words=1,
+            )
+        )
+
+    article = outcome.articles[0]
+    assert article.classification == "verified_page_body"
+    assert [(block.kind, block.text) for block in article.blocks] == [
+        ("paragraph", "Intro paragraph text."),
+        ("quote", "A pull quote from a source."),
+        ("list", "First list item."),
+        ("list", "Second list item."),
+        ("code", "git status --short"),
+        ("diagram", "flowchart TD task-->result"),
+    ]
+    assert article.body == (
+        "Intro paragraph text.\n\n"
+        "A pull quote from a source.\n\n"
+        "First list item.\n\n"
+        "Second list item.\n\n"
+        "git status --short"
+    )
+    assert "flowchart" not in article.body
+
+
+@pytest.mark.acceptance
 @pytest.mark.parametrize(
     ("mode", "publisher_link"),
     [
