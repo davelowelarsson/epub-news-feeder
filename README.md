@@ -57,6 +57,9 @@ uv run mypy
 uv run pytest
 ```
 
+CI runs this exact gate — `.github/workflows/quality-gate.yml` executes the same four commands
+against a verified EPUBCheck 5.3.0, so the local gate and CI cannot drift.
+
 Implementation follows the project specification in GitHub issue #16. Google Drive, scheduled
 private state, physical Kobo acceptance, and OpenAI editorial integration remain subsequent
 milestones.
