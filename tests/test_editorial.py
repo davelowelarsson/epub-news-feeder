@@ -210,7 +210,7 @@ def test_omits_after_one_failed_repair_without_a_third_editorial_attempt(
 
 @pytest.mark.editorial
 def test_summary_at_exactly_the_word_ceiling_is_accepted_unchanged() -> None:
-    at_ceiling = _words(60)
+    at_ceiling = _words(120)
     provider = FakeProvider(
         [
             {
@@ -238,7 +238,7 @@ def test_over_ceiling_summary_is_classified_unsupported_and_repaired_under_ceili
         "summaries": [
             {
                 "article_id": "article-1",
-                "sentences": [{"text": _words(61), "citations": ["article-1"]}],
+                "sentences": [{"text": _words(121), "citations": ["article-1"]}],
             }
         ]
     }
@@ -280,7 +280,7 @@ def test_repair_still_over_word_ceiling_omits_that_articles_addition() -> None:
         "summaries": [
             {
                 "article_id": "article-1",
-                "sentences": [{"text": _words(61), "citations": ["article-1"]}],
+                "sentences": [{"text": _words(121), "citations": ["article-1"]}],
             }
         ]
     }
@@ -288,7 +288,7 @@ def test_repair_still_over_word_ceiling_omits_that_articles_addition() -> None:
         "summaries": [
             {
                 "article_id": "article-1",
-                "sentences": [{"text": _words(70), "citations": ["article-1"]}],
+                "sentences": [{"text": _words(130), "citations": ["article-1"]}],
             }
         ]
     }
@@ -322,8 +322,8 @@ def test_word_ceiling_counts_the_whole_summary_not_each_sentence() -> None:
             {
                 "article_id": "article-1",
                 "sentences": [
-                    {"text": _words(35), "citations": ["article-1"]},
-                    {"text": _words(35), "citations": ["article-1"]},
+                    {"text": _words(70), "citations": ["article-1"]},
+                    {"text": _words(70), "citations": ["article-1"]},
                 ],
             }
         ]

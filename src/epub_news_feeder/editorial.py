@@ -128,11 +128,13 @@ class StructuredProvider(Protocol):
 
 
 _EDITORIAL_SYSTEM_PROMPT = (
-    "Write short article summaries using only the supplied evidence. Write each summary in its "
-    "Article language; do not translate. Add useful orientation beyond the supplied lead_passage "
-    "and do not copy a complete publisher sentence. Omit a summary when no non-redundant value is "
-    "possible. Return strict JSON. Every sentence must cite one or more supplied article_id "
-    "values. Do not use outside knowledge."
+    "Write short article summaries using only the supplied evidence. Aim for about 60 words per "
+    "summary and never exceed 120; two or three plain sentences is usually right. Orient the "
+    "reader toward the article instead of retelling it, and never mirror or parrot the publisher "
+    "text. Write each summary in its Article language; do not translate. Add useful orientation "
+    "beyond the supplied lead_passage and do not copy a complete publisher sentence. Omit a "
+    "summary when no non-redundant value is possible. Return strict JSON. Every sentence must "
+    "cite one or more supplied article_id values. Do not use outside knowledge."
 )
 _VERIFIER_SYSTEM_PROMPT = (
     "Independently classify every proposed sentence against only the supplied article evidence as "
@@ -142,6 +144,8 @@ _VERIFIER_SYSTEM_PROMPT = (
 )
 _REPAIR_SYSTEM_PROMPT = (
     "Repair only sentences classified unsupported or uncertain using only the supplied evidence. "
+    "Keep each summary to about 60 words and never above 120; shorten rather than rewrite when a "
+    "summary is merely too long. "
     "Use each Article's language, avoid complete publisher sentences, and add useful orientation "
     "beyond its lead_passage. Return the complete proposal as strict JSON with citations. Do not "
     "use outside knowledge."
@@ -402,7 +406,9 @@ def _validate_summary_languages(
             raise ValueError("summary does not match the Article language")
 
 
-_SUMMARY_WORD_CEILING = 60
+# The Editorial Model is asked for about 60 words. This is the hard stop at double that: a
+# summary that overshoots a stated target is tolerable, one that retells the Article is not.
+_SUMMARY_WORD_CEILING = 120
 
 
 def _summary_word_count(summary: _ProposedSummary) -> int:
