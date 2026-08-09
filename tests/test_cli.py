@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 RUN_ID = re.compile(r"\b\d{8}T\d{6}Z-[A-Z2-7]{8}\b")
 
 
