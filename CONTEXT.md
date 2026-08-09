@@ -20,6 +20,18 @@ _Avoid_: Digest configuration, family feed
 One generated EPUB belonging to a Publication and identified by its publication time and Run ID.
 _Avoid_: Build, artifact, issue
 
+**Delivery Target**:
+An external private destination configured to receive an Edition. Its acknowledgement completes delivery but does not prove that a reader opened or read the Edition.
+_Avoid_: State Store, reader
+
+**Pending Delivery**:
+The private durable record that correlates an Edition and Run ID with its intended Delivery Target while handoff is incomplete or awaiting reconciliation.
+_Avoid_: Upload retry, Article Reservation
+
+**Delivery Copy**:
+An immutable EPUB acknowledged by a Delivery Target. It is reader-facing output, not the authoritative State Store.
+_Avoid_: Backup, state database
+
 **Main Section**:
 A top-level, ordered content placement within a Publication. Its label may name a person, subject, or any operator-chosen grouping.
 _Avoid_: Profile, family member
