@@ -1,0 +1,97 @@
+version: 1
+sources:
+  david:
+    title: David Lowe Larsson
+    publisher_id: davidlowelarsson.com
+    feed_url: https://davidlowelarsson.com/rss.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: operator_attested_private_use
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-15-david-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: unknown
+  ars:
+    title: Ars Technica
+    publisher_id: arstechnica.com
+    feed_url: https://feeds.arstechnica.com/arstechnica/index
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-15-ars-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: deny
+  svt:
+    title: SVT Nyheter
+    publisher_id: svt.se
+    feed_url: https://www.svt.se/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: operator_attested_private_use
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-15-svt-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: conditional
+  ekot:
+    title: Sveriges Radio Ekot
+    publisher_id: sverigesradio.se
+    feed_url: https://api.sr.se/api/rss/program/83
+    acquisition: metadata_only
+    llm_processing: disabled
+    rights:
+      basis: api_terms_link_only
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-15-ekot-20260809
+      feed_acquisition: allow
+      page_acquisition: deny
+      retention: deny
+      private_distribution: conditional
+      local_llm: deny
+      remote_llm: deny
+publications:
+  - id: local-reality-check
+    title: Local Reality Check
+    language: en
+    budget:
+      max_articles: 8
+      min_articles: 1
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [david, ars, svt, ekot]

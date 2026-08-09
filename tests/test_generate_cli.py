@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 import threading
@@ -49,7 +50,7 @@ class EditionFixtureHandler(BaseHTTPRequestHandler):
 
 @pytest.mark.acceptance
 @pytest.mark.epubcheck
-def test_ticket_02_cli_generates_valid_body_free_local_edition(tmp_path: Path) -> None:
+def test_ticket_13_cli_generates_valid_body_free_local_edition(tmp_path: Path) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), EditionFixtureHandler)
     EditionFixtureHandler.hits = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -151,6 +152,14 @@ publications:
     assert b"complete-journalism-42" not in diagnostic_bytes
     with sqlite3.connect(state) as connection:
         assert connection.execute("SELECT status FROM runs").fetchone() == ("delivered",)
+        delivered_ids = {
+            row[0] for row in connection.execute("SELECT article_id FROM deliveries").fetchall()
+        }
+    events = [json.loads(line) for line in diagnostic_bytes.splitlines()]
+    assert any(event.get("evidence_id") == "fixture-20260809" for event in events)
+    assert {
+        event["article_id"] for event in events if event["code"] == "ARTICLE_SELECTED"
+    } == delivered_ids
 
     validation = subprocess.run(
         [

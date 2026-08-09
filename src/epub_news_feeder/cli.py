@@ -10,6 +10,7 @@ from pathlib import Path
 from epub_news_feeder import __version__
 from epub_news_feeder.application import GenerationError, generate_edition
 from epub_news_feeder.config import ConfigError, load_config
+from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
 
 _RUN_ID = re.compile(r"^\d{8}T\d{6}Z-[A-Z2-7]{8}$")
@@ -35,6 +36,12 @@ def _parser() -> argparse.ArgumentParser:
 
     validate = commands.add_parser("validate", help="Validate configuration without side effects.")
     validate.add_argument("--config", required=True, type=Path)
+
+    ollama = commands.add_parser(
+        "ollama-check", help="Verify a local Ollama model and strict JSON output."
+    )
+    ollama.add_argument("--host", default="http://127.0.0.1:11434")
+    ollama.add_argument("--model", required=True)
     return parser
 
 
@@ -107,10 +114,22 @@ def _generate(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _ollama_check(host: str, model: str) -> int:
+    try:
+        check_ollama(host=host, model=model)
+    except OllamaError as error:
+        print(f"code=OLLAMA_UNAVAILABLE message={error}", file=sys.stderr)
+        return 3
+    print(f"code=OLLAMA_READY model={model}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
         return _generate(arguments)
     if arguments.command == "validate":
         return _validate(arguments.config)
+    if arguments.command == "ollama-check":
+        return _ollama_check(arguments.host, arguments.model)
     raise AssertionError(f"Unhandled command: {arguments.command}")

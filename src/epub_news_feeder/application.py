@@ -187,6 +187,7 @@ def _run(
                 outcome.code,
                 phase="acquisition",
                 source_id=source_id,
+                evidence_id=evidence.evidence_id,
                 articles=len(outcome.articles),
                 omitted=outcome.omitted,
             )
@@ -237,6 +238,13 @@ def _run(
     if not selection.meets_minimum:
         raise GenerationError(
             "PUBLICATION_BELOW_MINIMUM", "Eligible articles did not meet the publication minimum"
+        )
+    for article_id in selection.unique_article_ids:
+        diagnostics.emit(
+            "ARTICLE_SELECTED",
+            phase="selection",
+            article_id=article_id,
+            source_id=records[article_id].source_id,
         )
 
     placements = place_articles(selection)
@@ -289,9 +297,7 @@ def _run(
     output_directory.mkdir(parents=True, exist_ok=True)
     filename = f"epub-news--{generated_at.strftime('%Y-%m-%dT%H%M%SZ')}--{run_id}.epub"
     try:
-        receipt = deliver_local(
-            epub_bytes, output_directory=output_directory, filename=filename
-        )
+        receipt = deliver_local(epub_bytes, output_directory=output_directory, filename=filename)
     except (OSError, ValueError) as error:
         raise GenerationError("LOCAL_DELIVERY_FAILED", "Local Delivery failed") from error
     state.finalize_delivery(

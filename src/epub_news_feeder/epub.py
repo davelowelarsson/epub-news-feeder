@@ -95,9 +95,7 @@ def build_epub(edition: EditionInput) -> bytes:
         ("OEBPS/styles.css", _STYLESHEET, ZIP_DEFLATED),
     ]
     if edition.notes:
-        members.append(
-            ("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED)
-        )
+        members.append(("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED))
     members.extend(
         (
             str(section_paths[section.identifier]),
