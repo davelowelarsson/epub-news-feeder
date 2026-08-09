@@ -22,6 +22,7 @@ from epub_news_feeder.diagnostics import Diagnostics
 from epub_news_feeder.editorial import ArticleEvidence, generate_editorial
 from epub_news_feeder.epub import (
     ArticleInput,
+    BodyBlock,
     CorrectionInput,
     EditionInput,
     EditorialCitationInput,
@@ -303,6 +304,9 @@ def _run(
                         identifier=observation.article_id,
                         title=acquired.title,
                         body=acquired.body,
+                        blocks=tuple(
+                            BodyBlock(kind=block.kind, text=block.text) for block in acquired.blocks
+                        ),
                         source_name=acquired.source_title,
                         canonical_url=acquired.canonical_url,
                         language=acquired.language,

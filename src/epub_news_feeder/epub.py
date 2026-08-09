@@ -39,6 +39,14 @@ class EditorialSummaryInput:
 
 
 @dataclass(frozen=True)
+class BodyBlock:
+    """One classified unit of publisher body text; rendering decides its treatment."""
+
+    kind: str
+    text: str
+
+
+@dataclass(frozen=True)
 class ArticleInput:
     """One complete, attributed Canonical Rendition."""
 
@@ -53,6 +61,7 @@ class ArticleInput:
     update_label: str | None = None
     copyright_notice: str | None = None
     editorial_summary: EditorialSummaryInput | None = None
+    blocks: tuple[BodyBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -562,6 +571,42 @@ def _xhtml_document(title: str, language: str) -> tuple[etree._Element, etree._E
     return html, etree.SubElement(html, f"{{{_XHTML_NS}}}body")
 
 
+def _paragraph_blocks(body: str) -> tuple[BodyBlock, ...]:
+    return tuple(BodyBlock("paragraph", text) for text in body.split("\n\n"))
+
+
+def _add_body_blocks(parent: etree._Element, blocks: tuple[BodyBlock, ...]) -> None:
+    index = 0
+    while index < len(blocks):
+        block = blocks[index]
+        if block.kind == "paragraph":
+            paragraph = etree.SubElement(parent, f"{{{_XHTML_NS}}}p")
+            paragraph.text = block.text
+            index += 1
+        elif block.kind == "quote":
+            quote = etree.SubElement(parent, f"{{{_XHTML_NS}}}blockquote")
+            quote_paragraph = etree.SubElement(quote, f"{{{_XHTML_NS}}}p")
+            quote_paragraph.text = block.text
+            index += 1
+        elif block.kind == "list":
+            end = index
+            while end < len(blocks) and blocks[end].kind == "list":
+                end += 1
+            list_element = etree.SubElement(parent, f"{{{_XHTML_NS}}}ul")
+            for item in blocks[index:end]:
+                list_item = etree.SubElement(list_element, f"{{{_XHTML_NS}}}li")
+                list_item.text = item.text
+            index = end
+        elif block.kind == "code":
+            code = etree.SubElement(
+                parent, f"{{{_XHTML_NS}}}pre", attrib={"class": "publisher-code"}
+            )
+            code.text = block.text
+            index += 1
+        else:
+            index += 1
+
+
 def _add_article(
     parent: etree._Element,
     article: ArticleInput,
@@ -643,9 +688,7 @@ def _add_article(
     publisher_heading.text = _localized(
         article_language, "publisher_article", source_name=article.source_name
     )
-    for paragraph_text in article.body.split("\n\n"):
-        paragraph = etree.SubElement(publisher, f"{{{_XHTML_NS}}}p")
-        paragraph.text = paragraph_text
+    _add_body_blocks(publisher, article.blocks or _paragraph_blocks(article.body))
     canonical = etree.SubElement(publisher, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
     link = etree.SubElement(canonical, f"{{{_XHTML_NS}}}a", href=article.canonical_url)
     link.text = _localized(article_language, "read_at_publisher", source_name=article.source_name)
@@ -918,5 +961,7 @@ _STYLESHEET = (
     b"padding: 0.25em 0.85em 0.65em; }\n"
     b".publisher-content { border-top: 0.08em solid; border-bottom: 0.08em solid; "
     b"margin-top: 1.25em; padding: 0.35em 0 0.75em; }\n"
+    b".publisher-code { font-family: monospace; font-size: 0.9em; white-space: pre-wrap; "
+    b"padding-left: 1.5em; text-indent: -1.5em; }\n"
     b".colophon { border-top: 0.06em solid; margin-top: 3em; padding-top: 0.6em; }\n"
 )

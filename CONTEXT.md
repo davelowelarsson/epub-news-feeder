@@ -68,6 +68,10 @@ _Avoid_: Feed item, story
 The language of an Article’s publisher text, declared by its Source or publisher metadata and inherited by Article-specific Editorial Additions.
 _Avoid_: Publication language, detected user language
 
+**Body Block**:
+One classified unit of an Article's publisher body, carrying a kind — paragraph, code, quote, list, or diagram — and its text. Acquisition classifies every Body Block; rendering decides what to do with each kind. The plain-text body remains the single source read by revision hashing, match-rule evaluation, lead passage extraction, and editorial evidence.
+_Avoid_: Paragraph, HTML fragment, content block
+
 **Publisher Link Brief**:
 A selected, attributed reading item whose Source permits a publisher route but not reproduction of Article text. It is part of the finite Edition, not an inventory of acquired feed items.
 _Avoid_: Article, Source list, dead link
