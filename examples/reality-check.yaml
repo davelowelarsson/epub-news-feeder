@@ -41,12 +41,12 @@ sources:
     eligibility:
       evidence_reviewed_at: 2026-08-09
       review_expires_at: 2026-09-08
-      evidence_id: issue-15-ars-20260809
+      evidence_id: issue-51-ars-20260809
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
       private_distribution: allow
-      local_llm: allow
+      local_llm: deny
       remote_llm: deny
   svt:
     title: SVT Nyheter
