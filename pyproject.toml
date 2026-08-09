@@ -1,0 +1,54 @@
+[project]
+name = "epub-news-feeder"
+version = "0.1.0"
+description = "Build private, finite news Editions as standards-first EPUBs."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "feedparser>=6.0.12,<7",
+  "httpx>=0.28.1,<1",
+  "lxml>=6.0.0,<7",
+  "pydantic>=2.11.0,<3",
+  "pyyaml>=6.0.2,<7",
+  "rapidfuzz>=3.14.0,<4",
+]
+
+[project.scripts]
+epub-news-feeder = "epub_news_feeder.cli:main"
+
+[dependency-groups]
+dev = [
+  "mypy>=1.17.0,<2",
+  "pytest>=8.4.0,<9",
+  "ruff>=0.12.0,<1",
+  "types-pyyaml>=6.0.12.20250516",
+]
+
+[build-system]
+requires = ["uv_build>=0.8.0,<0.9"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+markers = [
+  "acceptance: black-box behavior through the installed CLI",
+  "contract: external adapter contract",
+  "editorial: optional editorial behavior",
+  "epubcheck: EPUB conformance behavior",
+  "property: behavioral invariants",
+  "security: privacy and fail-closed behavior",
+]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+
