@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM editor proof desk — throwaway prototype</title>
+  <style>
+    :root {
+      --paper: #eef1f4;
+      --sheet: #ffffff;
+      --ink: #162231;
+      --muted: #627080;
+      --rule: #cbd3dc;
+      --blue: #315bd5;
+      --blue-soft: #e6ecff;
+      --amber: #9d6300;
+      --amber-soft: #fff2d5;
+      --red: #a52e43;
+      --red-soft: #ffe8ec;
+      --green: #176348;
+      --green-soft: #e2f4ec;
+      --shadow: 0 18px 45px rgba(22, 34, 49, 0.09);
+      --display: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+      --body: Charter, "Bitstream Charter", Georgia, serif;
+      --utility: ui-monospace, "SFMono-Regular", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, transparent 0 47px, rgba(49, 91, 213, 0.08) 47px 48px, transparent 48px),
+        var(--paper);
+      font-family: var(--body);
+      line-height: 1.5;
+    }
+
+    button { font: inherit; }
+    button:focus-visible, summary:focus-visible { outline: 3px solid #86a2ff; outline-offset: 3px; }
+
+    .shell { width: min(1480px, calc(100% - 32px)); margin: 24px auto 72px; }
+
+    .masthead {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.8fr);
+      gap: 28px;
+      padding: clamp(24px, 4vw, 56px);
+      background: var(--ink);
+      color: #fff;
+      box-shadow: var(--shadow);
+    }
+
+    .kicker, .label, .status, .step-number {
+      font-family: var(--utility);
+      font-size: 0.72rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .kicker { color: #aebff7; }
+    h1 { max-width: 820px; margin: 12px 0 18px; font: 700 clamp(2.3rem, 6vw, 5.8rem)/0.96 var(--display); letter-spacing: -0.055em; }
+    .lede { max-width: 780px; margin: 0; color: #dce3eb; font-size: clamp(1rem, 1.7vw, 1.25rem); }
+    .question { align-self: end; padding: 20px; border: 1px solid #536170; background: #202e3d; }
+    .question strong { display: block; margin-bottom: 10px; font: 650 1.05rem/1.3 var(--display); }
+    .question p { margin: 0; color: #dce3eb; font-size: 0.95rem; }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 1px;
+      margin: 20px 0;
+      background: var(--rule);
+      border: 1px solid var(--rule);
+      box-shadow: var(--shadow);
+    }
+
+    .pipeline-step { min-height: 74px; padding: 12px; background: var(--sheet); }
+    .pipeline-step .step-number { color: var(--muted); }
+    .pipeline-step strong { display: block; margin-top: 6px; font-family: var(--display); }
+    .pipeline-step.active { background: var(--blue); color: #fff; }
+    .pipeline-step.active .step-number { color: #dbe4ff; }
+    .pipeline-step.done { background: var(--green-soft); }
+    .pipeline-step.failed { background: var(--red-soft); }
+
+    .workspace { display: grid; grid-template-columns: minmax(0, 0.92fr) minmax(420px, 1.55fr); gap: 20px; align-items: start; }
+    .stack { display: grid; gap: 20px; }
+    .panel { background: var(--sheet); border: 1px solid var(--rule); box-shadow: var(--shadow); }
+    .panel-head { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; padding: 18px 20px; border-bottom: 1px solid var(--rule); }
+    .panel-head h2 { margin: 0; font: 700 1.15rem/1.2 var(--display); }
+    .panel-body { padding: 20px; }
+    .status { color: var(--muted); }
+    .status.good { color: var(--green); }
+    .status.warn { color: var(--amber); }
+    .status.bad { color: var(--red); }
+
+    .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .action {
+      min-height: 46px;
+      border: 1px solid var(--ink);
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 10px 12px;
+      text-align: left;
+      font-family: var(--display);
+      font-weight: 650;
+    }
+    .action:hover { background: var(--blue-soft); border-color: var(--blue); }
+    .action.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .action.reset { color: var(--red); border-color: #d8a7b0; }
+
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
+    .metric { padding: 12px; background: #f6f8fa; border-left: 3px solid var(--blue); }
+    .metric span { display: block; color: var(--muted); font: 0.7rem var(--utility); text-transform: uppercase; }
+    .metric strong { display: block; margin-top: 4px; font: 700 1.05rem var(--display); }
+
+    .article, .addition, .finding, .event, .manifest-row { border-top: 1px solid var(--rule); padding: 13px 0; }
+    .article:first-child, .addition:first-child, .finding:first-child, .event:first-child, .manifest-row:first-child { border-top: 0; padding-top: 0; }
+    .article h3, .addition h3 { margin: 4px 0; font: 700 1rem/1.25 var(--display); }
+    .meta { color: var(--muted); font-family: var(--utility); font-size: 0.73rem; }
+    .badge { display: inline-block; margin-right: 5px; padding: 3px 7px; border: 1px solid currentColor; font: 0.66rem var(--utility); text-transform: uppercase; }
+    .badge.ai { color: var(--blue); background: var(--blue-soft); }
+    .badge.supported { color: var(--green); background: var(--green-soft); }
+    .badge.unsupported, .badge.omitted { color: var(--red); background: var(--red-soft); }
+    .badge.uncertain { color: var(--amber); background: var(--amber-soft); }
+    .citation { color: var(--blue); font: 0.72rem var(--utility); white-space: nowrap; }
+
+    .edition-preview { border-left: 6px solid var(--ink); }
+    .edition-title { margin: 0 0 6px; font: 750 clamp(1.6rem, 3vw, 2.5rem)/1 var(--display); letter-spacing: -0.035em; }
+    .empty-addition { padding: 18px; color: var(--muted); background: #f5f7f9; border: 1px dashed var(--rule); }
+
+    .tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--rule); }
+    .tab { flex: 0 0 auto; border: 0; border-right: 1px solid var(--rule); padding: 13px 16px; background: #f6f8fa; cursor: pointer; font-family: var(--display); font-weight: 650; }
+    .tab[aria-selected="true"] { background: var(--ink); color: #fff; }
+    .walkthrough { display: grid; gap: 16px; }
+    .walkthrough h3 { margin: 0; font: 700 1.15rem var(--display); }
+    .walkthrough p { margin: 0; color: var(--muted); }
+    .guided-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .guided-steps button { min-height: 52px; }
+
+    .manifest-row { display: grid; grid-template-columns: 130px 1fr; gap: 12px; font-size: 0.9rem; }
+    .manifest-row strong { font-family: var(--display); }
+    .manifest-row code { font-family: var(--utility); font-size: 0.76rem; overflow-wrap: anywhere; }
+
+    details { border-top: 1px solid var(--rule); }
+    summary { padding: 16px 20px; cursor: pointer; font-family: var(--display); font-weight: 700; }
+    pre { max-height: 520px; overflow: auto; margin: 0; padding: 20px; background: #101923; color: #dce7f3; font: 0.75rem/1.55 var(--utility); white-space: pre-wrap; }
+
+    .prototype-note { margin-top: 20px; padding: 14px 18px; background: var(--amber-soft); border-left: 5px solid var(--amber); font-size: 0.9rem; }
+    .walkthrough-panel { margin-top: 20px; }
+    .articles { margin-top: 18px; }
+
+    @media (max-width: 980px) {
+      .masthead, .workspace { grid-template-columns: 1fr; }
+      .pipeline { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 16px, 1480px); margin-top: 8px; }
+      .masthead { padding: 24px 20px; }
+      .pipeline { grid-template-columns: repeat(2, 1fr); }
+      .actions, .guided-steps, .metrics { grid-template-columns: 1fr; }
+      .manifest-row { grid-template-columns: 1fr; gap: 3px; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <div class="kicker">Prototype — discard after learning</div>
+        <h1>The proof desk</h1>
+        <p class="lede">Drive a proposed LLM editor through evidence checks. The deterministic Edition always survives; generated prose earns its place sentence by sentence.</p>
+      </div>
+      <aside class="question">
+        <strong>Question this prototype answers</strong>
+        <p>Does a bounded proposal → verification → one repair → final verification loop produce useful editorial help without letting the model override eligibility, privacy, budget, citations, or fallback?</p>
+      </aside>
+    </header>
+
+    <section id="pipeline" class="pipeline" aria-label="Editorial verification pipeline"></section>
+
+    <div class="workspace">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Free play</h2>
+            <span id="phaseStatus" class="status"></span>
+          </div>
+          <div class="panel-body">
+            <div class="actions">
+              <button type="button" class="action primary" data-action="REQUEST_PROPOSAL">Ask editor</button>
+              <button type="button" class="action" data-action="VALIDATE_PROPOSAL">Check structure</button>
+              <button type="button" class="action" data-action="VERIFY">Verify claims</button>
+              <button type="button" class="action" data-action="REPAIR">Repair once</button>
+              <button type="button" class="action" data-action="REVERIFY">Verify repair</button>
+              <button type="button" class="action" data-action="APPLY_GATE">Apply final gate</button>
+              <button type="button" class="action reset" data-action="RESET">Reset scenario</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Allowed context</h2>
+            <span class="status">explicit allowlist</span>
+          </div>
+          <div id="manifest" class="panel-body"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Private event trail</h2>
+            <span class="status">synthetic Run ID</span>
+          </div>
+          <div id="events" class="panel-body"></div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="panel edition-preview">
+          <div class="panel-head">
+            <h2>Edition preview</h2>
+            <span id="editionStatus" class="status"></span>
+          </div>
+          <div id="edition" class="panel-body"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Editorial proposal and evidence</h2>
+            <span id="proposalStatus" class="status"></span>
+          </div>
+          <div id="evidence" class="panel-body"></div>
+          <details>
+            <summary>Complete state snapshot</summary>
+            <pre id="stateDump"></pre>
+          </details>
+        </section>
+      </div>
+    </div>
+
+    <section class="panel walkthrough-panel">
+      <div class="panel-head">
+        <h2>Guided walkthroughs</h2>
+        <span class="status">each tab resets state</span>
+      </div>
+      <div id="tabs" class="tabs" role="tablist" aria-label="Prototype scenarios"></div>
+      <div id="walkthrough" class="panel-body"></div>
+    </section>
+
+    <p class="prototype-note"><strong>Prototype boundary:</strong> all reporting, model replies, costs, and provider details are synthetic fixtures. This file tests the editorial contract; it does not prove model quality or call any external service.</p>
+  </main>
+
+  <script>
+    const EditorLoop = (() => {
+      const ARTICLES = [
+        { id: "A1", source: "SVT fixture", section: "Current affairs", title: "Harbour council schedules rail vote", selected: true, essential: true },
+        { id: "A2", source: "Ekot fixture", section: "Current affairs", title: "Residents question harbour rail timetable", selected: true, essential: false },
+        { id: "A3", source: "Ars fixture", section: "Technology", title: "Battery supplier opens Nordic test line", selected: true, essential: false },
+        { id: "M1", source: "Muted fixture", section: "Technology", title: "Rumour repeats an old launch claim", selected: false, essential: false }
+      ];
+
+      const SCENARIOS = {
+        happy: {
+          title: "Grounded addition",
+          description: "A useful overview and ranking suggestion cite only supplied Articles. Watch generated prose appear without changing the deterministic Article set.",
+          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
+        },
+        authority: {
+          title: "Hard-rule conflict",
+          description: "The editor tries to revive a muted Article and overrule Essential Coverage. Local validation must reject the proposal before verification.",
+          proposal: "authority_violation", verification: "unused", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "APPLY_GATE"]
+        },
+        repair: {
+          title: "One repair loop",
+          description: "One unsupported claim is found. The editor gets one repair, and the repaired prose must pass a second verification before publication.",
+          proposal: "unsupported", verification: "unsupported", repair: "successful", costCap: 0.10, estimatedWorstCase: 0.09,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "REPAIR", "REVERIFY", "APPLY_GATE"]
+        },
+        failedRepair: {
+          title: "Failed repair omitted",
+          description: "The single repair still contains an unsupported claim. No second repair is allowed; all optional output is omitted.",
+          proposal: "unsupported", verification: "unsupported", repair: "failed", costCap: 0.10, estimatedWorstCase: 0.09,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "REPAIR", "REVERIFY", "APPLY_GATE"]
+        },
+        malformed: {
+          title: "Malformed response",
+          description: "The provider returns invalid structured output. No verifier call is made and the deterministic Edition remains untouched.",
+          proposal: "malformed", verification: "unused", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "APPLY_GATE"]
+        },
+        privacy: {
+          title: "Privacy allowlist",
+          description: "Sensitive sentinels exist in private state but are excluded from both editor and verifier receipts. Only explicitly allowed fields cross the boundary.",
+          proposal: "grounded", verification: "supported", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
+        },
+        verifier: {
+          title: "Verifier unavailable",
+          description: "The proposal is structurally valid but cannot be verified. The optional layer stays silent; the baseline Edition still publishes.",
+          proposal: "grounded", verification: "unavailable", repair: "none", costCap: 0.10, estimatedWorstCase: 0.07,
+          steps: ["REQUEST_PROPOSAL", "VALIDATE_PROPOSAL", "VERIFY", "APPLY_GATE"]
+        },
+        cost: {
+          title: "Cost reserve stop",
+          description: "Worst-case proposal, verification, repair, and re-verification cost cannot be reserved. No provider call occurs.",
+          proposal: "grounded", verification: "unused", repair: "none", costCap: 0.04, estimatedWorstCase: 0.09,
+          steps: ["REQUEST_PROPOSAL", "APPLY_GATE"]
+        }
+      };
+
+      const PHASES = ["baseline", "proposal", "structure", "verification", "repair", "gate"];
+
+      function copy(value) { return JSON.parse(JSON.stringify(value)); }
+
+      function initialState(scenarioKey = "happy") {
+        const scenario = SCENARIOS[scenarioKey];
+        return {
+          scenarioKey,
+          scenario: copy(scenario),
+          runId: "proto-run-14",
+          phase: "baseline",
+          calls: { used: 0, maximum: 4, estimatedSpent: 0, ceiling: scenario.costCap, worstCaseReserve: scenario.estimatedWorstCase },
+          manifest: {
+            sent: ["candidate IDs", "allowlisted current Article text + metadata", "six-day delivered history", "deterministic selection reasons"],
+            withheld: ["Drive refresh token", "folder ID", "raw diagnostics", "operator private note", "history older than seven days", "unlisted Feedback Signal"],
+            editorReceipt: [],
+            verifierReceipt: []
+          },
+          deterministic: {
+            selectedArticleIds: ["A1", "A2", "A3"],
+            essentialArticleIds: ["A1"],
+            excludedArticleIds: ["M1"],
+            budget: { maxArticles: 3, filled: 3 },
+            authority: "unchanged"
+          },
+          proposal: null,
+          structure: { status: "not_checked", reasons: [] },
+          verification: { status: "not_run", findings: [] },
+          repair: { attempted: false, status: "not_run" },
+          outcome: { status: "baseline_ready", additions: [], suggestions: [], readerNote: null },
+          events: [{ code: "BASELINE_READY", message: "Deterministic Edition is valid without LLM output." }],
+          lastChange: "Scenario loaded."
+        };
+      }
+
+      function groundedProposal(kind) {
+        const unsupported = kind === "unsupported";
+        return {
+          schemaVersion: 1,
+          validJson: kind !== "malformed",
+          ranking: [
+            { articleId: "A2", editorialPriority: "raise", reason: "Adds a resident perspective", citations: ["A2"] }
+          ],
+          clusterSuggestions: [
+            { candidateIds: ["A1", "A2"], eventLabel: "Harbour rail vote", evidence: ["A1", "A2"], status: "advisory" }
+          ],
+          additions: [
+            {
+              id: "OVERVIEW-1",
+              type: "Main Section Overview",
+              section: "Current affairs",
+              claims: [
+                { id: "C1", text: "The harbour rail plan returns to the council for a scheduled vote.", citations: ["A1"] },
+                { id: "C2", text: unsupported ? "The plan will cut every resident’s travel costs." : "Residents are questioning the proposed timetable.", citations: ["A2"] }
+              ]
+            },
+            {
+              id: "SUMMARY-A3",
+              type: "Article Summary",
+              articleId: "A3",
+              claims: [
+                { id: "C3", text: "A Nordic battery test line is opening for supplier trials.", citations: ["A3"] }
+              ]
+            }
+          ]
+        };
+      }
+
+      function proposalFor(kind) {
+        if (kind === "malformed") return { raw: "{ additions: [ missing quote ]", validJson: false };
+        if (kind === "authority_violation") {
+          const proposal = groundedProposal("grounded");
+          proposal.ranking.unshift({ articleId: "M1", editorialPriority: "raise", reason: "Include muted rumour", citations: ["M1"] });
+          proposal.ranking.push({ articleId: "A1", editorialPriority: "lower", reason: "Remove essential item", citations: ["A1"] });
+          return proposal;
+        }
+        return groundedProposal(kind);
+      }
+
+      function structuralCheck(state) {
+        if (!state.proposal || state.proposal.validJson === false) return ["Response is not valid schema-conforming JSON."];
+        const refs = [];
+        (state.proposal.ranking || []).forEach(item => refs.push(item.articleId));
+        (state.proposal.clusterSuggestions || []).forEach(item => refs.push(...item.candidateIds));
+        (state.proposal.additions || []).forEach(addition => addition.claims.forEach(claim => refs.push(...claim.citations)));
+        const forbidden = refs.filter(id => !state.deterministic.selectedArticleIds.includes(id));
+        const reasons = [];
+        if (forbidden.length) reasons.push(`References ineligible or unsupplied IDs: ${[...new Set(forbidden)].join(", ")}.`);
+        if ((state.proposal.ranking || []).some(item => state.deterministic.essentialArticleIds.includes(item.articleId) && item.editorialPriority === "lower")) {
+          reasons.push("Attempts to lower deterministic Essential Coverage.");
+        }
+        return reasons;
+      }
+
+      function findingsFor(state, repaired = false) {
+        const claims = (state.proposal?.additions || []).flatMap(addition => addition.claims);
+        if (repaired) return claims.map(claim => ({ claimId: claim.id, status: "supported", citations: claim.citations }));
+        return claims.map(claim => ({
+          claimId: claim.id,
+          status: state.scenario.verification === "unsupported" && claim.id === "C2" ? "unsupported" : "supported",
+          citations: claim.citations
+        }));
+      }
+
+      function addEvent(next, code, message) {
+        next.events.push({ code, message });
+        next.lastChange = message;
+        return next;
+      }
+
+      function fallback(next, code, reason) {
+        next.phase = "gate";
+        next.outcome = { status: "deterministic_fallback", additions: [], suggestions: [], readerNote: null };
+        next.deterministic.authority = "unchanged";
+        return addEvent(next, code, reason);
+      }
+
+      function reduce(state, action) {
+        if (action.type === "RESET") return initialState(state.scenarioKey);
+        if (action.type === "LOAD_SCENARIO") return initialState(action.scenarioKey);
+        const next = copy(state);
+
+        if (action.type === "REQUEST_PROPOSAL") {
+          if (state.phase !== "baseline") return addEvent(next, "ACTION_IGNORED", "Editor can only start from the deterministic baseline.");
+          if (state.calls.worstCaseReserve > state.calls.ceiling) return fallback(next, "COST_RESERVE_REJECTED", "Worst-case proposal, verification, repair, and re-verification cost cannot be reserved. No provider call made.");
+          next.calls.used += 1;
+          next.calls.estimatedSpent = 0.02;
+          next.manifest.editorReceipt = [...next.manifest.sent];
+          next.proposal = proposalFor(state.scenario.proposal);
+          next.phase = "proposal";
+          next.outcome.status = "proposal_received";
+          return addEvent(next, "PROPOSAL_RECEIVED", "Structured editorial proposal received; deterministic Edition unchanged.");
+        }
+
+        if (action.type === "VALIDATE_PROPOSAL") {
+          if (state.phase !== "proposal") return addEvent(next, "ACTION_IGNORED", "Structure can only be checked after a proposal arrives.");
+          const reasons = structuralCheck(next);
+          next.structure = { status: reasons.length ? "rejected" : "accepted", reasons };
+          next.phase = "structure";
+          if (reasons.length) return addEvent(next, "PROPOSAL_REJECTED", "Local structure or authority checks rejected the proposal before verification.");
+          return addEvent(next, "PROPOSAL_ACCEPTED", "JSON shape, citation IDs, and deterministic authority checks passed.");
+        }
+
+        if (action.type === "VERIFY") {
+          if (state.phase !== "structure" || state.structure.status !== "accepted") return addEvent(next, "ACTION_IGNORED", "Claims can only be verified after local checks pass.");
+          if (state.scenario.verification === "unavailable") return fallback(next, "VERIFIER_UNAVAILABLE", "Verifier unavailable; all optional output discarded without a reader-facing error.");
+          next.calls.used += 1;
+          next.calls.estimatedSpent = 0.04;
+          next.manifest.verifierReceipt = [...next.manifest.sent];
+          next.verification.findings = findingsFor(next, false);
+          const failed = next.verification.findings.some(item => item.status !== "supported");
+          next.verification.status = failed ? "repair_required" : "supported";
+          next.phase = "verification";
+          return addEvent(next, failed ? "CLAIM_REJECTED" : "CLAIMS_SUPPORTED", failed ? "At least one claim is unsupported; one repair is available." : "Every factual sentence is supported by supplied citations.");
+        }
+
+        if (action.type === "REPAIR") {
+          if (state.phase !== "verification" || state.verification.status !== "repair_required") return addEvent(next, "ACTION_IGNORED", "Repair is available only after a failed verification.");
+          next.calls.used += 1;
+          next.calls.estimatedSpent = 0.06;
+          next.repair = { attempted: true, status: "received" };
+          if (state.scenario.repair === "successful") {
+            const claim = next.proposal.additions.flatMap(addition => addition.claims).find(item => item.id === "C2");
+            claim.text = "Residents are questioning the proposed timetable.";
+            claim.citations = ["A2"];
+          }
+          next.phase = "repair";
+          return addEvent(next, "REPAIR_RECEIVED", "One repaired proposal received. New prose remains unpublished until verified again.");
+        }
+
+        if (action.type === "REVERIFY") {
+          if (state.phase !== "repair") return addEvent(next, "ACTION_IGNORED", "Only repaired prose can enter final verification.");
+          next.calls.used += 1;
+          next.calls.estimatedSpent = 0.08;
+          next.verification.findings = findingsFor(next, state.scenario.repair === "successful");
+          const failed = next.verification.findings.some(item => item.status !== "supported");
+          next.verification.status = failed ? "rejected_final" : "supported_after_repair";
+          next.phase = "verification";
+          return addEvent(next, failed ? "REPAIR_REJECTED" : "REPAIR_SUPPORTED", failed ? "Repaired prose still has unresolved claims; no further loop is allowed." : "The single repair passed fresh verification.");
+        }
+
+        if (action.type === "APPLY_GATE") {
+          if (["supported", "supported_after_repair"].includes(state.verification.status) && state.structure.status === "accepted") {
+            next.phase = "gate";
+            next.outcome = {
+              status: "enhanced",
+              additions: copy(state.proposal.additions),
+              suggestions: ["A2 receives a bounded editorial raise", "A1 + A2 sent to deterministic cluster evaluation"],
+              readerNote: "AI-generated from the cited Articles and automatically reviewed."
+            };
+            next.deterministic.authority = "re-applied after advisory suggestions";
+            return addEvent(next, "ENHANCEMENT_ACCEPTED", "Verified additions published; advisory suggestions passed back through deterministic constraints.");
+          }
+          if (["rejected", "rejected_final"].includes(state.structure.status) || state.verification.status === "rejected_final") {
+            return fallback(next, "ENHANCEMENT_OMITTED", "Optional output failed its final gate; deterministic Edition retained.");
+          }
+          if (state.outcome.status === "deterministic_fallback") return addEvent(next, "FALLBACK_CONFIRMED", "Deterministic fallback already selected.");
+          return addEvent(next, "ACTION_IGNORED", "Final gate needs verified prose or a terminal failure.");
+        }
+
+        return addEvent(next, "UNKNOWN_ACTION", `Unknown action: ${action.type}`);
+      }
+
+      return { ARTICLES, SCENARIOS, PHASES, initialState, reduce };
+    })();
+
+    let state = EditorLoop.initialState();
+
+    const el = id => document.getElementById(id);
+    const escapeHtml = value => String(value).replace(/[&<>"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]);
+    const phaseIndex = phase => ({ baseline: 0, proposal: 1, structure: 2, verification: 3, repair: 4, gate: 5 })[phase] ?? 0;
+
+    function renderPipeline() {
+      const active = phaseIndex(state.phase);
+      const names = ["Baseline", "Proposal", "Local checks", "Verification", "One repair", "Final gate"];
+      el("pipeline").innerHTML = names.map((name, index) => {
+        let cls = "pipeline-step";
+        if (index < active) cls += " done";
+        if (index === active) cls += " active";
+        if (state.outcome.status === "deterministic_fallback" && index === active) cls += " failed";
+        return `<div class="${cls}"><span class="step-number">${String(index + 1).padStart(2, "0")}</span><strong>${name}</strong></div>`;
+      }).join("");
+    }
+
+    function renderManifest() {
+      const rows = [
+        ["Sent", state.manifest.sent.join(" · ")],
+        ["Withheld", state.manifest.withheld.join(" · ")],
+        ["Editor receipt", state.manifest.editorReceipt.length ? state.manifest.editorReceipt.join(" · ") : "No request yet"],
+        ["Verifier receipt", state.manifest.verifierReceipt.length ? state.manifest.verifierReceipt.join(" · ") : "No request yet"]
+      ];
+      el("manifest").innerHTML = rows.map(([key, value]) => `<div class="manifest-row"><strong>${key}</strong><code>${escapeHtml(value)}</code></div>`).join("");
+    }
+
+    function renderEdition() {
+      const enhanced = state.outcome.status === "enhanced";
+      const additions = enhanced ? state.outcome.additions : [];
+      const additionHtml = additions.length ? additions.map(addition => `
+        <article class="addition">
+          <span class="badge ai">${escapeHtml(addition.type)}</span>
+          <h3>${escapeHtml(addition.section || `About ${addition.articleId}`)}</h3>
+          ${addition.claims.map(claim => `<p>${escapeHtml(claim.text)} <span class="citation">[${claim.citations.join(", ")}]</span></p>`).join("")}
+        </article>`).join("") : `<div class="empty-addition">No generated prose is present. In the real Edition, optional-editor failure stays silent.</div>`;
+      const articles = EditorLoop.ARTICLES.filter(article => state.deterministic.selectedArticleIds.includes(article.id)).map(article => `
+        <article class="article">
+          <div class="meta">${article.id} · ${escapeHtml(article.source)} · ${escapeHtml(article.section)}</div>
+          <h3>${escapeHtml(article.title)}</h3>
+          <span class="badge supported">Complete publisher Article preserved</span>
+          ${article.essential ? '<span class="badge">Essential Coverage</span>' : ''}
+        </article>`).join("");
+      el("edition").innerHTML = `
+        <div class="metrics">
+          <div class="metric"><span>Articles</span><strong>${state.deterministic.selectedArticleIds.length} / ${state.deterministic.budget.maxArticles}</strong></div>
+          <div class="metric"><span>LLM calls</span><strong>${state.calls.used} / ${state.calls.maximum}</strong></div>
+          <div class="metric"><span>Synthetic cost</span><strong>${state.calls.estimatedSpent.toFixed(2)} / ${state.calls.ceiling.toFixed(2)}</strong></div>
+        </div>
+        <h3 class="edition-title">Today’s private Edition</h3>
+        <p class="meta">Deterministic authority: ${escapeHtml(state.deterministic.authority)}</p>
+        ${enhanced ? `<p><span class="badge ai">Editorial Addition</span> ${escapeHtml(state.outcome.readerNote)}</p>` : ""}
+        ${additionHtml}
+        <div class="articles">${articles}</div>`;
+      const status = enhanced ? "Verified enhancement" : state.outcome.status === "deterministic_fallback" ? "Deterministic fallback" : "Baseline preserved";
+      el("editionStatus").textContent = status;
+      el("editionStatus").className = `status ${enhanced ? "good" : state.outcome.status === "deterministic_fallback" ? "warn" : ""}`;
+    }
+
+    function renderEvidence() {
+      const proposal = state.proposal;
+      const findings = state.verification.findings || [];
+      const additions = proposal?.additions || [];
+      let html = `<p><strong>What changed:</strong> ${escapeHtml(state.lastChange)}</p>`;
+      if (!proposal) html += `<div class="empty-addition">No proposal yet. The baseline is already publishable.</div>`;
+      if (proposal?.validJson === false) html += `<div class="finding"><span class="badge unsupported">Malformed</span><p>Structured output cannot be parsed or validated.</p></div>`;
+      additions.forEach(addition => {
+        html += `<article class="addition"><div class="meta">${escapeHtml(addition.id)} · ${escapeHtml(addition.type)}</div>`;
+        addition.claims.forEach(claim => {
+          const finding = findings.find(item => item.claimId === claim.id);
+          const status = finding?.status || "not verified";
+          html += `<div class="finding"><span class="badge ${status === "supported" ? "supported" : status === "not verified" ? "" : "unsupported"}">${escapeHtml(status)}</span><p>${escapeHtml(claim.text)} <span class="citation">[${claim.citations.join(", ")}]</span></p></div>`;
+        });
+        html += `</article>`;
+      });
+      if (state.structure.reasons.length) html += state.structure.reasons.map(reason => `<div class="finding"><span class="badge unsupported">Local rejection</span><p>${escapeHtml(reason)}</p></div>`).join("");
+      el("evidence").innerHTML = html;
+      el("proposalStatus").textContent = state.verification.status.replaceAll("_", " ");
+      el("proposalStatus").className = `status ${state.verification.status.includes("supported") ? "good" : state.verification.status.includes("reject") || state.structure.status === "rejected" ? "bad" : ""}`;
+      el("stateDump").textContent = JSON.stringify(state, null, 2);
+    }
+
+    function renderEvents() {
+      el("events").innerHTML = [...state.events].reverse().map(event => `<div class="event"><span class="meta">${escapeHtml(event.code)}</span><br>${escapeHtml(event.message)}</div>`).join("");
+    }
+
+    function renderTabs() {
+      el("tabs").innerHTML = Object.entries(EditorLoop.SCENARIOS).map(([key, scenario]) => `<button type="button" class="tab" role="tab" aria-selected="${state.scenarioKey === key}" data-scenario="${key}">${escapeHtml(scenario.title)}</button>`).join("");
+      const scenario = EditorLoop.SCENARIOS[state.scenarioKey];
+      el("walkthrough").innerHTML = `<div class="walkthrough"><h3>${escapeHtml(scenario.title)}</h3><p>${escapeHtml(scenario.description)}</p><div class="guided-steps">${scenario.steps.map((step, index) => `<button type="button" class="action" data-action="${step}"><span class="step-number">Step ${index + 1}</span><br>${escapeHtml({ REQUEST_PROPOSAL: "Ask editor", VALIDATE_PROPOSAL: "Check structure", VERIFY: "Verify claims", REPAIR: "Repair once", REVERIFY: "Verify repair", APPLY_GATE: "Apply final gate" }[step])}</button>`).join("")}</div></div>`;
+    }
+
+    function render() {
+      renderPipeline();
+      renderManifest();
+      renderEdition();
+      renderEvidence();
+      renderEvents();
+      renderTabs();
+      el("phaseStatus").textContent = state.phase;
+    }
+
+    document.addEventListener("click", event => {
+      const scenarioButton = event.target.closest("[data-scenario]");
+      if (scenarioButton) {
+        state = EditorLoop.reduce(state, { type: "LOAD_SCENARIO", scenarioKey: scenarioButton.dataset.scenario });
+        render();
+        return;
+      }
+      const actionButton = event.target.closest("[data-action]");
+      if (actionButton) {
+        state = EditorLoop.reduce(state, { type: actionButton.dataset.action });
+        render();
+      }
+    });
+
+    render();
+  </script>
+</body>
+</html>
