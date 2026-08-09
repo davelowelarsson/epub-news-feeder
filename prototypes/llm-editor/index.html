@@ -111,7 +111,7 @@
     .action.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
     .action.reset { color: var(--red); border-color: #d8a7b0; }
 
-    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 18px; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-bottom: 18px; }
     .metric { padding: 12px; background: #f6f8fa; border-left: 3px solid var(--blue); }
     .metric span { display: block; color: var(--muted); font: 0.7rem var(--utility); text-transform: uppercase; }
     .metric strong { display: block; margin-top: 4px; font: 700 1.05rem var(--display); }
@@ -326,6 +326,12 @@
           runId: "proto-run-14",
           phase: "baseline",
           calls: { used: 0, maximum: 4, estimatedSpent: 0, ceiling: scenario.costCap, worstCaseReserve: scenario.estimatedWorstCase },
+          models: {
+            editorial: "provider/editorial-model@pinned-version",
+            verifier: "provider/verifier-model@pinned-version",
+            evaluatedPair: true
+          },
+          editorialInfluence: "bounded",
           manifest: {
             sent: ["candidate IDs", "allowlisted current Article text + metadata", "six-day delivered history", "deterministic selection reasons"],
             withheld: ["Drive refresh token", "folder ID", "raw diagnostics", "operator private note", "history older than seven days", "unlisted Feedback Signal"],
@@ -542,6 +548,8 @@
       const rows = [
         ["Sent", state.manifest.sent.join(" · ")],
         ["Withheld", state.manifest.withheld.join(" · ")],
+        ["Editorial Model", state.models.editorial],
+        ["Verifier Model", state.models.verifier],
         ["Editor receipt", state.manifest.editorReceipt.length ? state.manifest.editorReceipt.join(" · ") : "No request yet"],
         ["Verifier receipt", state.manifest.verifierReceipt.length ? state.manifest.verifierReceipt.join(" · ") : "No request yet"]
       ];
@@ -569,6 +577,7 @@
           <div class="metric"><span>Articles</span><strong>${state.deterministic.selectedArticleIds.length} / ${state.deterministic.budget.maxArticles}</strong></div>
           <div class="metric"><span>LLM calls</span><strong>${state.calls.used} / ${state.calls.maximum}</strong></div>
           <div class="metric"><span>Synthetic cost</span><strong>${state.calls.estimatedSpent.toFixed(2)} / ${state.calls.ceiling.toFixed(2)}</strong></div>
+          <div class="metric"><span>Influence</span><strong>${escapeHtml(state.editorialInfluence)}</strong></div>
         </div>
         <h3 class="edition-title">Today’s private Edition</h3>
         <p class="meta">Deterministic authority: ${escapeHtml(state.deterministic.authority)}</p>
