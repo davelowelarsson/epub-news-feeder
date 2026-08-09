@@ -125,13 +125,17 @@ An explicit instruction that excludes a Source or topic, distinct from a soft Fe
 _Avoid_: Dislike, negative feedback
 
 **Publication Note**:
-A minimal reader-facing notice in an Edition describing omitted content or degraded generation without internal diagnostic detail.
+A minimal reader-facing notice in an Edition describing omitted content or degraded generation without internal diagnostic detail. Repeated failures are aggregated by Source, Section, and category.
 _Avoid_: Error, stack trace
+
+**Diagnostic Event**:
+A structured private observation emitted during a Run, carrying enough sanitized context to understand and reproduce an operational outcome.
+_Avoid_: Log line, Publication Note
 
 **Editorial Addition**:
 Clearly labelled generated prose, such as an Article Summary or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
 _Avoid_: Article, journalism, objective summary
 
 **Run ID**:
-A portable identifier correlating an Edition and its Publication Notes with private operational diagnostics.
+A portable identifier created for one generation attempt before validation, correlating its output, Publication Notes, diagnostics, workflow run, and provider requests.
 _Avoid_: GitHub Actions ID, build number
