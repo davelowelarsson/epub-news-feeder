@@ -10,6 +10,9 @@ are defined in `CONTEXT.md`.
 - Every local editorial batch contains one Article. English and Swedish output is also checked by a
   deterministic language gate before verifier acceptance; one unstable or unverifiable response
   therefore omits only that Article's summary.
+- A summary is bounded to sixty words in total, counted across all its sentences and checked
+  deterministically alongside the language gate. A repair that remains over the ceiling omits only
+  that Article's summary; the Article keeps its publisher text either way.
 - Generated prose has a visible and semantic Editorial Boundary with explicit start and end. The
   publisher text begins under its own label and must not appear to continue the summary.
 - The short disclosure explaining generation and independent verification appears once in Edition
