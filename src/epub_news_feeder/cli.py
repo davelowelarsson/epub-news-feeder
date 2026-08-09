@@ -11,7 +11,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from epub_news_feeder import __version__
-from epub_news_feeder.application import DriveTarget, GenerationError, generate_edition
+from epub_news_feeder.application import (
+    DriveTarget,
+    GenerationError,
+    StateSyncTarget,
+    generate_edition,
+)
 from epub_news_feeder.config import ConfigError, load_config
 from epub_news_feeder.drive import (
     DriveConfigurationError,
@@ -26,6 +31,7 @@ from epub_news_feeder.drive_oauth import (
 )
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
+from epub_news_feeder.state_sync import StateSyncError, restore_state, save_state
 
 _RUN_ID = re.compile(r"^\d{8}T\d{6}Z-[A-Z2-7]{8}$")
 
@@ -50,6 +56,18 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--drive-folder", help="Also deliver to this Google Drive folder ID (opt-in)."
     )
+    generate.add_argument(
+        "--state-folder",
+        help=(
+            "Restore/save the State Store from/to this Google Drive folder ID (opt-in); "
+            "defaults to GOOGLE_DRIVE_FOLDER_DB."
+        ),
+    )
+    generate.add_argument(
+        "--state-environment",
+        default="local",
+        help="Scheduled State Store archive name suffix (state-<environment>.tar.gz).",
+    )
 
     validate = commands.add_parser("validate", help="Validate configuration without side effects.")
     validate.add_argument("--config", required=True, type=Path)
@@ -70,6 +88,20 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to the downloaded client_secret_*.json; defaults to the one in the cwd.",
     )
+
+    state_pull = commands.add_parser(
+        "state-pull", help="Debug: restore the State Store from Drive, verifying its digest."
+    )
+    state_pull.add_argument("--state", required=True, type=Path)
+    state_pull.add_argument("--state-folder", required=True)
+    state_pull.add_argument("--state-environment", default="local")
+
+    state_push = commands.add_parser(
+        "state-push", help="Debug: save the State Store to Drive, overwriting it in place."
+    )
+    state_push.add_argument("--state", required=True, type=Path)
+    state_push.add_argument("--state-folder", required=True)
+    state_push.add_argument("--state-environment", default="local")
     return parser
 
 
@@ -121,16 +153,22 @@ def _generate(arguments: argparse.Namespace) -> int:
         return 2
     diagnostics = arguments.diagnostics or arguments.state.parent / "diagnostics"
     drive_folder = arguments.drive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    state_folder = arguments.state_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_DB")
     drive_target = None
-    if drive_folder:
+    state_sync_target = None
+    if drive_folder or state_folder:
         try:
             credentials = credentials_from_environment()
         except DriveConfigurationError as error:
             _report_failure(run_id, "DRIVE_CONFIGURATION_INVALID", str(error))
             return 2
-        drive_target = DriveTarget(
-            client=HttpDriveClient(credentials=credentials), folder_id=drive_folder
-        )
+        client = HttpDriveClient(credentials=credentials)
+        if drive_folder:
+            drive_target = DriveTarget(client=client, folder_id=drive_folder)
+        if state_folder:
+            state_sync_target = StateSyncTarget(
+                client=client, folder_id=state_folder, environment=arguments.state_environment
+            )
     try:
         result = generate_edition(
             configuration,
@@ -142,6 +180,7 @@ def _generate(arguments: argparse.Namespace) -> int:
             publication_id=arguments.publication,
             epubcheck_jar=arguments.epubcheck_jar,
             drive_target=drive_target,
+            state_sync_target=state_sync_target,
         )
     except GenerationError as error:
         _report_failure(run_id, error.code, error.safe_message)
@@ -187,6 +226,49 @@ def _authorize_drive(client_secret_path: Path | None) -> int:
     return 0
 
 
+def _state_pull(state_path: Path, folder_id: str, environment: str) -> int:
+    """Debug command: restore the State Store from Drive, fail-closed like ``generate`` does."""
+
+    try:
+        credentials = credentials_from_environment()
+    except DriveConfigurationError as error:
+        print(f"code=DRIVE_CONFIGURATION_INVALID message={error}", file=sys.stderr)
+        return 2
+    client = HttpDriveClient(credentials=credentials)
+    try:
+        outcome = restore_state(
+            client=client, folder_id=folder_id, state_path=state_path, environment=environment
+        )
+    except StateSyncError as error:
+        print(f"code=STATE_RESTORE_FAILED message={error}", file=sys.stderr)
+        return 3
+    if outcome.restored:
+        print(f"code=STATE_RESTORED state={state_path}")
+    else:
+        print(f"code=STATE_ABSENT state={state_path}")
+    return 0
+
+
+def _state_push(state_path: Path, folder_id: str, environment: str) -> int:
+    """Debug command: save the State Store to Drive, overwriting the archive in place."""
+
+    try:
+        credentials = credentials_from_environment()
+    except DriveConfigurationError as error:
+        print(f"code=DRIVE_CONFIGURATION_INVALID message={error}", file=sys.stderr)
+        return 2
+    client = HttpDriveClient(credentials=credentials)
+    try:
+        digest = save_state(
+            client=client, folder_id=folder_id, state_path=state_path, environment=environment
+        )
+    except StateSyncError as error:
+        print(f"code=STATE_SAVE_FAILED message={error}", file=sys.stderr)
+        return 3
+    print(f"code=STATE_SAVED digest={digest}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
@@ -197,4 +279,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _ollama_check(arguments.host, arguments.model)
     if arguments.command == "authorize-drive":
         return _authorize_drive(arguments.client_secret)
+    if arguments.command == "state-pull":
+        return _state_pull(arguments.state, arguments.state_folder, arguments.state_environment)
+    if arguments.command == "state-push":
+        return _state_push(arguments.state, arguments.state_folder, arguments.state_environment)
     raise AssertionError(f"Unhandled command: {arguments.command}")

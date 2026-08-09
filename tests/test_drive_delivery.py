@@ -32,14 +32,39 @@ class FakeDriveClient:
         file_id, content = entry
         return DriveFile(file_id=file_id, sha256=sha256(content).hexdigest())
 
-    def upload(self, *, folder_id: str, filename: str, content: bytes) -> str:
-        del folder_id
+    def upload(
+        self,
+        *,
+        folder_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/epub+zip",
+    ) -> str:
+        del folder_id, content_type
         self.upload_calls += 1
         if self.fail:
             raise DriveError("Drive upload failed")
         file_id = f"drive-file-{self.upload_calls}"
         self.files[filename] = (file_id, content)
         return file_id
+
+    def update(self, *, file_id: str, content: bytes, content_type: str) -> str:
+        del content_type
+        if self.fail:
+            raise DriveError("Drive update failed")
+        for filename, (existing_id, _content) in self.files.items():
+            if existing_id == file_id:
+                self.files[filename] = (existing_id, content)
+                return existing_id
+        raise KeyError(file_id)
+
+    def download(self, *, file_id: str) -> bytes:
+        if self.fail:
+            raise DriveError("Drive download failed")
+        for _filename, (existing_id, content) in self.files.items():
+            if existing_id == file_id:
+                return content
+        raise KeyError(file_id)
 
 
 class _FixtureHandler(BaseHTTPRequestHandler):
@@ -203,8 +228,15 @@ def test_failed_drive_delivery_never_leaks_tokens_in_diagnostics_or_the_error(
     diagnostics_directory = tmp_path / "diagnostics"
 
     class LeakyFailingClient(FakeDriveClient):
-        def upload(self, *, folder_id: str, filename: str, content: bytes) -> str:
-            del folder_id, filename, content
+        def upload(
+            self,
+            *,
+            folder_id: str,
+            filename: str,
+            content: bytes,
+            content_type: str = "application/epub+zip",
+        ) -> str:
+            del folder_id, filename, content, content_type
             raise DriveError(
                 "Drive upload failed for refresh token the-refresh-token-value "
                 "and access token the-access-token-value"

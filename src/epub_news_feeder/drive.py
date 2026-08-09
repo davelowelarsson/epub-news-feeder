@@ -55,7 +55,18 @@ class DriveClient(Protocol):
 
     def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None: ...
 
-    def upload(self, *, folder_id: str, filename: str, content: bytes) -> str: ...
+    def upload(
+        self,
+        *,
+        folder_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/epub+zip",
+    ) -> str: ...
+
+    def update(self, *, file_id: str, content: bytes, content_type: str) -> str: ...
+
+    def download(self, *, file_id: str) -> bytes: ...
 
 
 def credentials_from_environment(env: Mapping[str, str] | None = None) -> DriveCredentials:
@@ -128,35 +139,28 @@ class HttpDriveClient:
         digest = properties.get("sha256") if isinstance(properties, dict) else None
         return DriveFile(file_id=file_id, sha256=digest if isinstance(digest, str) else None)
 
-    def upload(self, *, folder_id: str, filename: str, content: bytes) -> str:
+    def upload(
+        self,
+        *,
+        folder_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str = "application/epub+zip",
+    ) -> str:
         token = self._access_token()
         metadata = {
             "name": filename,
             "parents": [folder_id],
-            "mimeType": "application/epub+zip",
+            "mimeType": content_type,
             "properties": {"sha256": sha256(content).hexdigest()},
         }
-        boundary = "epub-news-feeder-boundary"
-        body = (
-            (
-                f"--{boundary}\r\n"
-                "Content-Type: application/json; charset=UTF-8\r\n\r\n"
-                f"{json.dumps(metadata)}\r\n"
-                f"--{boundary}\r\n"
-                "Content-Type: application/epub+zip\r\n\r\n"
-            ).encode()
-            + content
-            + f"\r\n--{boundary}--".encode()
-        )
+        body, content_type_header = _multipart_body(metadata, content, content_type)
         try:
             with self._client() as client:
                 response = client.post(
                     "/upload/drive/v3/files",
                     params={"uploadType": "multipart", "fields": "id"},
-                    headers={
-                        **_bearer(token),
-                        "Content-Type": f"multipart/related; boundary={boundary}",
-                    },
+                    headers={**_bearer(token), "Content-Type": content_type_header},
                     content=body,
                 )
                 response.raise_for_status()
@@ -167,6 +171,43 @@ class HttpDriveClient:
         if not isinstance(file_id, str) or not file_id:
             raise DriveError("Drive upload returned no file id")
         return file_id
+
+    def update(self, *, file_id: str, content: bytes, content_type: str) -> str:
+        """Overwrite an existing file's content in place, using Drive's own revision history."""
+
+        token = self._access_token()
+        metadata = {"properties": {"sha256": sha256(content).hexdigest()}}
+        body, content_type_header = _multipart_body(metadata, content, content_type)
+        try:
+            with self._client() as client:
+                response = client.patch(
+                    f"/upload/drive/v3/files/{file_id}",
+                    params={"uploadType": "multipart", "fields": "id"},
+                    headers={**_bearer(token), "Content-Type": content_type_header},
+                    content=body,
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError) as error:
+            raise DriveError("Drive update failed") from error
+        returned_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(returned_id, str) or not returned_id:
+            raise DriveError("Drive update returned no file id")
+        return returned_id
+
+    def download(self, *, file_id: str) -> bytes:
+        token = self._access_token()
+        try:
+            with self._client() as client:
+                response = client.get(
+                    f"/drive/v3/files/{file_id}",
+                    params={"alt": "media"},
+                    headers=_bearer(token),
+                )
+                response.raise_for_status()
+                return response.content
+        except httpx.HTTPError as error:
+            raise DriveError("Drive download failed") from error
 
     def _access_token(self) -> str:
         try:
@@ -193,6 +234,24 @@ class HttpDriveClient:
         return httpx.Client(
             base_url=_DRIVE_API, timeout=self._timeout, transport=self._transport, trust_env=False
         )
+
+
+def _multipart_body(
+    metadata: Mapping[str, object], content: bytes, content_type: str
+) -> tuple[bytes, str]:
+    boundary = "epub-news-feeder-boundary"
+    body = (
+        (
+            f"--{boundary}\r\n"
+            "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            f"{json.dumps(metadata)}\r\n"
+            f"--{boundary}\r\n"
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode()
+        + content
+        + f"\r\n--{boundary}--".encode()
+    )
+    return body, f"multipart/related; boundary={boundary}"
 
 
 def _bearer(token: str) -> dict[str, str]:
