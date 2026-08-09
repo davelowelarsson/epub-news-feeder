@@ -20,3 +20,6 @@ prototypes/
 # Transient agent worktrees
 .claude/worktrees/
 
+# Ignore google cloud service account keys
+client_secret_*.json
+
