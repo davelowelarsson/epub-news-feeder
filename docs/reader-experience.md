@@ -3,6 +3,25 @@
 This document records the reader-visible behavior expected from the local EPUB MVP. Domain terms
 are defined in `CONTEXT.md`.
 
+## Language of labels versus language of text
+
+- Every label the generator writes to the reader uses the **Publication Language**: navigation, the
+  Edition overview, notes and corrections headings, bylines, source and date lines, rights lines,
+  the publisher-article heading and publisher route, cross-reference and Story Hub headings, the
+  update notice, and end matter. A label is the generator speaking to the reader, not the publisher
+  speaking, and the reader is one person reading in one language.
+- Two carve-outs follow the **Article Language** instead. Editorial Addition prose, because a
+  summary describes the reporting it summarizes. And the `lang` and `xml:lang` attributes on
+  publisher text and on the summary aside, because those drive hyphenation, justification and
+  text-to-speech and must describe the language of the text they wrap rather than the Edition's
+  chrome.
+- Whether an Article changed materially since the reader's last Edition is a fact supplied to the
+  generator; the wording of the notice is the generator's own and is localized with every other
+  label.
+- A Publication Language outside the supported set falls back to English chrome **silently**. This
+  is deliberate for now, not an oversight: label translations must exist before a third Publication
+  Language is configured. See GitHub issue #50.
+
 ## Publisher text and Editorial Additions
 
 - An Article-specific Editorial Addition uses the Article Language. Mixed-language Editions may

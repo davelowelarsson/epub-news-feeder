@@ -195,7 +195,7 @@ def test_mixed_language_articles_localize_each_summary_independently() -> None:
         for summary in summaries
     ] == [
         "AI-genererad sammanfattning En svensk sammanfattning.",
-        "AI-generated summary An English summary.",
+        "AI-genererad sammanfattning An English summary.",
     ]
 
 
@@ -206,7 +206,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "d7eab1be3e6d386dfbbef075e71727eb6e8706d308ac1a81ef295ccf5a974d9e"
+    assert receipt.sha256 == "f402fe43cb0ec5fc7c9f0320b578b78dea00c144b0af4f44fcc6c672860a14f6"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -252,7 +252,6 @@ def test_ticket_09_ticket_11_epub_is_deterministic_with_notes_and_pointers() -> 
                         article_identifier="article-1",
                         headline="A complete report",
                         source_name="Example News",
-                        relevance_reason="Relevant technology coverage",
                     ),
                 ),
             ),
@@ -303,7 +302,7 @@ def test_ticket_09_ticket_11_epub_is_deterministic_with_notes_and_pointers() -> 
         assert "Corrections and updates" in corrections_text
         assert "Read the publisher correction" in corrections_text
         assert "A complete report" in rendered
-        assert "Example News: Relevant technology coverage" in rendered
+        assert "Example News: Also relevant to Technology" in rendered
         assert "Primary placement: World" in rendered
         assert technology.xpath("//*[local-name()='a']/@href") == [
             f"{Path(world_path).name}#{article_id}"
@@ -531,6 +530,7 @@ def test_swedish_metadata_only_item_localizes_reader_facing_labels() -> None:
     )
     edition = replace(
         _edition(),
+        language="sv",
         sections=(replace(_edition().sections[0], articles=(), links=(link,)),),
     )
 
@@ -610,3 +610,251 @@ def test_publisher_link_navigation_target_is_stable_when_links_are_reordered() -
         return {anchor.text: anchor.get("href") for anchor in anchors}
 
     assert navigation_targets((first, second)) == navigation_targets((second, first))
+
+
+def _bilingual_edition(publication_language: str) -> EditionInput:
+    """One Edition whose Article Language deliberately differs from its Publication Language."""
+
+    article = ArticleInput(
+        identifier="article-1",
+        title="En svensk artikel",
+        body="Publicistens artikeltext.",
+        source_name="Sveriges Television",
+        canonical_url="https://www.svt.test/artikel/1",
+        language="sv",
+        author="S. Reporter",
+        published_at="2026-08-08",
+        copyright_notice="Copyright SVT",
+        materially_updated=True,
+        editorial_summary=EditorialSummaryInput(
+            (
+                EditorialSentenceInput(
+                    text="Sammanfattningen orienterar läsaren.",
+                    citations=(
+                        EditorialCitationInput(
+                            "En svensk artikel", "https://www.svt.test/artikel/1"
+                        ),
+                    ),
+                ),
+            )
+        ),
+    )
+    return EditionInput(
+        title="Morgonbriefing",
+        identifier="morning-briefing-20260809",
+        language=publication_language,
+        run_id="20260809T060000Z-ABCDEFGH",
+        notes=("En källa var tillfälligt otillgänglig.",),
+        corrections=(
+            CorrectionInput(
+                "En svensk artikel",
+                "Sveriges Television",
+                "https://www.svt.test/artikel/1",
+                "correction",
+                "2026-08-09",
+            ),
+        ),
+        sections=(
+            SectionInput(
+                identifier="world",
+                title="Världen",
+                articles=(article,),
+                has_edition_note=True,
+                story_hubs=(
+                    StoryHubInput(
+                        "harbor-story",
+                        (
+                            StoryArticleLinkInput(
+                                "article-1", "En svensk artikel", "Sveriges Television"
+                            ),
+                        ),
+                        (
+                            PriorCoverageInput(
+                                "Tidigare rapport",
+                                "Sveriges Television",
+                                "https://www.svt.test/artikel/0",
+                                "2026-08-01",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            SectionInput(
+                identifier="technology",
+                title="Teknik",
+                pointers=(
+                    SectionPointerInput(
+                        article_identifier="article-1",
+                        headline="En svensk artikel",
+                        source_name="Sveriges Television",
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _edition_text(epub_bytes: bytes) -> str:
+    """All reader-visible text across every document in the Edition, whitespace-normalized."""
+
+    rendered: list[str] = []
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        for name in archive.namelist():
+            if not name.endswith(".xhtml"):
+                continue
+            document = etree.fromstring(archive.read(name))
+            rendered.extend(
+                text for text in document.itertext() if isinstance(text, str) and text.strip()
+            )
+    return " ".join(" ".join(rendered).split())
+
+
+def test_generator_labels_follow_publication_language_not_article_language() -> None:
+    epub_bytes = build_epub(_bilingual_edition("en"))
+
+    rendered = _edition_text(epub_bytes)
+
+    # Generator chrome speaks to the reader in the Publication Language.
+    for english_label in (
+        "Edition overview",
+        "Contents",
+        "Edition notes",
+        "Corrections and updates",
+        "Read the publisher correction",
+        "Some reporting was unavailable; read the Edition notes",
+        "Updated since your previous Edition",
+        "By S. Reporter",
+        "Source: Sveriges Television",
+        "Published by publisher:",
+        "Rights: Copyright SVT",
+        "Article from Sveriges Television",
+        "Read full article at publisher",
+        "Also in this Edition",
+        "Primary placement: Världen",
+        "Continuing coverage",
+        "In this Edition",
+        "Prior coverage",
+        "AI-generated summary",
+        "About AI summaries",
+    ):
+        assert english_label in rendered, english_label
+
+    # No Swedish chrome anywhere, even though every Article is Swedish.
+    for swedish_label in (
+        "Källa:",
+        "Av S. Reporter",
+        "Publicerad av publicisten:",
+        "Rättigheter:",
+        "Artikel från",
+        "Läs hela artikeln hos",
+        "Uppdaterad sedan din förra utgåva",
+        "Innehåll",
+        "AI-genererad sammanfattning",
+    ):
+        assert swedish_label not in rendered, swedish_label
+
+    # Publisher text keeps its own language markers.
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+    assert cast(list[str], section.xpath("//*[contains(@class,'publisher-content')]/@lang")) == [
+        "sv"
+    ]
+    assert cast(list[str], section.xpath("//*[contains(@class,'editorial-summary')]/@lang")) == [
+        "sv"
+    ]
+    assert "Publicistens artikeltext." in _edition_text(epub_bytes)
+    assert "Sammanfattningen orienterar läsaren." in _edition_text(epub_bytes)
+
+
+def test_generator_labels_follow_publication_language_in_swedish() -> None:
+    english_article = replace(
+        _bilingual_edition("sv").sections[0].articles[0],
+        title="An English article",
+        body="The publisher article body.",
+        language="en",
+        editorial_summary=EditorialSummaryInput(
+            (EditorialSentenceInput("An English summary.", ()),)
+        ),
+    )
+    edition = replace(
+        _bilingual_edition("sv"),
+        sections=(
+            replace(_bilingual_edition("sv").sections[0], articles=(english_article,)),
+            _bilingual_edition("sv").sections[1],
+        ),
+    )
+
+    rendered = _edition_text(build_epub(edition))
+
+    for swedish_label in (
+        "Innehåll",
+        "Utgåvans noteringar",
+        "Rättelser och uppdateringar",
+        "Läs publicistens rättelse",
+        "Uppdaterad sedan din förra utgåva",
+        "Av S. Reporter",
+        "Källa: Sveriges Television",
+        "Publicerad av publicisten:",
+        "Rättigheter: Copyright SVT",
+        "Artikel från Sveriges Television",
+        "Läs hela artikeln hos Sveriges Television",
+        "Även i den här utgåvan",
+        "Primär placering: Världen",
+        "Fortsatt bevakning",
+        "AI-genererad sammanfattning",
+        "Om AI-sammanfattningar",
+    ):
+        assert swedish_label in rendered, swedish_label
+
+    for english_label in (
+        "Contents",
+        "Source: Sveriges Television",
+        "By S. Reporter",
+        "Read full article at publisher",
+        "Updated since your previous Edition",
+        "AI-generated summary",
+    ):
+        assert english_label not in rendered, english_label
+
+    # The English Article's own text and language markers survive the Swedish chrome.
+    assert "The publisher article body." in rendered
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+    assert cast(list[str], section.xpath("//*[contains(@class,'publisher-content')]/@lang")) == [
+        "en"
+    ]
+
+
+def test_update_notice_is_a_generator_label_in_both_publication_languages() -> None:
+    unchanged = replace(_bilingual_edition("en").sections[0].articles[0], materially_updated=False)
+
+    english = _edition_text(build_epub(_bilingual_edition("en")))
+    swedish = _edition_text(build_epub(_bilingual_edition("sv")))
+    without = _edition_text(
+        build_epub(
+            replace(
+                _bilingual_edition("en"),
+                sections=(
+                    replace(_bilingual_edition("en").sections[0], articles=(unchanged,)),
+                    _bilingual_edition("en").sections[1],
+                ),
+            )
+        )
+    )
+
+    assert "Updated since your previous Edition" in english
+    assert "Uppdaterad sedan din förra utgåva" in swedish
+    assert "Updated since your previous Edition" not in without
+    assert "Uppdaterad sedan din förra utgåva" not in without
+
+
+def test_unlisted_publication_language_falls_back_to_english_chrome() -> None:
+    """Deliberate: translations must exist before a third Publication Language is configured."""
+
+    rendered = _edition_text(build_epub(_bilingual_edition("de")))
+
+    assert "Contents" in rendered
+    assert "Source: Sveriges Television" in rendered
+    assert "Innehåll" not in rendered

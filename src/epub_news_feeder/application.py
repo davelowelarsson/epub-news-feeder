@@ -312,11 +312,7 @@ def _run(
                             if acquired.published_at is not None
                             else None
                         ),
-                        update_label=(
-                            "Updated since your previous Edition"
-                            if observation.materially_changed
-                            else None
-                        ),
+                        materially_updated=observation.materially_changed,
                         copyright_notice=source.copyright_notice,
                     ),
                     observation=observation,
@@ -430,7 +426,6 @@ def _run(
                 article_identifier=article_id,
                 headline=_record_title(records[article_id]),
                 source_name=_record_source_name(records[article_id]),
-                relevance_reason=f"Also relevant to {leaf.section.title}",
             )
             for article_id, placement in placements.items()
             if isinstance(records[article_id], _ArticleRecord)

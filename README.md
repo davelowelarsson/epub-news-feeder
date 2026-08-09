@@ -60,3 +60,10 @@ uv run pytest
 Implementation follows the project specification in GitHub issue #16. Google Drive, scheduled
 private state, physical Kobo acceptance, and OpenAI editorial integration remain subsequent
 milestones.
+
+## Prototypes
+
+`prototypes/` is an untracked scratch area for trying an idea out — a state model, a rendering
+shape, a throwaway script — without it having to survive review or the quality gate. Nothing there
+is imported by `src/` or `tests/`. When a prototype settles a decision, record the decision on its
+issue and delete the prototype.

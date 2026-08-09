@@ -7,3 +7,16 @@
 __pycache__/
 *.pyc
 
+# Operating system
+.DS_Store
+
+# Throwaway prototypes; see README
+prototypes/
+
+# Editor settings: share the workspace settings, nothing else
+.vscode/*
+!.vscode/settings.json
+
+# Transient agent worktrees
+.claude/worktrees/
+
