@@ -193,6 +193,7 @@ def generate_editorial(
             _timed(provider, verification_call, durations)
         )
         _validate_finding_coverage(proposal, verification)
+        verification = _enforce_word_ceiling(proposal, verification)
         evidence_findings.extend(_evidence_findings(verification, verification_round=1))
         if any(finding.status != "supported" for finding in verification.findings):
             repair_call = StructuredCall(
@@ -220,6 +221,7 @@ def generate_editorial(
                 _timed(provider, fresh_verification_call, durations)
             )
             _validate_finding_coverage(proposal, verification)
+            verification = _enforce_word_ceiling(proposal, verification)
             evidence_findings.extend(_evidence_findings(verification, verification_round=2))
             if any(finding.status != "supported" for finding in verification.findings):
                 return _empty_result(
@@ -398,6 +400,43 @@ def _validate_summary_languages(
         competing = max(score for language, score in scores.items() if language != expected)
         if scores[expected] == 0 or scores[expected] <= competing:
             raise ValueError("summary does not match the Article language")
+
+
+_SUMMARY_WORD_CEILING = 60
+
+
+def _summary_word_count(summary: _ProposedSummary) -> int:
+    """Count words over the summary as a whole; sentence boundaries do not reset the count."""
+
+    return len(" ".join(sentence.text for sentence in summary.sentences).split())
+
+
+def _enforce_word_ceiling(
+    proposal: _EditorialProposal, verification: _VerificationResponse
+) -> _VerificationResponse:
+    """Force every sentence of an over-ceiling summary unsupported, feeding the repair round."""
+
+    over_ceiling = {
+        index
+        for index, summary in enumerate(proposal.summaries)
+        if _summary_word_count(summary) > _SUMMARY_WORD_CEILING
+    }
+    if not over_ceiling:
+        return verification
+    return _VerificationResponse(
+        findings=[
+            (
+                _VerificationFinding(
+                    summary_index=finding.summary_index,
+                    sentence_index=finding.sentence_index,
+                    status="unsupported",
+                )
+                if finding.summary_index in over_ceiling
+                else finding
+            )
+            for finding in verification.findings
+        ]
+    )
 
 
 def _validate_finding_coverage(

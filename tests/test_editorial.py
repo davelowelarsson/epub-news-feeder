@@ -51,6 +51,12 @@ def _models() -> ModelPair:
     )
 
 
+def _words(count: int) -> str:
+    """Build an English-markered string of exactly `count` whitespace-separated words."""
+
+    return " ".join([f"filler{i}" for i in range(count - 1)] + ["the"])
+
+
 @pytest.mark.editorial
 def test_accepts_labelled_summary_when_every_sentence_is_independently_supported() -> None:
     provider = FakeProvider(
@@ -200,6 +206,158 @@ def test_omits_after_one_failed_repair_without_a_third_editorial_attempt(
         final_status,
     ]
     assert len(provider.calls) == 4
+
+
+@pytest.mark.editorial
+def test_summary_at_exactly_the_word_ceiling_is_accepted_unchanged() -> None:
+    at_ceiling = _words(60)
+    provider = FakeProvider(
+        [
+            {
+                "summaries": [
+                    {
+                        "article_id": "article-1",
+                        "sentences": [{"text": at_ceiling, "citations": ["article-1"]}],
+                    }
+                ]
+            },
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.evidence.status == "accepted"
+    assert result.evidence.calls == 2
+    assert result.additions[0].sentences[0].text == at_ceiling
+
+
+@pytest.mark.editorial
+def test_over_ceiling_summary_is_classified_unsupported_and_repaired_under_ceiling() -> None:
+    over_ceiling = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [{"text": _words(61), "citations": ["article-1"]}],
+            }
+        ]
+    }
+    under_ceiling = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [{"text": _words(50), "citations": ["article-1"]}],
+            }
+        ]
+    }
+    provider = FakeProvider(
+        [
+            over_ceiling,
+            # The real verifier finds nothing wrong; the deterministic ceiling must still fire.
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+            under_ceiling,
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.evidence.status == "accepted"
+    assert result.evidence.calls == 4
+    assert result.additions[0].sentences[0].text == _words(50)
+    assert [finding.status for finding in result.evidence.findings] == ["unsupported", "supported"]
+    assert [call.role for call in provider.calls] == [
+        "editorial",
+        "verifier",
+        "editorial",
+        "verifier",
+    ]
+
+
+@pytest.mark.editorial
+def test_repair_still_over_word_ceiling_omits_that_articles_addition() -> None:
+    over_ceiling = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [{"text": _words(61), "citations": ["article-1"]}],
+            }
+        ]
+    }
+    still_over_ceiling = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [{"text": _words(70), "citations": ["article-1"]}],
+            }
+        ]
+    }
+    provider = FakeProvider(
+        [
+            over_ceiling,
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+            still_over_ceiling,
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+            AssertionError("a third editorial attempt must never happen"),
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.additions == []
+    assert result.evidence.status == "omitted"
+    assert result.evidence.failure_code == "verification_rejected"
+    assert result.evidence.calls == 4
+    assert [finding.status for finding in result.evidence.findings] == [
+        "unsupported",
+        "unsupported",
+    ]
+    assert len(provider.calls) == 4
+
+
+@pytest.mark.editorial
+def test_word_ceiling_counts_the_whole_summary_not_each_sentence() -> None:
+    over_ceiling_split_across_sentences = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [
+                    {"text": _words(35), "citations": ["article-1"]},
+                    {"text": _words(35), "citations": ["article-1"]},
+                ],
+            }
+        ]
+    }
+    under_ceiling = {
+        "summaries": [
+            {
+                "article_id": "article-1",
+                "sentences": [{"text": _words(50), "citations": ["article-1"]}],
+            }
+        ]
+    }
+    provider = FakeProvider(
+        [
+            over_ceiling_split_across_sentences,
+            {
+                "findings": [
+                    {"summary_index": 0, "sentence_index": 0, "status": "supported"},
+                    {"summary_index": 0, "sentence_index": 1, "status": "supported"},
+                ]
+            },
+            under_ceiling,
+            {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]},
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.evidence.status == "accepted"
+    assert result.evidence.calls == 4
+    assert [finding.status for finding in result.evidence.findings[:2]] == [
+        "unsupported",
+        "unsupported",
+    ]
 
 
 @pytest.mark.editorial
