@@ -147,6 +147,7 @@ class EditionInput:
     notes: tuple[str, ...] = ()
     corrections: tuple[CorrectionInput, ...] = ()
     briefs: tuple[BriefInput, ...] = ()
+    edition_date: str = "1980-01-01"
     modified_at: str = "1980-01-01T00:00:00Z"
 
 
@@ -177,6 +178,7 @@ def build_epub(edition: EditionInput) -> bytes:
         ("OEBPS/content.opf", _package_document(edition, section_paths), ZIP_DEFLATED),
         ("OEBPS/nav.xhtml", _navigation_document(edition, section_paths), ZIP_DEFLATED),
         ("OEBPS/styles.css", _STYLESHEET, ZIP_DEFLATED),
+        ("OEBPS/cover.svg", _cover_image(edition), ZIP_DEFLATED),
     ]
     if edition.notes:
         members.append(("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED))
@@ -292,6 +294,13 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
         id="styles",
         href="styles.css",
         attrib={"media-type": "text/css"},
+    )
+    etree.SubElement(
+        manifest,
+        f"{{{_OPF_NS}}}item",
+        id="cover-image",
+        href="cover.svg",
+        attrib={"media-type": "image/svg+xml", "properties": "cover-image"},
     )
     if edition.notes:
         etree.SubElement(
@@ -459,6 +468,157 @@ def _navigation_leaf_ids(entries: tuple[NavigationInput, ...]) -> list[str]:
             _navigation_leaf_ids(entry.children) if entry.children else [entry.identifier]
         )
     ]
+
+
+_SVG_NS = "http://www.w3.org/2000/svg"
+_COVER_WIDTH = 1200
+_COVER_HEIGHT = 1600
+
+
+def _cover_image(edition: EditionInput) -> bytes:
+    """Render a restrained typographic cover as deterministic SVG.
+
+    No imagery, no publisher media, no generative mark, no embedded font and no remote
+    reference. Colour never carries meaning, so the cover reads identically in greyscale on
+    e-ink. Identical title, language, date and counts produce identical bytes.
+    """
+
+    article_count = sum(len(section.articles) for section in edition.sections)
+    articles = _counted(edition.language, article_count, "article")
+    briefs = _counted(edition.language, len(edition.briefs), "brief") if edition.briefs else ""
+    label = _localized(
+        edition.language,
+        "cover_label",
+        title=edition.title,
+        edition_date=edition.edition_date,
+    )
+    root = etree.Element(
+        f"{{{_SVG_NS}}}svg",
+        nsmap={None: _SVG_NS},  # type: ignore[dict-item]
+        attrib={
+            "viewBox": f"0 0 {_COVER_WIDTH} {_COVER_HEIGHT}",
+            "width": str(_COVER_WIDTH),
+            "height": str(_COVER_HEIGHT),
+            "role": "img",
+            "aria-label": label,
+        },
+    )
+    title = etree.SubElement(root, f"{{{_SVG_NS}}}title")
+    title.text = label
+    description = etree.SubElement(root, f"{{{_SVG_NS}}}desc")
+    description.text = _localized(
+        edition.language,
+        "cover_description",
+        title=edition.title,
+        edition_date=edition.edition_date,
+        articles=articles,
+    )
+    etree.SubElement(
+        root,
+        f"{{{_SVG_NS}}}rect",
+        attrib={
+            "x": "0",
+            "y": "0",
+            "width": str(_COVER_WIDTH),
+            "height": str(_COVER_HEIGHT),
+            "fill": "#ffffff",
+        },
+    )
+    etree.SubElement(
+        root,
+        f"{{{_SVG_NS}}}rect",
+        attrib={
+            "x": "110",
+            "y": "300",
+            "width": "300",
+            "height": "10",
+            "fill": "#000000",
+        },
+    )
+    # The title is the one element that has to survive thumbnail size, so it is set large and
+    # wrapped by hand rather than relying on a renderer that may not support text layout.
+    offset = 470
+    for line in _cover_title_lines(edition.title):
+        heading = etree.SubElement(
+            root,
+            f"{{{_SVG_NS}}}text",
+            attrib={
+                "x": "110",
+                "y": str(offset),
+                "fill": "#000000",
+                "font-family": "serif",
+                "font-size": "118",
+                "font-weight": "bold",
+            },
+        )
+        heading.text = line
+        offset += 140
+    date = etree.SubElement(
+        root,
+        f"{{{_SVG_NS}}}text",
+        attrib={
+            "x": "110",
+            "y": str(offset + 60),
+            "fill": "#000000",
+            "font-family": "sans-serif",
+            "font-size": "58",
+        },
+    )
+    date.text = edition.edition_date
+    etree.SubElement(
+        root,
+        f"{{{_SVG_NS}}}rect",
+        attrib={
+            "x": "110",
+            "y": str(_COVER_HEIGHT - 300),
+            "width": str(_COVER_WIDTH - 220),
+            "height": "4",
+            "fill": "#767676",
+        },
+    )
+    counts = etree.SubElement(
+        root,
+        f"{{{_SVG_NS}}}text",
+        attrib={
+            "x": "110",
+            "y": str(_COVER_HEIGHT - 210),
+            "fill": "#000000",
+            "font-family": "sans-serif",
+            "font-size": "50",
+        },
+    )
+    counts.text = articles
+    if briefs:
+        brief_line = etree.SubElement(
+            root,
+            f"{{{_SVG_NS}}}text",
+            attrib={
+                "x": "110",
+                "y": str(_COVER_HEIGHT - 140),
+                "fill": "#000000",
+                "font-family": "sans-serif",
+                "font-size": "50",
+            },
+        )
+        brief_line.text = briefs
+    return _serialize(root)
+
+
+def _cover_title_lines(title: str, limit: int = 18) -> list[str]:
+    """Wrap the title on word boundaries so a long Publication title stays legible."""
+
+    lines: list[str] = []
+    current = ""
+    for word in title.split():
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > limit:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines[:3]
 
 
 def _notes_document(edition: EditionInput) -> bytes:
@@ -893,6 +1053,8 @@ _ENGLISH_LABELS = {
     "citation_label": "Citation {index}: {label}",
     "contents": "Contents",
     "continuing_coverage": "Continuing coverage",
+    "cover_description": "{title}, Edition of {edition_date}, containing {articles}.",
+    "cover_label": "{title} — Edition of {edition_date}",
     "correction_detail": "{source_name} published a {kind} notice on {signaled_at}.",
     "correction_link": "Read the publisher correction",
     "corrections": "Corrections and updates",
@@ -939,6 +1101,8 @@ _SWEDISH_LABELS = {
     "citation_label": "Källhänvisning {index}: {label}",
     "contents": "Innehåll",
     "continuing_coverage": "Fortsatt bevakning",
+    "cover_description": "{title}, utgåva från {edition_date}, med {articles}.",
+    "cover_label": "{title} — utgåva från {edition_date}",
     "correction_detail": "{source_name} publicerade en notis av typen {kind} den {signaled_at}.",
     "correction_link": "Läs publicistens rättelse",
     "corrections": "Rättelser och uppdateringar",

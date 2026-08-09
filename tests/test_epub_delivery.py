@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
@@ -206,7 +207,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "08421f141804f55d9b666f4ef0c01b9dca71df931db0980779def5593e852014"
+    assert receipt.sha256 == "b6cb295a0648b9a2e3559ca743fc7f83b663ae40794405130f76d0977d7cd273"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -843,3 +844,111 @@ def test_brief_identifiers_must_be_unique() -> None:
 
     with pytest.raises(ValueError, match="Brief identifiers"):
         build_epub(replace(_edition(), briefs=duplicated))
+
+
+def _cover(epub_bytes: bytes) -> etree._Element:
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        return etree.fromstring(archive.read("OEBPS/cover.svg"))
+
+
+@pytest.mark.epubcheck
+def test_every_edition_carries_a_typographic_cover() -> None:
+    edition = replace(_edition(), briefs=_briefs(), edition_date="2026-08-09")
+
+    epub_bytes = build_epub(edition)
+    validate_epub(epub_bytes)
+
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+    manifest = [
+        item
+        for item in package.iter("{http://www.idpf.org/2007/opf}item")
+        if item.get("href") == "cover.svg"
+    ]
+    assert len(manifest) == 1
+    assert manifest[0].get("properties") == "cover-image"
+    assert manifest[0].get("media-type") == "image/svg+xml"
+
+    # The cover is an image item, never a reading document.
+    spine = cast(
+        list[str], package.xpath("//*[local-name()='spine']/*[local-name()='itemref']/@idref")
+    )
+    assert manifest[0].get("id") not in spine
+
+
+def test_cover_carries_title_date_and_both_counts_in_the_publication_language() -> None:
+    edition = replace(_edition(), briefs=_briefs(), edition_date="2026-08-09")
+
+    rendered = " ".join(
+        " ".join(
+            text for text in _cover(build_epub(edition)).itertext() if isinstance(text, str)
+        ).split()
+    )
+
+    assert "Morning Briefing" in rendered
+    assert "2026-08-09" in rendered
+    assert "1 complete article" in rendered
+    assert "2 briefs" in rendered
+
+
+def test_cover_counts_are_derived_from_the_edition_being_built() -> None:
+    without_briefs = replace(_edition(), edition_date="2026-08-09")
+
+    rendered = " ".join(
+        " ".join(
+            text for text in _cover(build_epub(without_briefs)).itertext() if isinstance(text, str)
+        ).split()
+    )
+
+    assert "1 complete article" in rendered
+    assert "brief" not in rendered
+
+
+def test_cover_follows_the_publication_language() -> None:
+    edition = replace(_edition(), language="sv", briefs=_briefs(), edition_date="2026-08-09")
+
+    rendered = " ".join(
+        " ".join(
+            text for text in _cover(build_epub(edition)).itertext() if isinstance(text, str)
+        ).split()
+    )
+
+    assert "komplett artikel" in rendered
+    assert "notiser" in rendered
+    assert "complete article" not in rendered
+
+
+def test_cover_is_accessible_and_carries_no_imagery_or_remote_reference() -> None:
+    edition = replace(_edition(), briefs=_briefs(), edition_date="2026-08-09")
+
+    epub_bytes = build_epub(edition)
+    cover = _cover(epub_bytes)
+
+    assert cover.get("role") == "img"
+    label = cover.get("aria-label")
+    assert label is not None and "Morning Briefing" in label and "2026-08-09" in label
+    titles = cast(list[etree._Element], cover.xpath("//*[local-name()='title']"))
+    descriptions = cast(list[etree._Element], cover.xpath("//*[local-name()='desc']"))
+    assert titles and descriptions
+
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        raw = archive.read("OEBPS/cover.svg")
+    # No imagery, no publisher media, no embedded font, no fetchable reference of any kind.
+    # The SVG namespace URI is an identifier, never retrieved, so it does not count.
+    for forbidden in (b"<image", b"@font-face", b"base64", b"url("):
+        assert forbidden not in raw, forbidden
+    assert not cover.xpath("//@href | //@src | //@*[local-name()='href']")
+
+
+def test_cover_is_deterministic_and_greyscale_safe() -> None:
+    edition = replace(_edition(), briefs=_briefs(), edition_date="2026-08-09")
+
+    first = build_epub(edition)
+    second = build_epub(edition)
+
+    assert first == second
+    with ZipFile(BytesIO(first)) as archive:
+        raw = archive.read("OEBPS/cover.svg").decode()
+    # Only black, white and greys: colour never carries meaning on e-ink.
+    colours = set(re.findall(r'(?:fill|stroke)="([^"]+)"', raw))
+    assert colours <= {"none", "#000000", "#ffffff", "#f4f4f4", "#767676"}, colours

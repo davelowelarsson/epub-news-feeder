@@ -458,6 +458,7 @@ def _run(
             for correction in state.pending_corrections(publication.id)
         ),
         briefs=tuple(briefs[item.brief_id].brief for item in selection.selected_briefs),
+        edition_date=generated_at.astimezone(UTC).date().isoformat(),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     epub_bytes = build_epub(edition)

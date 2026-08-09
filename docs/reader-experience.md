@@ -93,15 +93,29 @@ does not imply permission to reuse publisher images.
 
 ## Edition cover
 
-The Edition cover is a separate product-owned design surface, not a publisher Article image. The
-decision in GitHub issue #39 must define a reusable visual system before implementation:
+The Edition cover is a separate product-owned design surface, not a publisher Article image. Every
+Edition carries a restrained typographic SVG cover carrying, in the Publication Language:
 
-- The publication identity and Edition date remain legible at Kobo library-thumbnail size.
-- The design works in color and grayscale on e-ink; color alone never carries meaning.
-- A deterministic template produces a stable daily identity without embedding remote tracking or
-  publisher media.
-- The cover has useful accessibility text and uses the EPUB 3 `cover-image` manifest property.
-- The full-screen cover stays restrained and readable rather than imitating a web-news front page.
+- the Publication title, set large enough to survive Kobo library-thumbnail size and wrapped on
+  word boundaries rather than relying on renderer text layout;
+- the Edition date;
+- the Article count and, when the Edition has any, the Brief count. Counts are derived from the
+  Edition being built, so they cannot disagree with its contents. The title and date already
+  establish when an Edition is from, so an old cover reads as old rather than thin.
+
+Constraints the cover holds to:
+
+- The design works in colour and greyscale on e-ink; colour never carries meaning.
+- Deterministic — identical title, language, date and counts produce identical bytes.
+- No imagery, no publisher media, no generative or date-derived mark, no embedded font, and no
+  fetchable reference of any kind.
+- Useful accessibility text as an SVG title and description with an image role, and the EPUB 3
+  `cover-image` manifest property. The cover is an image item, never a reading document.
+
+SVG is chosen knowingly: `cover-image` applies to an image item, so a typographic cover still has
+to be an image, and Kobo's SVG font handling is inconsistent. If the device rejects SVG text,
+converting text to paths is the identified fallback — it keeps determinism and removes the device
+font dependency without adding a rasteriser. See GitHub issue #39.
 
 Publisher images may not enter the cover unless a separate Source-specific media decision permits
 that exact use.
