@@ -141,6 +141,38 @@ publications:
     assert result.stderr == ""
 
 
+def test_local_editorial_configuration_accepts_independent_ollama_models(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "publication.yaml"
+    config.write_text(
+        MINIMAL_CONFIG.replace(
+            "    sections:",
+            """    editorial:
+      enabled: true
+      provider: ollama
+      model_pair:
+        editorial_model: gemma4:12b-mlx
+        verifier_model: gemma4:e4b-mlx
+        editorial_prompt_version: editorial-v1
+        verifier_prompt_version: verifier-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      cost_envelope: {max_calls: 4, max_tokens: 12000}
+      ollama_host: http://127.0.0.1:11434
+    sections:""",
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli("validate", "--config", str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert RUN_ID.search(result.stdout)
+    assert "code=CONFIG_VALID publications=1" in result.stdout
+    assert result.stderr == ""
+
+
 @pytest.mark.acceptance
 @pytest.mark.parametrize(
     "invalid_config",

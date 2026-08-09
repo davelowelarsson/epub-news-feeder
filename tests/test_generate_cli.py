@@ -7,7 +7,7 @@ import threading
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 from zipfile import ZipFile
 
 import pytest
@@ -17,6 +17,7 @@ from epub_news_feeder import application
 from epub_news_feeder.application import RetryableGenerationError, generate_edition
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
+from epub_news_feeder.editorial import StructuredCall
 
 
 class EditionFixtureHandler(BaseHTTPRequestHandler):
@@ -40,6 +41,50 @@ class EditionFixtureHandler(BaseHTTPRequestHandler):
 <description>This preview is discovery metadata only.</description>
 <content:encoded><![CDATA[<p>{type(self).body}</p>]]></content:encoded>
 </item></channel></rss>""".encode()
+            status = 200
+        else:
+            content_type = "text/plain"
+            payload = b"not found"
+            status = 404
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+class MixedEditionFixtureHandler(BaseHTTPRequestHandler):
+    body = " ".join(f"verified-report-{index}" for index in range(180))
+
+    def do_GET(self) -> None:
+        if self.path == "/robots.txt":
+            content_type = "text/plain"
+            payload = b"User-agent: *\nAllow: /\n"
+            status = 200
+        elif self.path == "/full.xml":
+            content_type = "application/rss+xml"
+            payload = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+<channel><title>Full Publisher</title><item>
+<title>Harbour investigation continues</title>
+<link>https://publisher.example/harbour</link><guid>full-harbour</guid>
+<author>Jamie Reporter</author><pubDate>Sat, 08 Aug 2026 08:00:00 GMT</pubDate>
+<content:encoded><![CDATA[<p>{type(self).body}</p>]]></content:encoded>
+</item></channel></rss>""".encode()
+            status = 200
+        elif self.path == "/briefs.xml":
+            content_type = "application/rss+xml"
+            server = cast(ThreadingHTTPServer, self.server)
+            origin = f"http://127.0.0.1:{server.server_port}"
+            payload = f"""<rss version="2.0"><channel><title>Ekot Fixture</title>
+<item><title>New report about the harbour boat</title><link>{origin}/brief/new</link>
+<guid>brief-new</guid><pubDate>Sat, 08 Aug 2026 09:00:00 GMT</pubDate></item>
+<item><title>Older report about the harbour boat</title><link>{origin}/brief/old</link>
+<guid>brief-old</guid><pubDate>Sat, 08 Aug 2026 07:00:00 GMT</pubDate></item>
+<item><title>Unselected unrelated bulletin</title><link>{origin}/brief/unselected</link>
+<guid>brief-unselected</guid><pubDate>Sat, 08 Aug 2026 06:00:00 GMT</pubDate></item>
+</channel></rss>""".encode()
             status = 200
         else:
             content_type = "text/plain"
@@ -185,6 +230,258 @@ publications:
         text=True,
     )
     assert validation.returncode == 0, validation.stdout + validation.stderr
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_link_only_reporting_is_selected_into_the_finite_reading_flow(tmp_path: Path) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MixedEditionFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        config = tmp_path / "publication.yaml"
+        config.write_text(
+            f"""
+version: 1
+sources:
+  full:
+    title: Full Publisher
+    publisher_id: publisher.example
+    feed_url: http://127.0.0.1:{server.server_port}/full.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: full-fixture
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: deny
+  briefs:
+    title: Sveriges Radio Ekot
+    publisher_id: fixture-ekot
+    feed_url: http://127.0.0.1:{server.server_port}/briefs.xml
+    acquisition: metadata_only
+    llm_processing: disabled
+    rights:
+      basis: link-only
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: brief-fixture
+      feed_acquisition: allow
+      page_acquisition: deny
+      retention: deny
+      private_distribution: conditional
+      local_llm: deny
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 2, min_articles: 1}}
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [full, briefs]
+""".lstrip(),
+            encoding="utf-8",
+        )
+        output = tmp_path / "editions"
+        result = subprocess.run(
+            [
+                "epub-news-feeder",
+                "generate",
+                "--config",
+                str(config),
+                "--state",
+                str(tmp_path / "state.sqlite3"),
+                "--output",
+                str(output),
+                "--run-id",
+                "20260809T080000Z-CCCCCCCC",
+                "--at",
+                "2026-08-09T08:00:00Z",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result.returncode == 0, result.stderr
+    assert "articles=1" in result.stdout
+    assert "publisher_links=1" in result.stdout
+    assert "read_items=2" in result.stdout
+    with ZipFile(next(output.glob("*.epub"))) as archive:
+        xhtml = " ".join(
+            archive.read(name).decode() for name in archive.namelist() if name.endswith(".xhtml")
+        )
+    assert "Harbour investigation continues" in xhtml
+    assert "Jamie Reporter" in xhtml
+    assert "2026-08-08" in xhtml
+    assert "New report about the harbour boat" in xhtml
+    assert "Sveriges Radio Ekot" in xhtml
+    assert "2026-08-08" in xhtml
+    assert "Read report at publisher" in xhtml
+    assert "Older report about the harbour boat" not in xhtml
+    assert "Unselected unrelated bulletin" not in xhtml
+    with sqlite3.connect(tmp_path / "state.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM articles").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM deliveries").fetchone() == (1,)
+        stored_urls = connection.execute("SELECT canonical_url FROM articles").fetchall()
+        assert stored_urls == [("https://publisher.example/harbour",)]
+    state_bytes = (tmp_path / "state.sqlite3").read_bytes()
+    assert b"New report about the harbour boat" not in state_bytes
+    assert b"/brief/new" not in state_bytes
+    diagnostic_text = (tmp_path / "diagnostics" / "20260809T080000Z-CCCCCCCC.jsonl").read_text()
+    assert "New report about the harbour boat" not in diagnostic_text
+    assert "/brief/new" not in diagnostic_text
+
+    repeated = subprocess.run(
+        [
+            "epub-news-feeder",
+            "generate",
+            "--config",
+            str(config),
+            "--state",
+            str(tmp_path / "state.sqlite3"),
+            "--output",
+            str(output),
+            "--run-id",
+            "20260809T080000Z-CCCCCCCC",
+            "--at",
+            "2026-08-09T08:00:00Z",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert "articles=1 publisher_links=1 read_items=2" in repeated.stdout
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_local_editorial_summary_is_verified_and_rendered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MixedEditionFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config = tmp_path / "publication.yaml"
+    config.write_text(
+        f"""
+version: 1
+sources:
+  full:
+    title: Full Publisher
+    publisher_id: publisher.example
+    feed_url: http://127.0.0.1:{server.server_port}/full.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: full-fixture
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: deny
+publications:
+  - id: daily
+    title: Daily Edition
+    language: en
+    budget: {{max_articles: 1, min_articles: 1}}
+    editorial:
+      enabled: true
+      provider: ollama
+      model_pair:
+        editorial_model: gemma4:12b-mlx
+        verifier_model: gemma4:e4b-mlx
+        editorial_prompt_version: editorial-v1
+        verifier_prompt_version: verifier-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      cost_envelope: {{max_calls: 4, max_tokens: 12000}}
+      ollama_host: http://127.0.0.1:11434
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [full]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    class StubProvider:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def complete(self, call: StructuredCall) -> object:
+            if call.role == "editorial":
+                articles = cast(list[dict[str, object]], call.input["articles"])
+                article_id = str(articles[0]["article_id"])
+                return {
+                    "summaries": [
+                        {
+                            "article_id": article_id,
+                            "sentences": [
+                                {
+                                    "text": "The harbour investigation is continuing.",
+                                    "citations": [article_id],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            return {"findings": [{"summary_index": 0, "sentence_index": 0, "status": "supported"}]}
+
+    monkeypatch.setattr(application, "OllamaStructuredProvider", StubProvider)
+    try:
+        result = generate_edition(
+            load_config(config),
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260809T081000Z-DDDDDDDD",
+            generated_at=datetime(2026, 8, 9, 8, 10, tzinfo=UTC),
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    with ZipFile(result.receipt.path) as archive:
+        xhtml = " ".join(
+            archive.read(name).decode() for name in archive.namelist() if name.endswith(".xhtml")
+        )
+    assert "AI-generated summary" in xhtml
+    assert "The harbour investigation is continuing." in xhtml
+    assert "https://publisher.example/harbour" in xhtml
+    diagnostics = (tmp_path / "diagnostics" / "20260809T081000Z-DDDDDDDD.jsonl").read_text()
+    assert "EDITORIAL_ACCEPTED" in diagnostics
+    assert "The harbour investigation is continuing" not in diagnostics
 
 
 @pytest.mark.acceptance

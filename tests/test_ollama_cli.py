@@ -33,6 +33,8 @@ class OllamaFixtureHandler(BaseHTTPRequestHandler):
             "required": ["status"],
             "additionalProperties": False,
         }
+        assert request["messages"][0]["role"] == "system"
+        assert '"const":"ok"' in request["messages"][0]["content"]
         if type(self).malformed:
             self._reply({"message": []})
         else:

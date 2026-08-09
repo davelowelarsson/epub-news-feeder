@@ -111,6 +111,7 @@ def _generate(arguments: argparse.Namespace) -> int:
         return 3
     print(
         f"run_id={run_id} code=EDITION_DELIVERED articles={result.article_count} "
+        f"publisher_links={result.publisher_link_count} read_items={result.read_item_count} "
         f"partial={str(result.partial).lower()}"
     )
     return 0

@@ -275,7 +275,9 @@ class StateStore:
                 started_at TEXT NOT NULL,
                 status TEXT NOT NULL,
                 delivery_digest TEXT,
-                failure_reason TEXT
+                failure_reason TEXT,
+                article_count INTEGER NOT NULL DEFAULT 0,
+                publisher_link_count INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS reservations (
                 publication_id TEXT NOT NULL,
@@ -372,6 +374,29 @@ class StateStore:
                 "ALTER TABLE revisions ADD COLUMN fingerprint_version INTEGER NOT NULL DEFAULT 1"
             )
         self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (3)")
+        run_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()
+        }
+        if "article_count" not in run_columns:
+            self.connection.execute(
+                "ALTER TABLE runs ADD COLUMN article_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "publisher_link_count" not in run_columns:
+            self.connection.execute(
+                "ALTER TABLE runs ADD COLUMN publisher_link_count INTEGER NOT NULL DEFAULT 0"
+            )
+        self.connection.execute(
+            """
+            UPDATE runs
+            SET article_count = (
+                SELECT COUNT(DISTINCT deliveries.article_id)
+                FROM deliveries WHERE deliveries.run_id = runs.run_id
+            )
+            WHERE status = 'delivered' AND article_count = 0 AND publisher_link_count = 0
+            """
+        )
+        self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)")
 
     def observe_article(
         self,
@@ -965,16 +990,33 @@ class StateStore:
         publication_id: str,
         observations: Iterable[ArticleObservation],
         expires_at: datetime,
+        *,
+        article_count: int | None = None,
+        publisher_link_count: int = 0,
     ) -> None:
         run = self.connection.execute(
-            "SELECT publication_id, status FROM runs WHERE run_id = ?", (run_id,)
+            """
+            SELECT publication_id, status, article_count, publisher_link_count
+            FROM runs WHERE run_id = ?
+            """,
+            (run_id,),
         ).fetchone()
         if run is None or str(run["publication_id"]) != publication_id:
             raise RuntimeError(f"Unknown Run for Publication: {run_id}")
         if str(run["status"]) not in {"started", "validated"}:
             raise RuntimeError(f"Run cannot reserve Articles in status {run['status']}")
+        reserved_observations = tuple(observations)
+        if article_count is None:
+            article_count = len(reserved_observations)
+        if article_count < 0 or publisher_link_count < 0:
+            raise ValueError("Run item counts must not be negative")
+        if str(run["status"]) == "validated" and (
+            int(run["article_count"]),
+            int(run["publisher_link_count"]),
+        ) != (article_count, publisher_link_count):
+            raise RuntimeError("Validated Run item counts are immutable")
         with self._transaction():
-            for observation in observations:
+            for observation in reserved_observations:
                 existing = self.connection.execute(
                     """
                     SELECT revision_hash, run_id, expires_at FROM reservations
@@ -1012,7 +1054,12 @@ class StateStore:
                     ),
                 )
             self.connection.execute(
-                "UPDATE runs SET status = 'validated' WHERE run_id = ?", (run_id,)
+                """
+                UPDATE runs
+                SET status = 'validated', article_count = ?, publisher_link_count = ?
+                WHERE run_id = ?
+                """,
+                (article_count, publisher_link_count, run_id),
             )
 
     def finalize_delivery(
@@ -1109,6 +1156,14 @@ class StateStore:
             (run_id,),
         ).fetchone()
         return 0 if row is None else int(row["total"])
+
+    def run_item_counts(self, run_id: str) -> tuple[int, int]:
+        row = self.connection.execute(
+            "SELECT article_count, publisher_link_count FROM runs WHERE run_id = ?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Unknown Run: {run_id}")
+        return int(row["article_count"]), int(row["publisher_link_count"])
 
     def run_delivery_status(self, run_id: str) -> tuple[str, str | None]:
         row = self.connection.execute(

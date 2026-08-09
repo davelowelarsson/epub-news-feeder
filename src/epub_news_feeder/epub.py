@@ -20,6 +20,25 @@ _ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 @dataclass(frozen=True)
+class EditorialCitationInput:
+    """One publisher Article cited by generated editorial prose."""
+
+    label: str
+    canonical_url: str
+
+
+@dataclass(frozen=True)
+class EditorialSentenceInput:
+    text: str
+    citations: tuple[EditorialCitationInput, ...]
+
+
+@dataclass(frozen=True)
+class EditorialSummaryInput:
+    sentences: tuple[EditorialSentenceInput, ...]
+
+
+@dataclass(frozen=True)
 class ArticleInput:
     """One complete, attributed Canonical Rendition."""
 
@@ -32,6 +51,7 @@ class ArticleInput:
     published_at: str | None = None
     update_label: str | None = None
     copyright_notice: str | None = None
+    editorial_summary: EditorialSummaryInput | None = None
 
 
 @dataclass(frozen=True)
@@ -48,9 +68,12 @@ class SectionPointerInput:
 class LinkInput:
     """Attributed metadata-only Source item that opens at the publisher."""
 
+    identifier: str
     title: str
     source_name: str
     canonical_url: str
+    author: str | None = None
+    published_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +206,12 @@ def _validate(edition: EditionInput) -> None:
     if len(set(articles)) != len(articles) or any(not value for value in articles):
         raise ValueError("Article identifiers must be unique and non-empty")
     article_ids = set(articles)
+    for section in edition.sections:
+        publisher_link_ids = [link.identifier for link in section.links]
+        if len(set(publisher_link_ids)) != len(publisher_link_ids) or any(
+            not value for value in publisher_link_ids
+        ):
+            raise ValueError("Publisher link identifiers must be unique within a Section")
     for pointer in (pointer for section in edition.sections for pointer in section.pointers):
         if pointer.article_identifier not in article_ids:
             raise ValueError("Section Pointer target is not a Canonical Rendition")
@@ -291,6 +320,30 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
 
 def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePosixPath]) -> bytes:
     html, body = _xhtml_document(edition.title, edition.language)
+    article_count = sum(len(section.articles) for section in edition.sections)
+    publisher_link_count = sum(len(section.links) for section in edition.sections)
+    overview = etree.SubElement(
+        body,
+        f"{{{_XHTML_NS}}}section",
+        attrib={"class": "edition-overview", "aria-labelledby": "edition-overview-heading"},
+    )
+    overview_heading = etree.SubElement(
+        overview, f"{{{_XHTML_NS}}}h1", id="edition-overview-heading"
+    )
+    overview_heading.text = "Edition overview"
+    overview_summary = etree.SubElement(overview, f"{{{_XHTML_NS}}}p")
+    overview_summary.text = (
+        f"This edition contains {article_count} {_plural(article_count, 'complete article')} "
+        f"and {publisher_link_count} "
+        f"{_plural(publisher_link_count, 'metadata-only publisher link')} across "
+        f"{len(edition.sections)} {_plural(len(edition.sections), 'section')}."
+    )
+    if publisher_link_count:
+        overview_note = etree.SubElement(overview, f"{{{_XHTML_NS}}}p")
+        overview_note.text = (
+            "Publisher links contain a headline and Source attribution only; "
+            "follow the link to read the report at its publisher."
+        )
     nav = etree.SubElement(body, f"{{{_XHTML_NS}}}nav", attrib={f"{{{_EPUB_NS}}}type": "toc"})
     heading = etree.SubElement(nav, f"{{{_XHTML_NS}}}h1")
     heading.text = "Contents"
@@ -306,7 +359,8 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
     navigation = edition.navigation or tuple(
         NavigationInput(section.identifier, section.title) for section in edition.sections
     )
-    _add_navigation_items(ordered, navigation, section_paths)
+    sections = {section.identifier: section for section in edition.sections}
+    _add_navigation_items(ordered, navigation, section_paths, sections)
     return _serialize(html)
 
 
@@ -314,6 +368,7 @@ def _add_navigation_items(
     parent: etree._Element,
     entries: tuple[NavigationInput, ...],
     section_paths: dict[str, PurePosixPath],
+    sections: dict[str, SectionInput],
 ) -> None:
     for entry in entries:
         item = etree.SubElement(parent, f"{{{_XHTML_NS}}}li")
@@ -321,12 +376,39 @@ def _add_navigation_items(
             label = etree.SubElement(item, f"{{{_XHTML_NS}}}span")
             label.text = entry.title
             nested = etree.SubElement(item, f"{{{_XHTML_NS}}}ol")
-            _add_navigation_items(nested, entry.children, section_paths)
+            _add_navigation_items(nested, entry.children, section_paths, sections)
         else:
             link = etree.SubElement(
                 item, f"{{{_XHTML_NS}}}a", href=str(section_paths[entry.identifier].name)
             )
             link.text = entry.title
+            section = sections[entry.identifier]
+            if section.articles or section.links:
+                articles = etree.SubElement(item, f"{{{_XHTML_NS}}}ol")
+                for article in section.articles:
+                    article_item = etree.SubElement(articles, f"{{{_XHTML_NS}}}li")
+                    article_link = etree.SubElement(
+                        article_item,
+                        f"{{{_XHTML_NS}}}a",
+                        href=(
+                            f"{section_paths[entry.identifier].name}"
+                            f"#{_article_fragment(article.identifier)}"
+                        ),
+                    )
+                    article_link.text = f"{article.title} — {article.source_name}"
+                for source_link in section.links:
+                    source_item = etree.SubElement(articles, f"{{{_XHTML_NS}}}li")
+                    source_anchor = etree.SubElement(
+                        source_item,
+                        f"{{{_XHTML_NS}}}a",
+                        href=(
+                            f"{section_paths[entry.identifier].name}"
+                            f"#{_publisher_link_fragment(source_link.identifier)}"
+                        ),
+                    )
+                    source_anchor.text = (
+                        f"[Publisher link] {source_link.title} — {source_link.source_name}"
+                    )
 
 
 def _navigation_ids(entries: tuple[NavigationInput, ...]) -> list[str]:
@@ -408,10 +490,14 @@ def _section_document(
         _add_story_hub(main, hub, section.identifier, section_paths, article_locations)
     if section.links:
         links_heading = etree.SubElement(main, f"{{{_XHTML_NS}}}h2")
-        links_heading.text = "Links from metadata-only Sources"
+        links_heading.text = "More reporting at publishers"
         links = etree.SubElement(main, f"{{{_XHTML_NS}}}ul", attrib={"class": "source-links"})
         for link in section.links:
-            _add_source_link(links, link)
+            _add_source_link(
+                links,
+                link,
+                _publisher_link_fragment(link.identifier),
+            )
     colophon = etree.SubElement(body, f"{{{_XHTML_NS}}}footer", attrib={"class": "colophon"})
     colophon.text = f"Run ID: {edition.run_id}"
     return _serialize(html)
@@ -454,21 +540,30 @@ def _add_article(
     if article.update_label:
         update = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p", attrib={"class": "update-label"})
         update.text = article.update_label
-    attribution = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p", attrib={"class": "attribution"})
-    attribution.text = f"{article.author} · " if article.author else ""
-    source = etree.SubElement(attribution, f"{{{_XHTML_NS}}}span")
-    source.text = article.source_name
-    if article.published_at:
-        published = etree.SubElement(attribution, f"{{{_XHTML_NS}}}span")
-        published.text = f" · Published {article.published_at}"
+    metadata = etree.SubElement(
+        rendered, f"{{{_XHTML_NS}}}div", attrib={"class": "article-metadata"}
+    )
+    _add_publisher_metadata(
+        metadata,
+        author=article.author,
+        source_name=article.source_name,
+        published_at=article.published_at,
+    )
     if article.copyright_notice:
         copyright_element = etree.SubElement(
-            attribution, f"{{{_XHTML_NS}}}span", attrib={"class": "copyright"}
+            metadata, f"{{{_XHTML_NS}}}p", attrib={"class": "copyright"}
         )
-        copyright_element.text = f" · {article.copyright_notice}"
+        copyright_element.text = f"Rights: {article.copyright_notice}"
+    else:
+        copyright_element = etree.SubElement(
+            metadata, f"{{{_XHTML_NS}}}p", attrib={"class": "copyright"}
+        )
+        copyright_element.text = "Rights: Copyright information not supplied; see publisher."
     canonical = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
     link = etree.SubElement(canonical, f"{{{_XHTML_NS}}}a", href=article.canonical_url)
-    link.text = "Read at publisher"
+    link.text = "Read full article at publisher"
+    if article.editorial_summary is not None:
+        _add_editorial_summary(rendered, article.editorial_summary)
     related = related_sections[article.identifier]
     if related:
         related_heading = etree.SubElement(rendered, f"{{{_XHTML_NS}}}h3")
@@ -486,6 +581,32 @@ def _add_article(
     for paragraph_text in article.body.split("\n\n"):
         paragraph = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p")
         paragraph.text = paragraph_text
+
+
+def _add_editorial_summary(parent: etree._Element, summary: EditorialSummaryInput) -> None:
+    aside = etree.SubElement(
+        parent,
+        f"{{{_XHTML_NS}}}aside",
+        attrib={"class": "editorial-summary", f"{{{_EPUB_NS}}}type": "annotation"},
+    )
+    heading = etree.SubElement(aside, f"{{{_XHTML_NS}}}h3")
+    heading.text = "AI-generated summary"
+    disclosure = etree.SubElement(aside, f"{{{_XHTML_NS}}}p", attrib={"class": "disclosure"})
+    disclosure.text = (
+        "Generated from cited reporting and independently checked by a local verifier."
+    )
+    for sentence in summary.sentences:
+        paragraph = etree.SubElement(aside, f"{{{_XHTML_NS}}}p")
+        paragraph.text = sentence.text
+        for index, citation in enumerate(sentence.citations, start=1):
+            citation_link = etree.SubElement(
+                paragraph,
+                f"{{{_XHTML_NS}}}a",
+                href=citation.canonical_url,
+                attrib={"class": "editorial-citation"},
+            )
+            citation_link.text = f" [{index}]"
+            citation_link.set("aria-label", f"Citation {index}: {citation.label}")
 
 
 def _add_pointer(
@@ -516,12 +637,45 @@ def _add_pointer(
     )
 
 
-def _add_source_link(parent: etree._Element, source_link: LinkInput) -> None:
-    item = etree.SubElement(parent, f"{{{_XHTML_NS}}}li")
-    link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href=source_link.canonical_url)
-    link.text = source_link.title
-    source = etree.SubElement(item, f"{{{_XHTML_NS}}}span")
-    source.text = f" — {source_link.source_name}"
+def _add_source_link(parent: etree._Element, source_link: LinkInput, fragment: str) -> None:
+    item = etree.SubElement(parent, f"{{{_XHTML_NS}}}li", id=fragment)
+    title = etree.SubElement(item, f"{{{_XHTML_NS}}}h3")
+    title.text = source_link.title
+    kind = etree.SubElement(item, f"{{{_XHTML_NS}}}p", attrib={"class": "item-kind"})
+    kind.text = "Publisher link; this Edition does not reproduce the article text."
+    _add_publisher_metadata(
+        item,
+        author=source_link.author,
+        source_name=source_link.source_name,
+        published_at=source_link.published_at,
+    )
+    route = etree.SubElement(item, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
+    link = etree.SubElement(route, f"{{{_XHTML_NS}}}a", href=source_link.canonical_url)
+    link.text = "Read report at publisher"
+
+
+def _add_publisher_metadata(
+    parent: etree._Element,
+    *,
+    author: str | None,
+    source_name: str,
+    published_at: str | None,
+) -> None:
+    byline = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "byline"})
+    byline.text = f"By {author}" if author else "Byline: Not supplied by publisher"
+    source = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "source"})
+    source.text = f"Source: {source_name}"
+    published = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "published"})
+    published.text = "Published by publisher: "
+    if published_at:
+        published_time = etree.SubElement(
+            published,
+            f"{{{_XHTML_NS}}}time",
+            datetime=published_at,
+        )
+        published_time.text = published_at
+    else:
+        published.text += "Date not supplied"
 
 
 def _add_story_hub(
@@ -582,6 +736,10 @@ def _section_fragment(identifier: str) -> str:
     return f"section-{_token(identifier)}"
 
 
+def _publisher_link_fragment(identifier: str) -> str:
+    return f"publisher-link-{_token(identifier)}"
+
+
 def _manifest_id(identifier: str) -> str:
     return f"section-{_token(identifier)}"
 
@@ -594,10 +752,30 @@ def _token(identifier: str) -> str:
     return f"{readable}-{sha256(identifier.encode()).hexdigest()[:12]}"
 
 
+def _plural(count: int, singular: str) -> str:
+    return singular if count == 1 else f"{singular}s"
+
+
 _STYLESHEET = (
-    b"body { font-family: serif; line-height: 1.45; }\n"
-    b"article { margin: 2em 0; }\n"
-    b".attribution, .canonical-link, .colophon { font-size: 0.9em; }\n"
+    b"body { font-family: serif; line-height: 1.5; margin: 0 auto; max-width: 42em; "
+    b"padding: 0 4%; }\n"
+    b"h1 { font-size: 1.75em; line-height: 1.15; margin: 1.2em 0 0.6em; }\n"
+    b"h2 { font-size: 1.35em; line-height: 1.2; margin: 1.5em 0 0.5em; }\n"
+    b"h3 { font-size: 1.05em; line-height: 1.25; margin: 1.1em 0 0.35em; }\n"
+    b"a { text-decoration-thickness: 0.08em; text-underline-offset: 0.12em; }\n"
+    b"nav ol { padding-left: 1.35em; }\n"
+    b"nav li { margin: 0.4em 0; }\n"
+    b"nav ol ol { margin: 0.35em 0 0.8em; }\n"
+    b"article { border-top: 0.08em solid; margin: 2.5em 0; padding-top: 0.4em; }\n"
+    b".edition-overview { border-bottom: 0.12em solid; margin-bottom: 1.5em; "
+    b"padding-bottom: 0.8em; }\n"
+    b".article-metadata, .canonical-link, .colophon, .item-kind, .source { "
+    b"font-family: sans-serif; font-size: 0.88em; }\n"
+    b".article-metadata p { margin: 0.18em 0; }\n"
+    b".source-links { list-style: none; padding-left: 0; }\n"
+    b".source-links > li { border-top: 0.06em solid; margin: 1.5em 0; padding-top: 0.2em; }\n"
+    b".item-kind { font-weight: bold; }\n"
     b".section-pointer, .edition-notes { border-left: 0.2em solid; margin: 1em 0; "
     b"padding-left: 0.8em; }\n"
+    b".colophon { border-top: 0.06em solid; margin-top: 3em; padding-top: 0.6em; }\n"
 )

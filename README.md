@@ -2,7 +2,8 @@
 
 Build private, finite news Editions as standards-first EPUBs. The local MVP validates
 strict YAML, applies dated Source eligibility, acquires Articles from configured full-text routes,
-selects a finite Edition, gates a deterministic EPUB 3.3 with EPUBCheck, and atomically
+selects a finite Edition, optionally adds locally verified summaries, gates a deterministic EPUB
+3.3 with EPUBCheck, and atomically
 delivers it while retaining only body-free SQLite state and JSONL diagnostics.
 
 ## Local setup
@@ -29,15 +30,19 @@ Back up the SQLite file and its adjacent `.key` sidecar together.
 If final delivery is interrupted, rerun with the same `--run-id` and `--at`; the validated
 private spool is revalidated and delivered without reacquiring Sources.
 
-## Ollama readiness
+## Local verified summaries
 
-The deterministic generator does not require an LLM. This probe proves a named local model
-is installed and obeys the strict structured-output boundary needed by the later optional
-editorial layer:
+The example configuration uses `gemma4:12b-mlx` as editor and `gemma4:e4b-mlx` as an independent
+verifier. Both must be installed in Ollama. Every sentence requires a publisher citation; malformed,
+unsupported, unavailable, or policy-ineligible output is omitted without blocking the Edition.
+Metadata-only sources such as Ekot are never sent to a model.
 
 ```bash
-uv run epub-news-feeder ollama-check --model qwen3.5:27b
+uv run epub-news-feeder ollama-check --model gemma4:12b-mlx
+uv run epub-news-feeder ollama-check --model gemma4:e4b-mlx
 ```
+
+Set `editorial.enabled: false` for the fully deterministic no-LLM path.
 
 ## Quality gate
 
@@ -49,6 +54,6 @@ uv run mypy
 uv run pytest
 ```
 
-Implementation follows the project specification in GitHub issue #16. Google Drive,
-scheduled private state, physical Kobo acceptance, and OpenAI editorial integration are
-subsequent milestones.
+Implementation follows the project specification in GitHub issue #16. Google Drive, scheduled
+private state, physical Kobo acceptance, and OpenAI editorial integration remain subsequent
+milestones.

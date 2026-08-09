@@ -77,8 +77,32 @@ def test_ticket_06_reservations_expire_and_same_run_operations_are_idempotent(
         )
         state.begin_run("run", "daily", "edition", observed_at)
         state.begin_run("run", "daily", "edition", observed_at)
-        state.reserve_articles("run", "daily", [observed], observed_at + timedelta(hours=1))
-        state.reserve_articles("run", "daily", [observed], observed_at + timedelta(hours=1))
+        state.reserve_articles(
+            "run",
+            "daily",
+            [observed],
+            observed_at + timedelta(hours=1),
+            article_count=1,
+            publisher_link_count=2,
+        )
+        state.reserve_articles(
+            "run",
+            "daily",
+            [observed],
+            observed_at + timedelta(hours=1),
+            article_count=1,
+            publisher_link_count=2,
+        )
+        assert state.run_item_counts("run") == (1, 2)
+        with pytest.raises(RuntimeError, match="item counts are immutable"):
+            state.reserve_articles(
+                "run",
+                "daily",
+                [observed],
+                observed_at + timedelta(hours=1),
+                article_count=2,
+                publisher_link_count=1,
+            )
 
         assert state.active_reservations("daily", as_of=observed_at) == [observed.article_id]
         blocked = state.observe_article(

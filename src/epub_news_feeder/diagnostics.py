@@ -12,13 +12,16 @@ from typing import Any
 _ALLOWED_FIELDS = {
     "article_id",
     "articles",
+    "calls",
     "digest",
     "duration_ms",
     "evidence_id",
     "omitted",
     "outcome",
     "partial",
+    "publisher_links",
     "publication_id",
+    "read_items",
     "source_id",
 }
 
@@ -48,7 +51,17 @@ class Diagnostics:
             aggregate = {
                 key: value
                 for key, value in event.items()
-                if key in {"run_id", "phase", "code", "articles", "partial", "outcome"}
+                if key
+                in {
+                    "run_id",
+                    "phase",
+                    "code",
+                    "articles",
+                    "publisher_links",
+                    "read_items",
+                    "partial",
+                    "outcome",
+                }
             }
             self._append(self.summary_path, aggregate)
 

@@ -6,7 +6,7 @@ import math
 import re
 import sqlite3
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -19,10 +19,14 @@ from epub_news_feeder.acquisition import (
 )
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
+from epub_news_feeder.editorial import ArticleEvidence, generate_editorial
 from epub_news_feeder.epub import (
     ArticleInput,
     CorrectionInput,
     EditionInput,
+    EditorialCitationInput,
+    EditorialSentenceInput,
+    EditorialSummaryInput,
     LinkInput,
     NavigationInput,
     PriorCoverageInput,
@@ -39,6 +43,7 @@ from epub_news_feeder.models import (
     Publication,
     Section,
 )
+from epub_news_feeder.ollama import OllamaError, OllamaStructuredProvider
 from epub_news_feeder.selection import (
     AncestorBudget,
     Candidate,
@@ -69,6 +74,11 @@ class GenerationResult:
     receipt: DeliveryReceipt
     article_count: int
     partial: bool
+    publisher_link_count: int = 0
+
+    @property
+    def read_item_count(self) -> int:
+        return self.article_count + self.publisher_link_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +91,18 @@ class _ArticleRecord:
     source_id: str
     publisher_id: str
     cluster_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LinkRecord:
+    link: LinkInput
+    categories: tuple[str, ...]
+    published_at: datetime
+    source_id: str
+    cluster_id: str | None = None
+
+
+type _SelectableRecord = _ArticleRecord | _LinkRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,9 +188,8 @@ def _run(
     if resumed is not None:
         return resumed
     source_ids = tuple(dict.fromkeys(source for leaf in leaves for source in leaf.section.sources))
-    records: dict[str, _ArticleRecord] = {}
+    records: dict[str, _SelectableRecord] = {}
     source_records: dict[str, list[str]] = {source_id: [] for source_id in source_ids}
-    source_links: dict[str, list[LinkInput]] = {source_id: [] for source_id in source_ids}
     notes: list[str] = []
     degraded_source_ids: set[str] = set()
 
@@ -236,9 +257,30 @@ def _run(
                 )
             for acquired in outcome.articles:
                 if acquired.body is None:
-                    source_links[source_id].append(
-                        LinkInput(acquired.title, acquired.source_title, acquired.canonical_url)
+                    link_id = sha256(
+                        (
+                            f"publisher-link:v1:{source_id}:"
+                            f"{acquired.guid or acquired.canonical_url}"
+                        ).encode()
+                    ).hexdigest()[:24]
+                    records[link_id] = _LinkRecord(
+                        link=LinkInput(
+                            identifier=link_id,
+                            title=acquired.title,
+                            source_name=acquired.source_title,
+                            canonical_url=acquired.canonical_url,
+                            author=acquired.author,
+                            published_at=(
+                                acquired.published_at.astimezone(UTC).date().isoformat()
+                                if acquired.published_at is not None
+                                else None
+                            ),
+                        ),
+                        categories=acquired.categories,
+                        published_at=acquired.published_at or generated_at,
+                        source_id=source_id,
                     )
+                    source_records[source_id].append(link_id)
                     continue
                 observation = state.observe_article(
                     source_id=source_id,
@@ -254,7 +296,7 @@ def _run(
                 )
                 if not observation.eligible:
                     continue
-                record = _ArticleRecord(
+                article_record = _ArticleRecord(
                     article=ArticleInput(
                         identifier=observation.article_id,
                         title=acquired.title,
@@ -286,7 +328,7 @@ def _run(
                         observed_at=generated_at,
                     ),
                 )
-                records.setdefault(observation.article_id, record)
+                records.setdefault(observation.article_id, article_record)
                 source_records[source_id].append(observation.article_id)
     finally:
         client.close()
@@ -302,17 +344,36 @@ def _run(
             "PUBLICATION_BELOW_MINIMUM", "Eligible articles did not meet the publication minimum"
         )
     for article_id in selection.unique_article_ids:
+        record = records[article_id]
+        if isinstance(record, _LinkRecord):
+            diagnostics.emit(
+                "PUBLISHER_LINK_SELECTED",
+                phase="selection",
+                source_id=record.source_id,
+            )
+            continue
         diagnostics.emit(
             "ARTICLE_SELECTED",
             phase="selection",
             article_id=article_id,
-            source_id=records[article_id].source_id,
+            source_id=record.source_id,
         )
 
     placements = place_articles(selection)
+    _apply_editorial(
+        publication,
+        configuration,
+        records,
+        selection.unique_article_ids,
+        generated_at,
+        diagnostics,
+    )
     cluster_articles: dict[str, list[str]] = {}
     for article_id in selection.unique_article_ids:
-        cluster_id = records[article_id].cluster_id
+        record = records[article_id]
+        if isinstance(record, _LinkRecord):
+            continue
+        cluster_id = record.cluster_id
         if cluster_id is not None:
             cluster_articles.setdefault(cluster_id, []).append(article_id)
     hubs_by_section: dict[str, list[StoryHubInput]] = {}
@@ -331,8 +392,8 @@ def _run(
                 tuple(
                     StoryArticleLinkInput(
                         article_id,
-                        records[article_id].article.title,
-                        records[article_id].article.source_name,
+                        _record_title(records[article_id]),
+                        _record_source_name(records[article_id]),
                     )
                     for article_id in article_ids
                 ),
@@ -350,28 +411,29 @@ def _run(
     sections: list[SectionInput] = []
     for leaf in leaves:
         section_id = leaf.section.id
-        primary = tuple(
-            records[article_id].article
-            for article_id, placement in placements.items()
-            if placement.primary_section_id == section_id
-        )
+        primary_items: list[ArticleInput] = []
+        link_items: list[LinkInput] = []
+        for article_id, placement in placements.items():
+            selected_record = records[article_id]
+            if placement.primary_section_id != section_id:
+                continue
+            if isinstance(selected_record, _ArticleRecord):
+                primary_items.append(selected_record.article)
+            else:
+                link_items.append(selected_record.link)
+        primary = tuple(primary_items)
         pointers = tuple(
             SectionPointerInput(
                 article_identifier=article_id,
-                headline=records[article_id].article.title,
-                source_name=records[article_id].article.source_name,
+                headline=_record_title(records[article_id]),
+                source_name=_record_source_name(records[article_id]),
                 relevance_reason=f"Also relevant to {leaf.section.title}",
             )
             for article_id, placement in placements.items()
+            if isinstance(records[article_id], _ArticleRecord)
             if section_id in placement.pointer_section_ids
         )
-        all_links = tuple(
-            link for source_id in leaf.section.sources for link in source_links[source_id]
-        )
-        link_limit = publication.budget.max_articles if publication.budget else None
-        link_limit = link_limit or min(18, max(6, 3 * len(publication.sections)))
-        links_by_url = {link.canonical_url: link for link in all_links}
-        links = tuple(links_by_url.values())[:link_limit]
+        links = tuple(link_items)
         sections.append(
             SectionInput(
                 identifier=section_id,
@@ -411,14 +473,31 @@ def _run(
         validate_epub(epub_bytes, jar_path=epubcheck_jar)
     except EpubValidationError as error:
         raise GenerationError("EPUB_VALIDATION_FAILED", str(error)) from error
-    diagnostics.emit("EPUB_VALID", phase="validation", articles=len(selection.unique_article_ids))
-
-    observations = [records[article_id].observation for article_id in selection.unique_article_ids]
+    selected_articles = [
+        selected_record
+        for article_id in selection.unique_article_ids
+        if isinstance((selected_record := records[article_id]), _ArticleRecord)
+    ]
+    selected_links = [
+        selected_record
+        for article_id in selection.unique_article_ids
+        if isinstance((selected_record := records[article_id]), _LinkRecord)
+    ]
+    diagnostics.emit(
+        "EPUB_VALID",
+        phase="validation",
+        articles=len(selected_articles),
+        publisher_links=len(selected_links),
+        read_items=len(selection.unique_article_ids),
+    )
+    observations = [record.observation for record in selected_articles]
     state.reserve_articles(
         run_id,
         publication.id,
         observations,
         expires_at=generated_at + timedelta(hours=24),
+        article_count=len(selected_articles),
+        publisher_link_count=len(selected_links),
     )
     output_directory.mkdir(parents=True, exist_ok=True)
     output_directory.chmod(0o700)
@@ -462,7 +541,11 @@ def _run(
         )
         for article_id in selection.unique_article_ids:
             record = records[article_id]
-            if record.cluster_id is None or record.publisher_published_at is None:
+            if (
+                not isinstance(record, _ArticleRecord)
+                or record.cluster_id is None
+                or record.publisher_published_at is None
+            ):
                 continue
             state.record_cluster_delivery(
                 publication_id=publication.id,
@@ -478,12 +561,19 @@ def _run(
         diagnostics.emit(
             "EDITION_DELIVERED",
             phase="delivery",
-            articles=len(selection.unique_article_ids),
+            articles=len(selected_articles),
+            publisher_links=len(selected_links),
+            read_items=len(selection.unique_article_ids),
             partial=selection.partial,
             digest=receipt.sha256,
         )
     spool_receipt.path.unlink(missing_ok=True)
-    return GenerationResult(receipt, len(selection.unique_article_ids), selection.partial)
+    return GenerationResult(
+        receipt,
+        len(selected_articles),
+        selection.partial,
+        publisher_link_count=len(selected_links),
+    )
 
 
 def _resume_spooled_delivery(
@@ -514,9 +604,14 @@ def _resume_spooled_delivery(
                 "DELIVERED_COPY_MISMATCH", "Delivered local copy is not immutable"
             )
         spool_path.unlink(missing_ok=True)
-        article_count = state.delivered_article_count(run_id)
+        article_count, publisher_link_count = state.run_item_counts(run_id)
         _, publication_maximum = _publication_limits(publication)
-        return GenerationResult(receipt, article_count, article_count < publication_maximum)
+        return GenerationResult(
+            receipt,
+            article_count,
+            article_count + publisher_link_count < publication_maximum,
+            publisher_link_count=publisher_link_count,
+        )
     if current is None and not spool_path.is_file():
         if pending:
             raise GenerationError(
@@ -542,9 +637,14 @@ def _resume_spooled_delivery(
                 delivered_at=generated_at,
                 delivery_digest=receipt.sha256,
             )
-            article_count = state.delivered_article_count(run_id)
+            article_count, publisher_link_count = state.run_item_counts(run_id)
             _, publication_maximum = _publication_limits(publication)
-            return GenerationResult(receipt, article_count, article_count < publication_maximum)
+            return GenerationResult(
+                receipt,
+                article_count,
+                article_count + publisher_link_count < publication_maximum,
+                publisher_link_count=publisher_link_count,
+            )
     if not spool_path.is_file():
         raise GenerationError(
             "DELIVERY_SPOOL_MISSING", "Validated Delivery artifact is unavailable"
@@ -582,21 +682,25 @@ def _resume_spooled_delivery(
         raise RetryableGenerationError(
             "DELIVERY_FINALIZATION_PENDING", "Delivered copy awaits State finalization"
         ) from error
-    article_count = len(state.active_reservations(publication.id, as_of=generated_at))
-    # Reservations are cleared by finalization; recover the delivered count from state.
-    if article_count == 0:
-        article_count = state.delivered_article_count(run_id)
+    article_count, publisher_link_count = state.run_item_counts(run_id)
     _, publication_maximum = _publication_limits(publication)
     with suppress(OSError):
         diagnostics.emit(
             "EDITION_DELIVERED",
             phase="delivery",
             articles=article_count,
-            partial=article_count < publication_maximum,
+            publisher_links=publisher_link_count,
+            read_items=article_count + publisher_link_count,
+            partial=article_count + publisher_link_count < publication_maximum,
             digest=receipt.sha256,
         )
     spool_path.unlink(missing_ok=True)
-    return GenerationResult(receipt, article_count, article_count < publication_maximum)
+    return GenerationResult(
+        receipt,
+        article_count,
+        article_count + publisher_link_count < publication_maximum,
+        publisher_link_count=publisher_link_count,
+    )
 
 
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
@@ -649,7 +753,7 @@ def _selection_request(
     publication: Publication,
     leaves: tuple[_Leaf, ...],
     configuration: Configuration,
-    records: dict[str, _ArticleRecord],
+    records: dict[str, _SelectableRecord],
     source_records: dict[str, list[str]],
     generated_at: datetime,
 ) -> PublicationRequest:
@@ -679,7 +783,7 @@ def _section_requests(
     publication: Publication,
     leaves: tuple[_Leaf, ...],
     configuration: Configuration,
-    records: dict[str, _ArticleRecord],
+    records: dict[str, _SelectableRecord],
     source_records: dict[str, list[str]],
     generated_at: datetime,
     pub_max: int,
@@ -704,8 +808,8 @@ def _section_requests(
                 candidate = Candidate(
                     article_id,
                     source_id,
-                    record.article.title,
-                    record.article.canonical_url,
+                    _record_title(record),
+                    _record_canonical_url(record),
                     record.published_at,
                     policy.source_weights.get(source_id, source.weight),
                     record.cluster_id,
@@ -756,7 +860,7 @@ def _section_requests(
     return requests
 
 
-def _score(rules: list[MatchRule], record: _ArticleRecord, full_body_matching: bool) -> int:
+def _score(rules: list[MatchRule], record: _SelectableRecord, full_body_matching: bool) -> int:
     return sum(
         (rule.weight or 1)
         for rule in rules
@@ -764,19 +868,121 @@ def _score(rules: list[MatchRule], record: _ArticleRecord, full_body_matching: b
     )
 
 
-def _matches(rule: MatchRule, record: _ArticleRecord) -> bool:
+def _matches(rule: MatchRule, record: _SelectableRecord) -> bool:
     values: tuple[str, ...]
     if rule.field == "title":
-        values = (record.article.title,)
+        values = (_record_title(record),)
     elif rule.field == "category":
         values = record.categories
     else:
-        values = (record.article.body,)
+        values = (record.article.body,) if isinstance(record, _ArticleRecord) else ()
     needle = rule.value.casefold()
     if rule.match == "phrase":
         return any(needle in value.casefold() for value in values)
     pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)", re.IGNORECASE)
     return any(pattern.search(value) is not None for value in values)
+
+
+def _record_title(record: _SelectableRecord) -> str:
+    return record.article.title if isinstance(record, _ArticleRecord) else record.link.title
+
+
+def _record_source_name(record: _SelectableRecord) -> str:
+    return (
+        record.article.source_name
+        if isinstance(record, _ArticleRecord)
+        else record.link.source_name
+    )
+
+
+def _record_canonical_url(record: _SelectableRecord) -> str:
+    return (
+        record.article.canonical_url
+        if isinstance(record, _ArticleRecord)
+        else record.link.canonical_url
+    )
+
+
+def _apply_editorial(
+    publication: Publication,
+    configuration: Configuration,
+    records: dict[str, _SelectableRecord],
+    selected_ids: tuple[str, ...],
+    generated_at: datetime,
+    diagnostics: Diagnostics,
+) -> None:
+    editorial = publication.editorial
+    if editorial is None or not editorial.enabled or editorial.model_pair is None:
+        return
+    eligible_records = [
+        record
+        for article_id in selected_ids
+        if isinstance((record := records[article_id]), _ArticleRecord)
+        and _allows_local_editorial(configuration, record.source_id)
+    ]
+    if not eligible_records:
+        diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=0)
+        return
+    max_tokens = editorial.cost_envelope.max_tokens if editorial.cost_envelope else 12000
+    body_character_budget = min(2000, max(1000, max_tokens * 4 // len(eligible_records)))
+    evidence = tuple(
+        ArticleEvidence(
+            article_id=record.article.identifier,
+            title=record.article.title,
+            publisher=record.article.source_name,
+            canonical_url=record.article.canonical_url,
+            published_at=record.article.published_at or generated_at.date().isoformat(),
+            body=record.article.body[:body_character_budget],
+        )
+        for record in eligible_records
+    )
+    try:
+        provider = OllamaStructuredProvider(host=editorial.ollama_host)
+    except OllamaError:
+        diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=0)
+        return
+    result = generate_editorial(evidence, editorial.model_pair, provider)
+    diagnostics.emit(
+        "EDITORIAL_ACCEPTED" if result.evidence.status == "accepted" else "EDITORIAL_OMITTED",
+        phase="editorial",
+        calls=result.evidence.calls,
+    )
+    evidence_by_id = {item.article.identifier: item for item in eligible_records}
+    for addition in result.additions:
+        target = records.get(addition.article_id)
+        if not isinstance(target, _ArticleRecord):
+            continue
+        sentences = tuple(
+            EditorialSentenceInput(
+                sentence.text,
+                tuple(
+                    EditorialCitationInput(
+                        evidence_by_id[citation_id].article.source_name,
+                        evidence_by_id[citation_id].article.canonical_url,
+                    )
+                    for citation_id in sentence.citations
+                    if citation_id in evidence_by_id
+                ),
+            )
+            for sentence in addition.sentences
+        )
+        if sentences and all(sentence.citations for sentence in sentences):
+            records[addition.article_id] = replace(
+                target,
+                article=replace(
+                    target.article,
+                    editorial_summary=EditorialSummaryInput(sentences),
+                ),
+            )
+
+
+def _allows_local_editorial(configuration: Configuration, source_id: str) -> bool:
+    source = configuration.sources[source_id]
+    return (
+        source.llm_processing != "disabled"
+        and source.eligibility is not None
+        and source.eligibility.local_llm == "allow"
+    )
 
 
 def _story_signals(title: str, categories: tuple[str, ...]) -> tuple[str, ...]:

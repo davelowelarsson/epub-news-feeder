@@ -126,6 +126,22 @@ class EditorialConfig(StrictModel):
         Literal["ranking", "clustering", "article_summary", "revision_summary", "section_overview"]
     ] = Field(default_factory=list)
     cost_envelope: CostEnvelope | None = None
+    ollama_host: NonEmptyString = "http://127.0.0.1:11434"
+
+    @model_validator(mode="after")
+    def validate_enabled_editorial(self) -> EditorialConfig:
+        if not self.enabled:
+            return self
+        if (
+            self.provider != "ollama"
+            or self.remote_processing
+            or self.model_pair is None
+            or self.cost_envelope is None
+            or "article_summary" not in self.capabilities
+            or self.model_pair.editorial_model == self.model_pair.verifier_model
+        ):
+            raise ValueError("enabled local editorial configuration is incomplete")
+        return self
 
 
 class Section(StrictModel):
@@ -174,7 +190,7 @@ class Configuration(StrictModel):
 
             if publication.editorial is not None:
                 provider = publication.editorial.provider
-                if provider is not None and provider not in provider_ids:
+                if provider is not None and provider != "ollama" and provider not in provider_ids:
                     raise ValueError("editorial configuration references an unknown provider")
 
             section_ids: set[str] = set()

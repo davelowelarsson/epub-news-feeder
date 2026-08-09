@@ -2,8 +2,8 @@
 
 ## Status
 
-**Working local MVP implemented and automated acceptance verified on 2026-08-09; human/device
-release acceptance remains pending.**
+**Working local MVP implemented; upgraded reader experience and local verified-summary path passed
+automated and live acceptance on 2026-08-09. Human/device acceptance remains pending.**
 
 The repository has progressed through `/to-spec`, `/to-tickets`, and the automated local
 `/implement` slice. GitHub issue #16 is the authoritative specification; issues #17–#29 define
@@ -22,12 +22,16 @@ Source-specific processing rules while adding either.
   writer lock, reservations, Pending Delivery, and acknowledged delivery lifecycle.
 - Coverage/Interest selection with Essential Coverage, configurable plurality, Discovery, Mutes,
   leaf minima, ancestor ceilings, cluster diversity, and one-body multi-Section placement.
-- Deterministic EPUB 3.3 with nested navigation, notes, corrections, Story hubs, reciprocal links,
-  attribution, update metadata, and a body-free colophon Run ID.
+- Deterministic EPUB 3.3 with an Edition overview, article-level nested navigation, explicit
+  author/date fallbacks, notes, corrections, Story hubs, reciprocal links, attribution, update
+  metadata, and a body-free colophon Run ID.
+- Metadata-only reports compete in the same finite selection budget and appear as attributed,
+  navigable publisher-link briefs. Unselected acquisition inventory is never rendered or stored.
 - Digest-pinned EPUBCheck 5.3.0 gating, immutable private local delivery, and revalidated
   same-Run recovery from a private pending spool.
 - Body-free allowlisted JSONL diagnostics with private permissions and retention.
-- Local Ollama named-model and strict structured-JSON readiness probe.
+- Optional local Ollama summaries using separate `gemma4:12b-mlx` editor and `gemma4:e4b-mlx`
+  verifier roles, strict cited schemas, one repair maximum, and deterministic omission on failure.
 
 ## Reproduce locally
 
@@ -40,7 +44,8 @@ uv run epub-news-feeder generate \
   --state .local/state.sqlite3 \
   --output .local/editions \
   --diagnostics .local/diagnostics
-uv run epub-news-feeder ollama-check --model qwen3.5:27b
+uv run epub-news-feeder ollama-check --model gemma4:12b-mlx
+uv run epub-news-feeder ollama-check --model gemma4:e4b-mlx
 ```
 
 The default local EPUBCheck path is
@@ -74,9 +79,9 @@ spool sits beside the State Store under `pending-editions/` until State finaliza
 3. Record a human Calibre visual review and physical Kobo Libra Colour acceptance for the exact
    private digest. Automated EPUBCheck and Calibre parsing already pass but do not replace those
    human/device checks.
-4. Implement provider-neutral optional editorial proposals. Exercise local Ollama first, then
-   OpenAI Responses with `store: false`, no tools, exact Model Pair, cost/privacy preflight,
-   independent verification, and deterministic fallback.
+4. Complete the remaining editorial qualification: hard sentence/word/language ceilings,
+   worst-case call/token reservation, adversarial evals, then OpenAI Responses with `store: false`
+   and no tools. Local Ollama article summaries are already connected and fail closed.
 
 ## Safeguards
 
