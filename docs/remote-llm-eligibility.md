@@ -40,6 +40,31 @@ a third party.
 
 ---
 
+## Operator grant — David Lowe Larsson (recorded 2026-08-09)
+
+`davidlowelarsson.com` is **owned by the operator**. The earlier `unknown` verdict applied the
+right rule to the wrong situation: "silence is not permission" governs a *third-party* publisher
+whose `robots.txt` leaves `ai-input` unset. It does not govern a site whose rightsholder is the
+person configuring the feeder.
+
+The operator is the rightsholder and grants permission for remote LLM processing of this Source's
+Article text, for private single-operator reading. Recorded 2026-08-09.
+
+| Field | Before | After |
+| --- | --- | --- |
+| `rights.basis` | `operator_attested_private_use` | `operator_owned_site_attested_private_use` |
+| `remote_llm` | `unknown` | `allow` |
+
+Nothing else changes. This grant reaches exactly one Source and does not generalize: no other
+Source in the configuration is operator-owned, so no other `remote_llm` value moves with it. The
+`robots.txt` on the site should be updated to set `ai-input=yes` so the published signal matches
+the recorded grant; until it is, this record is the operative evidence.
+
+**This does not unblock SVT.** SVT's publisher grant already exists (`ai-input=yes`, "ALLOWED: AI
+retrieval (not training)"); what remains unmet is the *provider* limb — OpenAI may route flagged
+Customer Content to human moderation subprocessors, which is disclosure beyond the approved
+provider. Only sales-approved Zero Data Retention closes it. SVT stays `conditional`.
+
 ## Source 1 — David Lowe Larsson (`davidlowelarsson.com`)
 
 Currently recorded: `remote_llm: unknown`.

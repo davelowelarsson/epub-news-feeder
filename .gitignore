@@ -23,3 +23,4 @@ prototypes/
 # Ignore google cloud service account keys
 client_secret_*.json
 
+.env
