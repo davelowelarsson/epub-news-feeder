@@ -356,11 +356,19 @@ def test_reality_check_configuration_records_the_recorded_rights_matrix() -> Non
     assert ekot.eligibility.local_llm == "deny"
     assert ekot.eligibility.remote_llm == "deny"
 
-    # No Source anywhere in the configuration records an unconditional remote LLM allowance.
-    assert all(
-        source.eligibility is not None and source.eligibility.remote_llm != "allow"
-        for source in sources.values()
-    )
+    # Remote LLM allowance reaches exactly one Source: the operator's own site, granted by the
+    # rightsholder. Every third-party publisher stays denied, conditional or unknown - "silence is
+    # not permission" governs a publisher, not a site the operator owns.
+    allowed = {
+        source_id
+        for source_id, source in sources.items()
+        if source.eligibility is not None and source.eligibility.remote_llm == "allow"
+    }
+    assert allowed == {"david"}
+    assert sources["david"].rights is not None
+    assert sources["david"].rights.basis == "operator_owned_site_attested_private_use"
+    assert sources["svt"].eligibility is not None
+    assert sources["svt"].eligibility.remote_llm == "conditional"
 
 
 @pytest.mark.security
