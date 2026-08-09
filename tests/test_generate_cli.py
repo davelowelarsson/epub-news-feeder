@@ -115,8 +115,8 @@ class MixedEditionFixtureHandler(BaseHTTPRequestHandler):
 <guid>brief-new</guid><pubDate>Sat, 08 Aug 2026 09:00:00 GMT</pubDate></item>
 <item><title>Older report about the harbour boat</title><link>{origin}/brief/old</link>
 <guid>brief-old</guid><pubDate>Sat, 08 Aug 2026 07:00:00 GMT</pubDate></item>
-<item><title>Unselected unrelated bulletin</title><link>{origin}/brief/unselected</link>
-<guid>brief-unselected</guid><pubDate>Sat, 08 Aug 2026 06:00:00 GMT</pubDate></item>
+<item><title>An unrelated bulletin</title><link>{origin}/brief/unrelated</link>
+<guid>brief-unrelated</guid><pubDate>Sat, 08 Aug 2026 06:00:00 GMT</pubDate></item>
 </channel></rss>""".encode()
             status = 200
         else:
@@ -358,9 +358,11 @@ publications:
         server.server_close()
 
     assert result.returncode == 0, result.stderr
+    # Every eligible Brief arrives: they are capped apart from the Article Budget and no
+    # longer compete with journalism for an Article Slot.
     assert "articles=1" in result.stdout
-    assert "publisher_links=1" in result.stdout
-    assert "read_items=2" in result.stdout
+    assert "briefs=3" in result.stdout
+    assert "read_items=4" in result.stdout
     with ZipFile(next(output.glob("*.epub"))) as archive:
         xhtml = " ".join(
             archive.read(name).decode() for name in archive.namelist() if name.endswith(".xhtml")
@@ -371,9 +373,23 @@ publications:
     assert "New report about the harbour boat" in xhtml
     assert "Sveriges Radio Ekot" in xhtml
     assert "2026-08-08" in xhtml
-    assert "Read report at publisher" in xhtml
-    assert "Older report about the harbour boat" not in xhtml
-    assert "Unselected unrelated bulletin" not in xhtml
+    assert "In Brief" in xhtml
+    # The chrome the aggregated chapter exists to remove is gone.
+    assert "Read report at publisher" not in xhtml
+    assert "[Publisher link]" not in xhtml
+    assert "this Edition does not reproduce the article text" not in xhtml
+    # Briefs carry no relevance ranking, so every unmuted headline within the cap arrives,
+    # ordered newest first across Sources.
+    for headline in (
+        "New report about the harbour boat",
+        "Older report about the harbour boat",
+        "An unrelated bulletin",
+    ):
+        assert headline in xhtml, headline
+    assert xhtml.index("New report about the harbour boat") < xhtml.index(
+        "Older report about the harbour boat"
+    )
+    assert xhtml.index("Older report about the harbour boat") < xhtml.index("An unrelated bulletin")
     with sqlite3.connect(tmp_path / "state.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM articles").fetchone() == (1,)
         assert connection.execute("SELECT COUNT(*) FROM deliveries").fetchone() == (1,)
@@ -382,6 +398,7 @@ publications:
     state_bytes = (tmp_path / "state.sqlite3").read_bytes()
     assert b"New report about the harbour boat" not in state_bytes
     assert b"/brief/new" not in state_bytes
+    assert b"An unrelated bulletin" not in state_bytes
     diagnostic_text = (tmp_path / "diagnostics" / "20260809T080000Z-CCCCCCCC.jsonl").read_text()
     assert "New report about the harbour boat" not in diagnostic_text
     assert "/brief/new" not in diagnostic_text
@@ -406,7 +423,7 @@ publications:
         text=True,
     )
     assert repeated.returncode == 0, repeated.stderr
-    assert "articles=1 publisher_links=1 read_items=2" in repeated.stdout
+    assert "articles=1 briefs=3 read_items=4" in repeated.stdout
 
 
 @pytest.mark.acceptance

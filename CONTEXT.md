@@ -69,8 +69,16 @@ The language of an Article’s publisher text, declared by its Source or publish
 _Avoid_: Publication language, detected user language
 
 **Publisher Link Brief**:
-A selected, attributed reading item whose Source permits a publisher route but not reproduction of Article text. It is part of the finite Edition, not an inventory of acquired feed items.
+A selected, attributed reading item whose Source permits a publisher route but not reproduction of Article text. It is part of the finite Edition, not an inventory of acquired feed items. A Brief never occupies an Article Slot and is capped separately from Article content.
 _Avoid_: Article, Source list, dead link
+
+**Briefing Roll**:
+The single aggregated Edition chapter carrying every Publisher Link Brief, ordered newest first across Sources and placed ahead of the Sections. It sits outside the Section tree and holds one navigation entry.
+_Avoid_: Section, publisher link list, headline feed
+
+**Source Presentation**:
+Whether a Source contributes complete Articles or Publisher Link Briefs. It is derived from the Source's acquisition mode unless an operator overrides it.
+_Avoid_: Acquisition mode, rights basis
 
 **Canonical Rendition**:
 The single complete rendering of an Article within an Edition, regardless of how many Sections consider it relevant.

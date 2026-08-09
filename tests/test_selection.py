@@ -6,6 +6,7 @@ import pytest
 
 from epub_news_feeder.selection import (
     AncestorBudget,
+    BriefCandidate,
     Candidate,
     Policy,
     PublicationRequest,
@@ -308,3 +309,155 @@ def test_ticket_10_cluster_round_robin_precedes_another_perspective() -> None:
     result = select_publication(PublicationRequest(3, 1, (section,)))
 
     assert [slot.article.article_id for slot in result.slots] == ["a1", "b1", "a2"]
+
+
+def brief(
+    brief_id: str,
+    source_id: str,
+    *,
+    hours_old: int,
+    muted: bool = False,
+) -> BriefCandidate:
+    return BriefCandidate(
+        brief_id=brief_id,
+        source_id=source_id,
+        title=f"Brief {brief_id}",
+        canonical_url=f"https://{source_id}.example/{brief_id}",
+        published_at=datetime(2026, 8, 9, 6, tzinfo=UTC) - timedelta(hours=hours_old),
+        muted=muted,
+    )
+
+
+def _brief_request(
+    briefs: tuple[BriefCandidate, ...],
+    *,
+    max_briefs: int = 6,
+    max_articles: int = 4,
+    min_articles: int = 1,
+    candidates: tuple[SectionCandidate, ...] = (),
+) -> PublicationRequest:
+    return PublicationRequest(
+        max_articles=max_articles,
+        min_articles=min_articles,
+        sections=(
+            SectionRequest(
+                section_id="current",
+                title="Current reporting",
+                order=0,
+                policy=Policy.COVERAGE,
+                max_articles=max_articles,
+                candidates=candidates,
+            ),
+        ),
+        max_briefs=max_briefs,
+        briefs=briefs,
+    )
+
+
+def test_briefs_never_consume_an_article_slot() -> None:
+    articles = tuple(candidate(f"a-{index}", "source-a", hours_old=index) for index in range(4))
+    briefs = tuple(brief(f"b-{index}", "radio", hours_old=index) for index in range(3))
+
+    result = select_publication(_brief_request(briefs, max_articles=4, candidates=articles))
+
+    # The Article budget is full, and the Briefs arrive anyway.
+    assert len(result.unique_article_ids) == 4
+    assert len(result.selected_briefs) == 3
+    assert not set(result.unique_article_ids) & {item.brief_id for item in result.selected_briefs}
+
+
+def test_briefs_do_not_satisfy_the_publication_minimum() -> None:
+    briefs = tuple(brief(f"b-{index}", "radio", hours_old=index) for index in range(6))
+
+    result = select_publication(_brief_request(briefs, min_articles=1, candidates=()))
+
+    assert result.selected_briefs
+    assert not result.meets_minimum
+
+
+def test_brief_cap_is_independent_of_the_article_budget() -> None:
+    briefs = tuple(brief(f"b-{index}", "radio", hours_old=index) for index in range(10))
+
+    result = select_publication(_brief_request(briefs, max_briefs=6, max_articles=2))
+
+    assert len(result.selected_briefs) == 6
+
+
+def test_muted_briefs_are_never_selected() -> None:
+    briefs = (
+        brief("kept", "radio", hours_old=1),
+        brief("muted", "radio", hours_old=0, muted=True),
+    )
+
+    result = select_publication(_brief_request(briefs))
+
+    assert [item.brief_id for item in result.selected_briefs] == ["kept"]
+
+
+def test_briefs_are_taken_round_robin_so_one_source_cannot_fill_the_roll() -> None:
+    # Every "loud" Brief is newer than every "quiet" one; a purely chronological take would
+    # select only "loud".
+    briefs = tuple(brief(f"loud-{index}", "loud", hours_old=index) for index in range(6)) + tuple(
+        brief(f"quiet-{index}", "quiet", hours_old=20 + index) for index in range(6)
+    )
+
+    result = select_publication(_brief_request(briefs, max_briefs=4))
+
+    sources = [item.source_id for item in result.selected_briefs]
+    assert sorted(sources) == ["loud", "loud", "quiet", "quiet"]
+
+
+def test_selected_briefs_are_presented_newest_first_across_all_sources() -> None:
+    briefs = (
+        brief("quiet-newest", "quiet", hours_old=1),
+        brief("loud-newest", "loud", hours_old=0),
+        brief("quiet-older", "quiet", hours_old=3),
+        brief("loud-older", "loud", hours_old=2),
+    )
+
+    result = select_publication(_brief_request(briefs, max_briefs=4))
+
+    assert [item.brief_id for item in result.selected_briefs] == [
+        "loud-newest",
+        "quiet-newest",
+        "loud-older",
+        "quiet-older",
+    ]
+
+
+def test_brief_presentation_order_breaks_ties_deterministically() -> None:
+    same_moment = tuple(
+        BriefCandidate(
+            brief_id=f"brief-{index}",
+            source_id=source_id,
+            title="Same moment",
+            canonical_url=url,
+            published_at=datetime(2026, 8, 9, 6, tzinfo=UTC),
+        )
+        for index, (source_id, url) in enumerate(
+            (
+                ("zulu", "https://zulu.example/b"),
+                ("alpha", "https://alpha.example/z"),
+                ("alpha", "https://alpha.example/a"),
+            )
+        )
+    )
+
+    first = select_publication(_brief_request(same_moment))
+    second = select_publication(_brief_request(tuple(reversed(same_moment))))
+
+    order = [(item.source_id, item.canonical_url) for item in first.selected_briefs]
+    assert order == [
+        ("alpha", "https://alpha.example/a"),
+        ("alpha", "https://alpha.example/z"),
+        ("zulu", "https://zulu.example/b"),
+    ]
+    assert [(item.source_id, item.canonical_url) for item in second.selected_briefs] == order
+
+
+def test_a_publication_without_briefs_selects_none() -> None:
+    result = select_publication(
+        _brief_request((), candidates=(candidate("a-1", "source-a", hours_old=1),))
+    )
+
+    assert result.selected_briefs == ()

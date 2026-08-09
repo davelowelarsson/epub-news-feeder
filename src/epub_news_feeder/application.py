@@ -22,12 +22,12 @@ from epub_news_feeder.diagnostics import Diagnostics
 from epub_news_feeder.editorial import ArticleEvidence, generate_editorial
 from epub_news_feeder.epub import (
     ArticleInput,
+    BriefInput,
     CorrectionInput,
     EditionInput,
     EditorialCitationInput,
     EditorialSentenceInput,
     EditorialSummaryInput,
-    LinkInput,
     NavigationInput,
     PriorCoverageInput,
     SectionInput,
@@ -46,6 +46,7 @@ from epub_news_feeder.models import (
 from epub_news_feeder.ollama import OllamaError, OllamaStructuredProvider
 from epub_news_feeder.selection import (
     AncestorBudget,
+    BriefCandidate,
     Candidate,
     Policy,
     PublicationRequest,
@@ -74,11 +75,11 @@ class GenerationResult:
     receipt: DeliveryReceipt
     article_count: int
     partial: bool
-    publisher_link_count: int = 0
+    brief_count: int = 0
 
     @property
     def read_item_count(self) -> int:
-        return self.article_count + self.publisher_link_count
+        return self.article_count + self.brief_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,15 +95,17 @@ class _ArticleRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class _LinkRecord:
-    link: LinkInput
+class _BriefRecord:
+    """A Publisher Link Brief awaiting selection into its own capped roll."""
+
+    brief: BriefInput
     categories: tuple[str, ...]
     published_at: datetime
     source_id: str
-    cluster_id: str | None = None
 
 
-type _SelectableRecord = _ArticleRecord | _LinkRecord
+type _SelectableRecord = _ArticleRecord
+type _MatchableRecord = _ArticleRecord | _BriefRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +192,7 @@ def _run(
         return resumed
     source_ids = tuple(dict.fromkeys(source for leaf in leaves for source in leaf.section.sources))
     records: dict[str, _SelectableRecord] = {}
+    briefs: dict[str, _BriefRecord] = {}
     source_records: dict[str, list[str]] = {source_id: [] for source_id in source_ids}
     notes: list[str] = []
     degraded_source_ids: set[str] = set()
@@ -258,31 +262,31 @@ def _run(
                 )
             for acquired in outcome.articles:
                 if acquired.body is None:
-                    link_id = sha256(
+                    # A body-free item only ever reaches here from a metadata_only Source, so a
+                    # Brief stays a rights outcome and never becomes a failure outcome.
+                    brief_id = sha256(
                         (
                             f"publisher-link:v1:{source_id}:"
                             f"{acquired.guid or acquired.canonical_url}"
                         ).encode()
                     ).hexdigest()[:24]
-                    records[link_id] = _LinkRecord(
-                        link=LinkInput(
-                            identifier=link_id,
+                    briefs[brief_id] = _BriefRecord(
+                        brief=BriefInput(
+                            identifier=brief_id,
                             title=acquired.title,
                             source_name=acquired.source_title,
                             canonical_url=acquired.canonical_url,
-                            language=acquired.language,
-                            author=acquired.author,
                             published_at=(
                                 acquired.published_at.astimezone(UTC).date().isoformat()
                                 if acquired.published_at is not None
                                 else None
                             ),
+                            language=acquired.language,
                         ),
                         categories=acquired.categories,
                         published_at=acquired.published_at or generated_at,
                         source_id=source_id,
                     )
-                    source_records[source_id].append(link_id)
                     continue
                 observation = state.observe_article(
                     source_id=source_id,
@@ -333,7 +337,7 @@ def _run(
         client.close()
 
     request = _selection_request(
-        publication, leaves, configuration, records, source_records, generated_at
+        publication, leaves, configuration, records, source_records, briefs, generated_at
     )
     selection = select_publication(request)
     for warning in selection.warnings:
@@ -344,18 +348,17 @@ def _run(
         )
     for article_id in selection.unique_article_ids:
         record = records[article_id]
-        if isinstance(record, _LinkRecord):
-            diagnostics.emit(
-                "PUBLISHER_LINK_SELECTED",
-                phase="selection",
-                source_id=record.source_id,
-            )
-            continue
         diagnostics.emit(
             "ARTICLE_SELECTED",
             phase="selection",
             article_id=article_id,
             source_id=record.source_id,
+        )
+    for selected_brief in selection.selected_briefs:
+        diagnostics.emit(
+            "BRIEF_SELECTED",
+            phase="selection",
+            source_id=selected_brief.source_id,
         )
 
     placements = place_articles(selection)
@@ -370,8 +373,6 @@ def _run(
     cluster_articles: dict[str, list[str]] = {}
     for article_id in selection.unique_article_ids:
         record = records[article_id]
-        if isinstance(record, _LinkRecord):
-            continue
         cluster_id = record.cluster_id
         if cluster_id is not None:
             cluster_articles.setdefault(cluster_id, []).append(article_id)
@@ -411,15 +412,10 @@ def _run(
     for leaf in leaves:
         section_id = leaf.section.id
         primary_items: list[ArticleInput] = []
-        link_items: list[LinkInput] = []
         for article_id, placement in placements.items():
-            selected_record = records[article_id]
             if placement.primary_section_id != section_id:
                 continue
-            if isinstance(selected_record, _ArticleRecord):
-                primary_items.append(selected_record.article)
-            else:
-                link_items.append(selected_record.link)
+            primary_items.append(records[article_id].article)
         primary = tuple(primary_items)
         pointers = tuple(
             SectionPointerInput(
@@ -428,17 +424,14 @@ def _run(
                 source_name=_record_source_name(records[article_id]),
             )
             for article_id, placement in placements.items()
-            if isinstance(records[article_id], _ArticleRecord)
             if section_id in placement.pointer_section_ids
         )
-        links = tuple(link_items)
         sections.append(
             SectionInput(
                 identifier=section_id,
                 title=leaf.section.title,
                 articles=primary,
                 pointers=pointers,
-                links=links,
                 has_edition_note=any(
                     source_id in degraded_source_ids for source_id in leaf.section.sources
                 ),
@@ -464,6 +457,7 @@ def _run(
             )
             for correction in state.pending_corrections(publication.id)
         ),
+        briefs=tuple(briefs[item.brief_id].brief for item in selection.selected_briefs),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     epub_bytes = build_epub(edition)
@@ -471,22 +465,14 @@ def _run(
         validate_epub(epub_bytes, jar_path=epubcheck_jar)
     except EpubValidationError as error:
         raise GenerationError("EPUB_VALIDATION_FAILED", str(error)) from error
-    selected_articles = [
-        selected_record
-        for article_id in selection.unique_article_ids
-        if isinstance((selected_record := records[article_id]), _ArticleRecord)
-    ]
-    selected_links = [
-        selected_record
-        for article_id in selection.unique_article_ids
-        if isinstance((selected_record := records[article_id]), _LinkRecord)
-    ]
+    selected_articles = [records[article_id] for article_id in selection.unique_article_ids]
+    selected_briefs = selection.selected_briefs
     diagnostics.emit(
         "EPUB_VALID",
         phase="validation",
         articles=len(selected_articles),
-        publisher_links=len(selected_links),
-        read_items=len(selection.unique_article_ids),
+        briefs=len(selected_briefs),
+        read_items=len(selection.unique_article_ids) + len(selected_briefs),
     )
     observations = [record.observation for record in selected_articles]
     state.reserve_articles(
@@ -495,7 +481,7 @@ def _run(
         observations,
         expires_at=generated_at + timedelta(hours=24),
         article_count=len(selected_articles),
-        publisher_link_count=len(selected_links),
+        publisher_link_count=len(selected_briefs),
     )
     output_directory.mkdir(parents=True, exist_ok=True)
     output_directory.chmod(0o700)
@@ -560,8 +546,8 @@ def _run(
             "EDITION_DELIVERED",
             phase="delivery",
             articles=len(selected_articles),
-            publisher_links=len(selected_links),
-            read_items=len(selection.unique_article_ids),
+            briefs=len(selected_briefs),
+            read_items=len(selection.unique_article_ids) + len(selected_briefs),
             partial=selection.partial,
             digest=receipt.sha256,
         )
@@ -570,7 +556,7 @@ def _run(
         receipt,
         len(selected_articles),
         selection.partial,
-        publisher_link_count=len(selected_links),
+        brief_count=len(selected_briefs),
     )
 
 
@@ -608,7 +594,7 @@ def _resume_spooled_delivery(
             receipt,
             article_count,
             article_count + publisher_link_count < publication_maximum,
-            publisher_link_count=publisher_link_count,
+            brief_count=publisher_link_count,
         )
     if current is None and not spool_path.is_file():
         if pending:
@@ -641,7 +627,7 @@ def _resume_spooled_delivery(
                 receipt,
                 article_count,
                 article_count + publisher_link_count < publication_maximum,
-                publisher_link_count=publisher_link_count,
+                brief_count=publisher_link_count,
             )
     if not spool_path.is_file():
         raise GenerationError(
@@ -687,7 +673,7 @@ def _resume_spooled_delivery(
             "EDITION_DELIVERED",
             phase="delivery",
             articles=article_count,
-            publisher_links=publisher_link_count,
+            briefs=publisher_link_count,
             read_items=article_count + publisher_link_count,
             partial=article_count + publisher_link_count < publication_maximum,
             digest=receipt.sha256,
@@ -697,7 +683,7 @@ def _resume_spooled_delivery(
         receipt,
         article_count,
         article_count + publisher_link_count < publication_maximum,
-        publisher_link_count=publisher_link_count,
+        brief_count=publisher_link_count,
     )
 
 
@@ -753,6 +739,7 @@ def _selection_request(
     configuration: Configuration,
     records: dict[str, _SelectableRecord],
     source_records: dict[str, list[str]],
+    briefs: dict[str, _BriefRecord],
     generated_at: datetime,
 ) -> PublicationRequest:
     pub_min, pub_max = _publication_limits(publication)
@@ -765,7 +752,59 @@ def _selection_request(
         generated_at,
         pub_max,
     )
-    return PublicationRequest(pub_max, pub_min, tuple(requests))
+    return PublicationRequest(
+        pub_max,
+        pub_min,
+        tuple(requests),
+        publication.max_briefs,
+        _brief_candidates(publication, leaves, briefs, generated_at),
+    )
+
+
+def _brief_candidates(
+    publication: Publication,
+    leaves: tuple[_Leaf, ...],
+    briefs: dict[str, _BriefRecord],
+    generated_at: datetime,
+) -> tuple[BriefCandidate, ...]:
+    """Offer every acquired Brief, muted where any Section carrying its Source mutes it.
+
+    Mute Rules are the one selection input a Brief still respects: a muted topic arriving as a
+    headline is exactly the failure a Mute Rule exists to prevent. Relevance, weight, essential
+    coverage and feedback do not apply.
+    """
+
+    policies_by_source: dict[str, list[PolicyPreset]] = {}
+    for leaf in leaves:
+        policy = publication.policies.get(leaf.policy_id) if leaf.policy_id else None
+        policy = policy or PolicyPreset(type="coverage")
+        for source_id in leaf.section.sources:
+            policies_by_source.setdefault(source_id, []).append(policy)
+    return tuple(
+        BriefCandidate(
+            brief_id=brief_id,
+            source_id=record.source_id,
+            title=record.brief.title,
+            canonical_url=record.brief.canonical_url,
+            published_at=record.published_at,
+            muted=any(
+                _brief_muted(policy, record, generated_at)
+                for policy in policies_by_source.get(record.source_id, [])
+            ),
+        )
+        for brief_id, record in briefs.items()
+    )
+
+
+def _brief_muted(policy: PolicyPreset, record: _BriefRecord, generated_at: datetime) -> bool:
+    for mute in policy.mute_rules:
+        if mute.expires_at is not None and mute.expires_at < generated_at.date():
+            continue
+        if mute.source == record.source_id:
+            return True
+        if mute.rule is not None and mute.rule.field != "body" and _matches(mute.rule, record):
+            return True
+    return False
 
 
 def _publication_limits(publication: Publication) -> tuple[int, int]:
@@ -858,7 +897,7 @@ def _section_requests(
     return requests
 
 
-def _score(rules: list[MatchRule], record: _SelectableRecord, full_body_matching: bool) -> int:
+def _score(rules: list[MatchRule], record: _MatchableRecord, full_body_matching: bool) -> int:
     return sum(
         (rule.weight or 1)
         for rule in rules
@@ -866,7 +905,7 @@ def _score(rules: list[MatchRule], record: _SelectableRecord, full_body_matching
     )
 
 
-def _matches(rule: MatchRule, record: _SelectableRecord) -> bool:
+def _matches(rule: MatchRule, record: _MatchableRecord) -> bool:
     values: tuple[str, ...]
     if rule.field == "title":
         values = (_record_title(record),)
@@ -881,23 +920,23 @@ def _matches(rule: MatchRule, record: _SelectableRecord) -> bool:
     return any(pattern.search(value) is not None for value in values)
 
 
-def _record_title(record: _SelectableRecord) -> str:
-    return record.article.title if isinstance(record, _ArticleRecord) else record.link.title
+def _record_title(record: _MatchableRecord) -> str:
+    return record.article.title if isinstance(record, _ArticleRecord) else record.brief.title
 
 
-def _record_source_name(record: _SelectableRecord) -> str:
+def _record_source_name(record: _MatchableRecord) -> str:
     return (
         record.article.source_name
         if isinstance(record, _ArticleRecord)
-        else record.link.source_name
+        else record.brief.source_name
     )
 
 
-def _record_canonical_url(record: _SelectableRecord) -> str:
+def _record_canonical_url(record: _MatchableRecord) -> str:
     return (
         record.article.canonical_url
         if isinstance(record, _ArticleRecord)
-        else record.link.canonical_url
+        else record.brief.canonical_url
     )
 
 

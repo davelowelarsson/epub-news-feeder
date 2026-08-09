@@ -12,12 +12,12 @@ from lxml import etree
 from epub_news_feeder.delivery import deliver_local
 from epub_news_feeder.epub import (
     ArticleInput,
+    BriefInput,
     CorrectionInput,
     EditionInput,
     EditorialCitationInput,
     EditorialSentenceInput,
     EditorialSummaryInput,
-    LinkInput,
     NavigationInput,
     PriorCoverageInput,
     SectionInput,
@@ -206,7 +206,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "f402fe43cb0ec5fc7c9f0320b578b78dea00c144b0af4f44fcc6c672860a14f6"
+    assert receipt.sha256 == "08421f141804f55d9b666f4ef0c01b9dca71df931db0980779def5593e852014"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -339,8 +339,7 @@ def test_ticket_11_navigation_preserves_nested_main_sections() -> None:
     assert labels == [
         "Morning Briefing",
         "Edition overview",
-        "This edition contains 1 complete article and 0 metadata-only publisher links across 1 "
-        "section.",
+        "This edition contains 1 complete article across 1 section.",
         "Contents",
         "News",
         "World",
@@ -399,42 +398,6 @@ def test_navigation_lists_each_canonical_rendition_beneath_its_leaf_section() ->
     assert all(".xhtml#article-" in cast(str, link.get("href")) for link in article_links)
 
 
-def test_navigation_overviews_full_articles_and_metadata_only_publisher_links() -> None:
-    edition = replace(
-        _edition(),
-        sections=(
-            replace(
-                _edition().sections[0],
-                links=(
-                    LinkInput(
-                        identifier="radio-developing-story",
-                        title="A developing local story",
-                        source_name="Public Radio",
-                        canonical_url="https://radio.example/news/developing-story",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    with ZipFile(BytesIO(build_epub(edition))) as archive:
-        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
-
-    rendered = " ".join(text for text in nav.itertext() if isinstance(text, str))
-    assert (
-        "This edition contains 1 complete article and 1 metadata-only publisher link "
-        "across 1 section."
-    ) in rendered
-    publisher_links = cast(
-        list[etree._Element],
-        nav.xpath("//*[local-name()='a' and starts-with(text(), '[Publisher link]') ]"),
-    )
-    assert [link.text for link in publisher_links] == [
-        "[Publisher link] A developing local story — Public Radio"
-    ]
-    assert ".xhtml#publisher-link-" in cast(str, publisher_links[0].get("href"))
-
-
 def test_canonical_rendition_visibly_labels_publisher_metadata() -> None:
     article = replace(
         _edition().sections[0].articles[0],
@@ -464,152 +427,6 @@ def test_canonical_rendition_visibly_labels_publisher_metadata() -> None:
         section.xpath("//*[local-name()='a' and text()='Read full article at publisher']"),
     )
     assert [link.get("href") for link in publisher_route] == ["https://example.test/articles/1"]
-
-
-@pytest.mark.epubcheck
-def test_metadata_only_item_shows_attribution_and_an_explicit_publisher_route() -> None:
-    edition = replace(
-        _edition(),
-        sections=(
-            replace(
-                _edition().sections[0],
-                links=(
-                    LinkInput(
-                        identifier="radio-developing-story",
-                        title="A developing local story",
-                        source_name="Public Radio",
-                        canonical_url="https://radio.example/news/developing-story",
-                        author="B. Broadcaster",
-                        published_at="2026-08-09",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    epub_bytes = build_epub(edition)
-    validate_epub(epub_bytes)
-    with ZipFile(BytesIO(epub_bytes)) as archive:
-        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
-        section = etree.fromstring(archive.read(section_path))
-
-    publisher_item = cast(
-        list[etree._Element],
-        section.xpath("//*[local-name()='li' and starts-with(@id, 'publisher-link-')]"),
-    )[0]
-    rendered = " ".join(
-        text.strip() for text in publisher_item.itertext() if isinstance(text, str) and text.strip()
-    )
-    assert "A developing local story" in rendered
-    assert "Publisher link; this Edition does not reproduce the article text." in rendered
-    assert "By B. Broadcaster" in rendered
-    assert "Source: Public Radio" in rendered
-    assert "Published by publisher: 2026-08-09" in rendered
-    published = cast(
-        list[etree._Element],
-        publisher_item.xpath(".//*[local-name()='time' and @datetime='2026-08-09']"),
-    )
-    assert [item.text for item in published] == ["2026-08-09"]
-    routes = cast(
-        list[etree._Element],
-        publisher_item.xpath(".//*[local-name()='a' and text()='Read report at publisher']"),
-    )
-    assert [link.get("href") for link in routes] == ["https://radio.example/news/developing-story"]
-    assert not publisher_item.xpath(".//*[local-name()='article']")
-
-
-def test_swedish_metadata_only_item_localizes_reader_facing_labels() -> None:
-    link = LinkInput(
-        identifier="ekot-report",
-        title="En svensk rapport",
-        source_name="Sveriges Radio Ekot",
-        canonical_url="https://www.sverigesradio.se/artikel/example",
-        language="sv",
-        author="Ekot",
-        published_at="2026-08-09",
-    )
-    edition = replace(
-        _edition(),
-        language="sv",
-        sections=(replace(_edition().sections[0], articles=(), links=(link,)),),
-    )
-
-    with ZipFile(BytesIO(build_epub(edition))) as archive:
-        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
-        rendered = archive.read(section_path).decode()
-
-    assert "Länk till publicisten; den här utgåvan återger inte artikeltexten." in rendered
-    assert "Av Ekot" in rendered
-    assert "Källa: Sveriges Radio Ekot" in rendered
-    assert "Publicerad av publicisten:" in rendered
-    assert "Läs rapporten hos Sveriges Radio Ekot" in rendered
-
-
-def test_missing_publisher_metadata_is_explicit_in_articles_and_link_briefs() -> None:
-    article = replace(
-        _edition().sections[0].articles[0],
-        author=None,
-        published_at=None,
-        copyright_notice=None,
-    )
-    edition = replace(
-        _edition(),
-        sections=(
-            replace(
-                _edition().sections[0],
-                articles=(article,),
-                links=(
-                    LinkInput(
-                        identifier="publisher-item",
-                        title="Publisher report",
-                        source_name="Public Radio",
-                        canonical_url="https://radio.example/news/report",
-                    ),
-                ),
-            ),
-        ),
-    )
-
-    with ZipFile(BytesIO(build_epub(edition))) as archive:
-        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
-        section = etree.fromstring(archive.read(section_path))
-
-    rendered = " ".join(
-        text.strip() for text in section.itertext() if isinstance(text, str) and text.strip()
-    )
-    assert rendered.count("Byline: Not supplied by publisher") == 2
-    assert rendered.count("Published by publisher: Date not supplied") == 2
-    assert "Rights: Copyright information not supplied; see publisher." in rendered
-
-
-def test_publisher_link_navigation_target_is_stable_when_links_are_reordered() -> None:
-    first = LinkInput(
-        identifier="first-report",
-        title="First report",
-        source_name="Public Radio",
-        canonical_url="https://radio.example/news/first",
-    )
-    second = LinkInput(
-        identifier="second-report",
-        title="Second report",
-        source_name="Public Radio",
-        canonical_url="https://radio.example/news/second",
-    )
-
-    def navigation_targets(links: tuple[LinkInput, ...]) -> dict[str | None, str | None]:
-        edition = replace(
-            _edition(),
-            sections=(replace(_edition().sections[0], links=links),),
-        )
-        with ZipFile(BytesIO(build_epub(edition))) as archive:
-            nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
-        anchors = cast(
-            list[etree._Element],
-            nav.xpath("//*[local-name()='a' and starts-with(text(), '[Publisher link]') ]"),
-        )
-        return {anchor.text: anchor.get("href") for anchor in anchors}
-
-    assert navigation_targets((first, second)) == navigation_targets((second, first))
 
 
 def _bilingual_edition(publication_language: str) -> EditionInput:
@@ -858,3 +675,171 @@ def test_unlisted_publication_language_falls_back_to_english_chrome() -> None:
     assert "Contents" in rendered
     assert "Source: Sveriges Television" in rendered
     assert "Innehåll" not in rendered
+
+
+def _briefs() -> tuple[BriefInput, ...]:
+    return (
+        BriefInput(
+            identifier="radio-developing-story",
+            title="A developing local story",
+            source_name="Public Radio",
+            canonical_url="https://radio.example/news/developing-story",
+            published_at="2026-08-09",
+            language="en",
+        ),
+        BriefInput(
+            identifier="radio-earlier-story",
+            title="An earlier local story",
+            source_name="Public Radio",
+            canonical_url="https://radio.example/news/earlier-story",
+            published_at="2026-08-08",
+            language="en",
+        ),
+    )
+
+
+def _in_brief_chapter(epub_bytes: bytes) -> etree._Element:
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        return etree.fromstring(archive.read("OEBPS/in-brief.xhtml"))
+
+
+@pytest.mark.epubcheck
+def test_briefs_gather_into_one_chapter_with_the_link_on_the_source_name() -> None:
+    edition = replace(_edition(), briefs=_briefs())
+
+    epub_bytes = build_epub(edition)
+    validate_epub(epub_bytes)
+    chapter = _in_brief_chapter(epub_bytes)
+
+    rendered = " ".join(
+        text.strip() for text in chapter.itertext() if isinstance(text, str) and text.strip()
+    )
+    assert "In Brief" in rendered
+    assert "A developing local story" in rendered
+
+    # The headline is plain text; the publisher route sits on the source name.
+    headlines = cast(list[etree._Element], chapter.xpath("//*[@class='brief-headline']"))
+    assert [headline.text for headline in headlines] == [
+        "A developing local story",
+        "An earlier local story",
+    ]
+    assert not any(headline.xpath(".//*[local-name()='a']") for headline in headlines)
+    routes = cast(
+        list[etree._Element], chapter.xpath("//*[@class='brief-meta']/*[local-name()='a']")
+    )
+    assert [route.text for route in routes] == ["Public Radio", "Public Radio"]
+    assert [route.get("href") for route in routes] == [
+        "https://radio.example/news/developing-story",
+        "https://radio.example/news/earlier-story",
+    ]
+
+    # None of the deleted chrome survives anywhere in the Edition.
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        all_xhtml = b" ".join(
+            archive.read(path) for path in archive.namelist() if path.endswith(".xhtml")
+        )
+    for removed in (
+        b"[Publisher link]",
+        b"Publisher link; this Edition does not reproduce the article text.",
+        b"Read report at publisher",
+        b"More reporting at publishers",
+    ):
+        assert removed not in all_xhtml, removed
+
+
+def test_in_brief_has_a_single_navigation_entry_and_sits_after_corrections() -> None:
+    edition = replace(
+        _edition(),
+        notes=("One Source was temporarily unavailable.",),
+        corrections=(
+            CorrectionInput(
+                "A complete report",
+                "Example News",
+                "https://example.test/articles/1",
+                "correction",
+                "2026-08-09",
+            ),
+        ),
+        briefs=_briefs(),
+    )
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+
+    entries = cast(list[str], nav.xpath("//*[local-name()='a']/@href"))
+    assert entries.count("in-brief.xhtml") == 1
+    assert entries.index("corrections.xhtml") < entries.index("in-brief.xhtml")
+
+    spine = cast(
+        list[str], package.xpath("//*[local-name()='spine']/*[local-name()='itemref']/@idref")
+    )
+    assert spine.index("corrections") < spine.index("in-brief")
+    assert spine.index("in-brief") < spine.index(
+        next(item for item in spine if item.startswith("section-"))
+    )
+    assert any(
+        item.get("href") == "in-brief.xhtml"
+        for item in package.iter("{http://www.idpf.org/2007/opf}item")
+    )
+
+
+def test_an_edition_without_briefs_omits_the_chapter_entirely() -> None:
+    with ZipFile(BytesIO(build_epub(_edition()))) as archive:
+        names = archive.namelist()
+        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+
+    assert "OEBPS/in-brief.xhtml" not in names
+    assert "in-brief.xhtml" not in cast(list[str], nav.xpath("//*[local-name()='a']/@href"))
+    assert "in-brief" not in cast(
+        list[str], package.xpath("//*[local-name()='spine']/*[local-name()='itemref']/@idref")
+    )
+
+
+def test_briefs_are_absent_from_section_documents_and_section_navigation() -> None:
+    edition = replace(_edition(), briefs=_briefs())
+
+    epub_bytes = build_epub(edition)
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = archive.read(section_path).decode()
+
+    assert "A developing local story" not in section
+    assert "Public Radio" not in section
+
+
+def test_in_brief_chapter_follows_the_publication_language() -> None:
+    edition = replace(_edition(), language="sv", briefs=_briefs())
+
+    rendered = " ".join(
+        text.strip()
+        for text in _in_brief_chapter(build_epub(edition)).itertext()
+        if isinstance(text, str) and text.strip()
+    )
+
+    assert "I korthet" in rendered
+    assert "Följ ett källnamn" in rendered
+    assert "In Brief" not in rendered
+    # The headline keeps its own language marker even though the chrome is Swedish.
+    headline = cast(
+        list[etree._Element],
+        _in_brief_chapter(build_epub(edition)).xpath("//*[@class='brief-headline']"),
+    )[0]
+    assert headline.get("lang") == "en"
+
+
+def test_edition_overview_counts_briefs_apart_from_articles() -> None:
+    with ZipFile(BytesIO(build_epub(replace(_edition(), briefs=_briefs())))) as archive:
+        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+
+    rendered = " ".join(" ".join(text for text in nav.itertext() if isinstance(text, str)).split())
+    assert "This edition contains 1 complete article across 1 section." in rendered
+    assert "It also carries 2 briefs in the In Brief chapter." in rendered
+
+
+def test_brief_identifiers_must_be_unique() -> None:
+    duplicated = (_briefs()[0], replace(_briefs()[1], identifier="radio-developing-story"))
+
+    with pytest.raises(ValueError, match="Brief identifiers"):
+        build_epub(replace(_edition(), briefs=duplicated))

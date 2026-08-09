@@ -94,10 +94,23 @@ class Source(StrictModel):
     allowed_publisher_origins: list[HttpUrl] = Field(default_factory=list)
     feed_url: HttpUrl
     acquisition: Literal["auto", "feed", "web", "metadata_only"] = "auto"
+    presentation: Literal["full_text", "briefing_roll"] | None = None
     weight: Weight = 5
     llm_processing: Literal["disabled", "local_only", "remote_allowed"] = "local_only"
     rights: RightsPolicy | None = None
     eligibility: EligibilityEvidence | None = None
+
+    @property
+    def effective_presentation(self) -> Literal["full_text", "briefing_roll"]:
+        """Derive presentation from acquisition unless an operator overrode it.
+
+        Operators configure the least they can get away with, so the default has to be right
+        without being written down: a Source permitted only metadata produces Briefs.
+        """
+
+        if self.presentation is not None:
+            return self.presentation
+        return "briefing_roll" if self.acquisition == "metadata_only" else "full_text"
 
 
 class RemoteProviderProfile(StrictModel):
@@ -167,6 +180,9 @@ class Publication(StrictModel):
     language: LanguageTag = "en"
     policies: dict[NonEmptyString, PolicyPreset] = Field(default_factory=dict)
     budget: Budget | None = None
+    # Briefs are capped entirely outside the Article Budget: a Brief never consumes an
+    # Article Slot, so it has no business inside a structure scoped to Article content.
+    max_briefs: NonNegativeInt = 6
     editorial: EditorialConfig | None = None
     sections: list[Section]
 

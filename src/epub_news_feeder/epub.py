@@ -65,16 +65,19 @@ class SectionPointerInput:
 
 
 @dataclass(frozen=True)
-class LinkInput:
-    """Attributed metadata-only Source item that opens at the publisher."""
+class BriefInput:
+    """One Publisher Link Brief: a headline and a route back to its publisher.
+
+    A Brief is a rights outcome, never a failure outcome. It carries no body because its
+    Source permits a publisher route and not reproduction.
+    """
 
     identifier: str
     title: str
     source_name: str
     canonical_url: str
-    language: str | None = None
-    author: str | None = None
     published_at: str | None = None
+    language: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,6 @@ class SectionInput:
     title: str
     articles: tuple[ArticleInput, ...] = ()
     pointers: tuple[SectionPointerInput, ...] = ()
-    links: tuple[LinkInput, ...] = ()
     has_edition_note: bool = False
     story_hubs: tuple[StoryHubInput, ...] = ()
 
@@ -144,6 +146,7 @@ class EditionInput:
     navigation: tuple[NavigationInput, ...] = ()
     notes: tuple[str, ...] = ()
     corrections: tuple[CorrectionInput, ...] = ()
+    briefs: tuple[BriefInput, ...] = ()
     modified_at: str = "1980-01-01T00:00:00Z"
 
 
@@ -179,6 +182,8 @@ def build_epub(edition: EditionInput) -> bytes:
         members.append(("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED))
     if edition.corrections:
         members.append(("OEBPS/corrections.xhtml", _corrections_document(edition), ZIP_DEFLATED))
+    if edition.briefs:
+        members.append(("OEBPS/in-brief.xhtml", _in_brief_document(edition), ZIP_DEFLATED))
     members.extend(
         (
             str(section_paths[section.identifier]),
@@ -215,12 +220,9 @@ def _validate(edition: EditionInput) -> None:
     if len(set(articles)) != len(articles) or any(not value for value in articles):
         raise ValueError("Article identifiers must be unique and non-empty")
     article_ids = set(articles)
-    for section in edition.sections:
-        publisher_link_ids = [link.identifier for link in section.links]
-        if len(set(publisher_link_ids)) != len(publisher_link_ids) or any(
-            not value for value in publisher_link_ids
-        ):
-            raise ValueError("Publisher link identifiers must be unique within a Section")
+    brief_ids = [brief.identifier for brief in edition.briefs]
+    if len(set(brief_ids)) != len(brief_ids) or any(not value for value in brief_ids):
+        raise ValueError("Brief identifiers must be unique and non-empty")
     for pointer in (pointer for section in edition.sections for pointer in section.pointers):
         if pointer.article_identifier not in article_ids:
             raise ValueError("Section Pointer target is not a Canonical Rendition")
@@ -307,6 +309,14 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
             href="corrections.xhtml",
             attrib={"media-type": "application/xhtml+xml"},
         )
+    if edition.briefs:
+        etree.SubElement(
+            manifest,
+            f"{{{_OPF_NS}}}item",
+            id="in-brief",
+            href="in-brief.xhtml",
+            attrib={"media-type": "application/xhtml+xml"},
+        )
     if _has_editorial_summaries(edition):
         etree.SubElement(
             manifest,
@@ -330,6 +340,8 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="edition-notes")
     if edition.corrections:
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="corrections")
+    if edition.briefs:
+        etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="in-brief")
     for section in edition.sections:
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref=_manifest_id(section.identifier))
     if _has_editorial_summaries(edition):
@@ -340,7 +352,6 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
 def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePosixPath]) -> bytes:
     html, body = _xhtml_document(edition.title, edition.language)
     article_count = sum(len(section.articles) for section in edition.sections)
-    publisher_link_count = sum(len(section.links) for section in edition.sections)
     overview = etree.SubElement(
         body,
         f"{{{_XHTML_NS}}}section",
@@ -355,12 +366,15 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
         edition.language,
         "overview_summary",
         articles=_counted(edition.language, article_count, "article"),
-        links=_counted(edition.language, publisher_link_count, "link"),
         sections=_counted(edition.language, len(edition.sections), "section"),
     )
-    if publisher_link_count:
-        overview_note = etree.SubElement(overview, f"{{{_XHTML_NS}}}p")
-        overview_note.text = _localized(edition.language, "overview_note")
+    if edition.briefs:
+        overview_briefs = etree.SubElement(overview, f"{{{_XHTML_NS}}}p")
+        overview_briefs.text = _localized(
+            edition.language,
+            "overview_briefs",
+            briefs=_counted(edition.language, len(edition.briefs), "brief"),
+        )
     nav = etree.SubElement(body, f"{{{_XHTML_NS}}}nav", attrib={f"{{{_EPUB_NS}}}type": "toc"})
     heading = etree.SubElement(nav, f"{{{_XHTML_NS}}}h1")
     heading.text = _localized(edition.language, "contents")
@@ -373,6 +387,12 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
         item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
         link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href="corrections.xhtml")
         link.text = _localized(edition.language, "corrections")
+    if edition.briefs:
+        # One entry for the chapter, never one per headline: listing every Brief in the
+        # contents is the same chrome the chapter exists to remove.
+        item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
+        link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href="in-brief.xhtml")
+        link.text = _localized(edition.language, "in_brief")
     navigation = edition.navigation or tuple(
         NavigationInput(section.identifier, section.title) for section in edition.sections
     )
@@ -405,7 +425,7 @@ def _add_navigation_items(
             )
             link.text = entry.title
             section = sections[entry.identifier]
-            if section.articles or section.links:
+            if section.articles:
                 articles = etree.SubElement(item, f"{{{_XHTML_NS}}}ol")
                 for article in section.articles:
                     article_item = etree.SubElement(articles, f"{{{_XHTML_NS}}}li")
@@ -422,22 +442,6 @@ def _add_navigation_items(
                         "article_nav",
                         title=article.title,
                         source_name=article.source_name,
-                    )
-                for source_link in section.links:
-                    source_item = etree.SubElement(articles, f"{{{_XHTML_NS}}}li")
-                    source_anchor = etree.SubElement(
-                        source_item,
-                        f"{{{_XHTML_NS}}}a",
-                        href=(
-                            f"{section_paths[entry.identifier].name}"
-                            f"#{_publisher_link_fragment(source_link.identifier)}"
-                        ),
-                    )
-                    source_anchor.text = _localized(
-                        language,
-                        "publisher_link_nav",
-                        title=source_link.title,
-                        source_name=source_link.source_name,
                     )
 
 
@@ -483,6 +487,49 @@ def _about_ai_document(edition: EditionInput) -> bytes:
     heading.text = _localized(edition.language, "about_ai")
     paragraph = etree.SubElement(section, f"{{{_XHTML_NS}}}p")
     paragraph.text = _localized(edition.language, "ai_method")
+    return _serialize(html)
+
+
+def _in_brief_document(edition: EditionInput) -> bytes:
+    """Render every Brief in one chapter: plain headline, one sub-line, nothing else.
+
+    The publisher link sits on the source name rather than the headline, so a reader
+    checking a headline has an obvious place to press and the headline stays unadorned.
+    """
+
+    html, body = _xhtml_document(
+        _localized(edition.language, "in_brief_title", edition_title=edition.title),
+        edition.language,
+    )
+    main = etree.SubElement(body, f"{{{_XHTML_NS}}}main")
+    heading = etree.SubElement(main, f"{{{_XHTML_NS}}}h1")
+    heading.text = _localized(edition.language, "in_brief")
+    intro = etree.SubElement(main, f"{{{_XHTML_NS}}}p", attrib={"class": "in-brief-intro"})
+    intro.text = _localized(edition.language, "in_brief_intro")
+    roll = etree.SubElement(main, f"{{{_XHTML_NS}}}ul", attrib={"class": "in-brief"})
+    for brief in edition.briefs:
+        item_language = brief.language or "und"
+        item = etree.SubElement(
+            roll,
+            f"{{{_XHTML_NS}}}li",
+            id=_brief_fragment(brief.identifier),
+        )
+        headline = etree.SubElement(
+            item,
+            f"{{{_XHTML_NS}}}p",
+            attrib={
+                "class": "brief-headline",
+                "lang": item_language,
+                f"{{{_XML_NS}}}lang": item_language,
+            },
+        )
+        headline.text = brief.title
+        meta = etree.SubElement(item, f"{{{_XHTML_NS}}}p", attrib={"class": "brief-meta"})
+        route = etree.SubElement(meta, f"{{{_XHTML_NS}}}a", href=brief.canonical_url)
+        route.text = brief.source_name
+        if brief.published_at:
+            published = etree.SubElement(meta, f"{{{_XHTML_NS}}}time", datetime=brief.published_at)
+            published.text = f" — {brief.published_at}"
     return _serialize(html)
 
 
@@ -551,17 +598,6 @@ def _section_document(
         _add_story_hub(
             main, hub, section.identifier, section_paths, article_locations, edition.language
         )
-    if section.links:
-        links_heading = etree.SubElement(main, f"{{{_XHTML_NS}}}h2")
-        links_heading.text = _localized(edition.language, "more_reporting")
-        links = etree.SubElement(main, f"{{{_XHTML_NS}}}ul", attrib={"class": "source-links"})
-        for link in section.links:
-            _add_source_link(
-                links,
-                link,
-                _publisher_link_fragment(link.identifier),
-                edition.language,
-            )
     colophon = etree.SubElement(body, f"{{{_XHTML_NS}}}footer", attrib={"class": "colophon"})
     colophon.text = f"Run ID: {edition.run_id}"
     return _serialize(html)
@@ -758,41 +794,6 @@ def _add_pointer(
     )
 
 
-def _add_source_link(
-    parent: etree._Element, source_link: LinkInput, fragment: str, language: str
-) -> None:
-    item_language = source_link.language or "und"
-    item = etree.SubElement(
-        parent,
-        f"{{{_XHTML_NS}}}li",
-        id=fragment,
-        lang=item_language,
-        attrib={f"{{{_XML_NS}}}lang": item_language},
-    )
-    title = etree.SubElement(item, f"{{{_XHTML_NS}}}h3")
-    title.text = source_link.title
-    kind = etree.SubElement(
-        item,
-        f"{{{_XHTML_NS}}}p",
-        attrib={"class": "item-kind", "lang": language, f"{{{_XML_NS}}}lang": language},
-    )
-    kind.text = _localized(language, "link_kind")
-    _add_publisher_metadata(
-        item,
-        author=source_link.author,
-        source_name=source_link.source_name,
-        published_at=source_link.published_at,
-        language=language,
-    )
-    route = etree.SubElement(
-        item,
-        f"{{{_XHTML_NS}}}p",
-        attrib={"class": "canonical-link", "lang": language, f"{{{_XML_NS}}}lang": language},
-    )
-    link = etree.SubElement(route, f"{{{_XHTML_NS}}}a", href=source_link.canonical_url)
-    link.text = _localized(language, "link_route", source_name=source_link.source_name)
-
-
 def _add_publisher_metadata(
     parent: etree._Element,
     *,
@@ -898,17 +899,17 @@ _ENGLISH_LABELS = {
     "corrections_title": "{edition_title} — Corrections and updates",
     "edition_note_link": "Some reporting was unavailable; read the Edition notes",
     "edition_notes": "Edition notes",
-    "in_this_edition": "In this Edition",
-    "link_kind": "Publisher link; this Edition does not reproduce the article text.",
-    "link_route": "Read report at publisher",
-    "more_reporting": "More reporting at publishers",
-    "notes_title": "{edition_title} — Edition notes",
-    "overview_heading": "Edition overview",
-    "overview_note": (
-        "Publisher links contain a headline and Source attribution only; "
-        "follow the link to read the report at its publisher."
+    "in_brief": "In Brief",
+    "in_brief_intro": (
+        "Headlines from publishers whose reporting this Edition does not reproduce. "
+        "Follow a source name to read the report at its publisher."
     ),
-    "overview_summary": "This edition contains {articles} and {links} across {sections}.",
+    "in_brief_title": "{edition_title} — In Brief",
+    "in_this_edition": "In this Edition",
+    "notes_title": "{edition_title} — Edition notes",
+    "overview_briefs": "It also carries {briefs} in the In Brief chapter.",
+    "overview_heading": "Edition overview",
+    "overview_summary": "This edition contains {articles} across {sections}.",
     "pointer_detail": (
         "{source_name}: Also relevant to {section_title}. Primary placement: {primary_title}"
     ),
@@ -916,7 +917,6 @@ _ENGLISH_LABELS = {
     "published_missing": "Date not supplied",
     "published_prefix": "Published by publisher: ",
     "publisher_article": "Article from {source_name}",
-    "publisher_link_nav": "[Publisher link] {title} — {source_name}",
     "read_at_publisher": "Read full article at publisher",
     "rights_missing": "Rights: Copyright information not supplied; see publisher.",
     "rights_supplied": "Rights: {source_name}",
@@ -945,17 +945,17 @@ _SWEDISH_LABELS = {
     "corrections_title": "{edition_title} — rättelser och uppdateringar",
     "edition_note_link": "En del rapportering var inte tillgänglig; läs utgåvans noteringar",
     "edition_notes": "Utgåvans noteringar",
-    "in_this_edition": "I den här utgåvan",
-    "link_kind": "Länk till publicisten; den här utgåvan återger inte artikeltexten.",
-    "link_route": "Läs rapporten hos {source_name}",
-    "more_reporting": "Mer rapportering hos publicister",
-    "notes_title": "{edition_title} — utgåvans noteringar",
-    "overview_heading": "Utgåvans översikt",
-    "overview_note": (
-        "Publicistlänkar innehåller endast rubrik och källa; följ länken för att "
-        "läsa rapporten hos publicisten."
+    "in_brief": "I korthet",
+    "in_brief_intro": (
+        "Rubriker från publicister vars rapportering den här utgåvan inte återger. "
+        "Följ ett källnamn för att läsa rapporten hos publicisten."
     ),
-    "overview_summary": "Den här utgåvan innehåller {articles} och {links} i {sections}.",
+    "in_brief_title": "{edition_title} — i korthet",
+    "in_this_edition": "I den här utgåvan",
+    "notes_title": "{edition_title} — utgåvans noteringar",
+    "overview_briefs": "Den innehåller också {briefs} i kapitlet I korthet.",
+    "overview_heading": "Utgåvans översikt",
+    "overview_summary": "Den här utgåvan innehåller {articles} i {sections}.",
     "pointer_detail": (
         "{source_name}: Även relevant för {section_title}. Primär placering: {primary_title}"
     ),
@@ -963,7 +963,6 @@ _SWEDISH_LABELS = {
     "published_missing": "Datum saknas",
     "published_prefix": "Publicerad av publicisten: ",
     "publisher_article": "Artikel från {source_name}",
-    "publisher_link_nav": "[Publicistlänk] {title} — {source_name}",
     "read_at_publisher": "Läs hela artikeln hos {source_name}",
     "rights_missing": "Rättigheter: Upphovsrättsinformation saknas; se publicisten.",
     "rights_supplied": "Rättigheter: {source_name}",
@@ -976,12 +975,12 @@ _LABELS = {"en": _ENGLISH_LABELS, "sv": _SWEDISH_LABELS}
 _COUNTED_NOUNS = {
     "en": {
         "article": ("complete article", "complete articles"),
-        "link": ("metadata-only publisher link", "metadata-only publisher links"),
+        "brief": ("brief", "briefs"),
         "section": ("section", "sections"),
     },
     "sv": {
         "article": ("komplett artikel", "kompletta artiklar"),
-        "link": ("publicistlänk", "publicistlänkar"),
+        "brief": ("notis", "notiser"),
         "section": ("avsnitt", "avsnitt"),
     },
 }
@@ -1024,8 +1023,8 @@ def _section_fragment(identifier: str) -> str:
     return f"section-{_token(identifier)}"
 
 
-def _publisher_link_fragment(identifier: str) -> str:
-    return f"publisher-link-{_token(identifier)}"
+def _brief_fragment(identifier: str) -> str:
+    return f"brief-{_token(identifier)}"
 
 
 def _manifest_id(identifier: str) -> str:
@@ -1056,9 +1055,11 @@ _STYLESHEET = (
     b".article-metadata, .canonical-link, .colophon, .item-kind, .source { "
     b"font-family: sans-serif; font-size: 0.88em; }\n"
     b".article-metadata p { margin: 0.18em 0; }\n"
-    b".source-links { list-style: none; padding-left: 0; }\n"
-    b".source-links > li { border-top: 0.06em solid; margin: 1.5em 0; padding-top: 0.2em; }\n"
-    b".item-kind { font-weight: bold; }\n"
+    b".in-brief { list-style: none; padding-left: 0; }\n"
+    b".in-brief > li { border-top: 0.06em solid; margin: 1.1em 0; padding-top: 0.35em; }\n"
+    b".brief-headline { font-size: 1.05em; line-height: 1.3; margin: 0 0 0.2em; }\n"
+    b".brief-meta { font-family: sans-serif; font-size: 0.82em; margin: 0; }\n"
+    b".in-brief-intro { font-family: sans-serif; font-size: 0.88em; }\n"
     b".section-pointer, .edition-notes { border-left: 0.2em solid; margin: 1em 0; "
     b"padding-left: 0.8em; }\n"
     b".editorial-summary { border: 0.12em solid; margin: 1.25em 0; "

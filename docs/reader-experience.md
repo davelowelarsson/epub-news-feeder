@@ -54,10 +54,30 @@ are defined in `CONTEXT.md`.
 
 ## Publisher Link Briefs
 
-- A Publisher Link Brief is a selected reading item with headline, source, byline/date metadata,
-  and a descriptive publisher route.
-- It does not reproduce or summarize publisher text when the Source eligibility route permits only
-  linking. This is intentional, not an acquisition failure.
+- A Publisher Link Brief is a headline and a route back to its publisher. It does not reproduce or
+  summarize publisher text when the Source eligibility route permits only linking. This is
+  intentional, not an acquisition failure.
+- **A Brief is a rights outcome, never a failure outcome.** A failed full-text acquisition is
+  omitted and aggregated into a Publication Note; it never quietly demotes to a headline, because
+  the reader could not tell the difference.
+- Briefs are capped separately from Articles and never consume an Article Slot, so a headline can
+  never displace journalism. They cannot satisfy the Publication minimum either: an Edition of pure
+  headlines is a notification, not a reading product, and is not delivered.
+- Every Brief gathers into one **In Brief** chapter placed after Edition notes and Corrections and
+  before the Sections — anything the reader is owed comes first, then the skim eases them into the
+  reading. The chapter is omitted entirely when there are no Briefs.
+- Briefs are ordered newest first across all Sources. Grouping by Source would re-fragment what
+  aggregation just fixed. Selection is round-robin across Sources so one publisher cannot fill the
+  roll.
+- Each entry is a plain-text headline with one sub-line carrying the source name and the
+  publication time. **The publisher link sits on the source name, not the headline**, so a reader
+  checking a headline has an obvious place to press and the headline itself stays unadorned. No
+  byline, no rights line, no kind label, no call to action.
+- The chapter has a single table-of-contents entry. Listing every Brief in the contents is the same
+  chrome the chapter exists to remove.
+- Mute Rules apply to Briefs; a muted topic reaching the reader as a headline is exactly what a
+  Mute Rule exists to prevent. Relevance ranking, Source Weight, Essential Coverage and Feedback
+  Signals do not apply.
 - Unselected metadata candidates never appear in the Edition or durable State.
 
 ## Reader-generated copy notices

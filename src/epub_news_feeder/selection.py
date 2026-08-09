@@ -60,10 +60,28 @@ class SectionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class BriefCandidate:
+    """One Publisher Link Brief competing only against other Briefs.
+
+    A Brief carries no relevance, weight or feedback: it is a headline and a route, and
+    ranking machinery built for an Article would be disproportionate to two seconds of reading.
+    """
+
+    brief_id: str
+    source_id: str
+    title: str
+    canonical_url: str
+    published_at: datetime
+    muted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class PublicationRequest:
     max_articles: int
     min_articles: int
     sections: tuple[SectionRequest, ...]
+    max_briefs: int = 0
+    briefs: tuple[BriefCandidate, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +103,7 @@ class SelectionResult:
     meets_minimum: bool
     partial: bool
     warnings: tuple[str, ...]
+    selected_briefs: tuple[BriefCandidate, ...] = ()
 
     def for_section(self, section_id: str) -> tuple[SelectedSlot, ...]:
         return tuple(slot for slot in self.slots if slot.section_id == section_id)
@@ -260,6 +279,37 @@ def _ancestor_maxima(sections: list[SectionRequest]) -> dict[str, int]:
     return maxima
 
 
+def _select_briefs(request: PublicationRequest) -> tuple[BriefCandidate, ...]:
+    """Fill the Brief roll round-robin across Sources, then present it newest first.
+
+    Selection order and presentation order are deliberately different. Round-robin selection
+    stops one Source filling the roll; chronological presentation stops the chapter
+    re-fragmenting into per-publisher lists.
+    """
+
+    by_source: dict[str, list[BriefCandidate]] = {}
+    for brief in request.briefs:
+        if brief.muted:
+            continue
+        by_source.setdefault(brief.source_id, []).append(brief)
+    for candidates in by_source.values():
+        candidates.sort(key=lambda item: (-item.published_at.timestamp(), item.canonical_url))
+
+    taken: list[BriefCandidate] = []
+    while len(taken) < request.max_briefs and any(by_source.values()):
+        for source_id in sorted(by_source):
+            if len(taken) >= request.max_briefs:
+                break
+            if by_source[source_id]:
+                taken.append(by_source[source_id].pop(0))
+    return tuple(
+        sorted(
+            taken,
+            key=lambda item: (-item.published_at.timestamp(), item.source_id, item.canonical_url),
+        )
+    )
+
+
 def select_publication(request: PublicationRequest) -> SelectionResult:
     ranked: dict[str, list[SectionCandidate]] = {}
     warnings: list[str] = []
@@ -349,6 +399,9 @@ def select_publication(request: PublicationRequest) -> SelectionResult:
         made_progress = False
         for section in weighted_turns:
             made_progress = add_next(section) or made_progress
+    # Briefs are counted apart from Articles everywhere: they never enter the unique Article
+    # identity set, and an Edition of pure headlines is a notification rather than a reading
+    # product, so they cannot satisfy the Publication minimum either.
     meets_minimum = len(unique) >= request.min_articles
     return SelectionResult(
         tuple(selected),
@@ -356,6 +409,7 @@ def select_publication(request: PublicationRequest) -> SelectionResult:
         meets_minimum,
         len(unique) < request.max_articles,
         tuple(warnings),
+        _select_briefs(request),
     )
 
 
