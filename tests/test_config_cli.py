@@ -9,7 +9,16 @@ from pathlib import Path
 
 import pytest
 
+from epub_news_feeder.config import load_config
+
 RUN_ID = re.compile(r"\b\d{8}T\d{6}Z-[A-Z2-7]{8}\b")
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+REALITY_CHECK_CONFIG = REPOSITORY_ROOT / "examples" / "reality-check.yaml"
+
+# The rights basis SVT's configuration is upgraded to by this ticket: a published Content-Signal
+# permission for AI retrieval, rather than bare operator attestation. See issue #57 / #51 / #44.
+SVT_CONTENT_SIGNAL_BASIS = "published_content_signal_ai_input_allowed"
 
 MINIMAL_CONFIG = """
 version: 1
@@ -308,3 +317,92 @@ def test_ticket_03_invalid_generation_has_no_network_or_filesystem_side_effects(
     assert _CountingHandler.request_count == 0
     assert not state.exists()
     assert not output.exists()
+
+
+@pytest.mark.security
+def test_reality_check_configuration_records_the_recorded_rights_matrix() -> None:
+    """The four-Source reality-check configuration is proven in the suite, not only by live
+    evidence gathered outside it (issue #57, following #51 and #44). A regression in any recorded
+    gate — Ars Technica's local LLM eligibility silently returning to ``allow``, or Ekot's page
+    acquisition opening up — must fail this test rather than only be discoverable on a live run.
+    """
+    configuration = load_config(REALITY_CHECK_CONFIG)
+    sources = configuration.sources
+    assert set(sources) == {"david", "ars", "svt", "ekot"}
+
+    # Every Source carries both a rights policy and dated eligibility evidence — the two gates
+    # `application.py` requires before a Source is ever considered for acquisition.
+    for source in sources.values():
+        assert source.rights is not None
+        assert source.eligibility is not None
+
+    # Ars Technica: the Condé Nast clause denies local AND remote LLM use (#51), while the operator
+    # policy still records `local_only`. Policy and evidence are deliberately separate gates, and
+    # flattening one into the other would lose the distinction the two-gate design exists to keep.
+    ars = sources["ars"]
+    assert ars.eligibility is not None
+    assert ars.eligibility.local_llm == "deny"
+    assert ars.eligibility.remote_llm == "deny"
+    assert ars.llm_processing == "local_only"
+
+    # Sveriges Radio Ekot: metadata-only acquisition, with page acquisition, retention, and both
+    # LLM routes denied, and the operator policy disabled to match.
+    ekot = sources["ekot"]
+    assert ekot.acquisition == "metadata_only"
+    assert ekot.llm_processing == "disabled"
+    assert ekot.eligibility is not None
+    assert ekot.eligibility.page_acquisition == "deny"
+    assert ekot.eligibility.retention == "deny"
+    assert ekot.eligibility.local_llm == "deny"
+    assert ekot.eligibility.remote_llm == "deny"
+
+    # No Source anywhere in the configuration records an unconditional remote LLM allowance.
+    assert all(
+        source.eligibility is not None and source.eligibility.remote_llm != "allow"
+        for source in sources.values()
+    )
+
+
+@pytest.mark.security
+def test_reality_check_svt_basis_cites_its_published_content_signal() -> None:
+    """SVT's recorded rights basis is upgraded from bare operator attestation to a citation of the
+    Content-Signal SVT itself publishes (``ai-train=no, search=yes, ai-input=yes``, with an
+    explicit "ALLOWED: AI retrieval (not training)" section) — a stronger and more honest basis
+    (issue #51's SVT follow-on)."""
+    configuration = load_config(REALITY_CHECK_CONFIG)
+    svt_rights = configuration.sources["svt"].rights
+    assert svt_rights is not None
+    assert svt_rights.basis == SVT_CONTENT_SIGNAL_BASIS
+
+
+@pytest.mark.property
+def test_reality_check_svt_basis_upgrade_changes_no_gate_or_eligibility_value(
+    tmp_path: Path,
+) -> None:
+    """`rights.basis` is a free-text evidence citation, not a gate. Upgrading SVT's basis to cite
+    its published content signal must change no eligibility value and nothing a generated Edition
+    depends on. Verified by loading the configuration both ways and diffing every field, rather
+    than merely asserting the two values chosen by hand look compatible."""
+    upgraded_text = REALITY_CHECK_CONFIG.read_text(encoding="utf-8")
+    previous_basis_text = upgraded_text.replace(
+        f"basis: {SVT_CONTENT_SIGNAL_BASIS}", "basis: operator_attested_private_use"
+    )
+    assert previous_basis_text != upgraded_text  # sanity: the substitution changed something
+
+    previous_config_path = tmp_path / "reality-check-previous-basis.yaml"
+    previous_config_path.write_text(previous_basis_text, encoding="utf-8")
+
+    upgraded_configuration = load_config(REALITY_CHECK_CONFIG)
+    previous_configuration = load_config(previous_config_path)
+
+    upgraded_dump = upgraded_configuration.model_dump(mode="json")
+    previous_dump = previous_configuration.model_dump(mode="json")
+
+    assert upgraded_dump["sources"]["svt"]["rights"]["basis"] == SVT_CONTENT_SIGNAL_BASIS
+    assert previous_dump["sources"]["svt"]["rights"]["basis"] == "operator_attested_private_use"
+
+    # The only difference the basis edit may introduce is the free-text basis string itself. Patch
+    # it back to the previous value and assert every other field of the loaded configuration —
+    # every Source's eligibility matrix, every Publication, every Edition input — is unchanged.
+    upgraded_dump["sources"]["svt"]["rights"]["basis"] = "operator_attested_private_use"
+    assert upgraded_dump == previous_dump

@@ -58,7 +58,7 @@ sources:
     acquisition: auto
     llm_processing: local_only
     rights:
-      basis: operator_attested_private_use
+      basis: published_content_signal_ai_input_allowed
       audience: single_operator
       attribution_required: true
       media_reuse: false

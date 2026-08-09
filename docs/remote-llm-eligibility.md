@@ -305,6 +305,16 @@ caution:
 4. **It says nothing about (a).** `© Sveriges Television AB` on the feed still governs retention and
    distribution, which remain separate gates handled by the operator's private-use basis.
 
+### Recorded rights basis
+
+Following this review, `examples/reality-check.yaml` records `rights.basis:
+published_content_signal_ai_input_allowed` for SVT, upgraded from bare `operator_attested_private_use`.
+The Content-Signal quoted above — `ai-train=no, search=yes, ai-input=yes`, with the explicit
+"ALLOWED: AI retrieval (not training)" section — is a publisher-published permission and a stronger,
+more honest basis than operator attestation alone, which is why it now leads. This changes no
+eligibility value: `remote_llm` stays `conditional` for the reasons given below, and every other field
+is unaffected. `rights.basis` is a free-text citation of the evidence used, not itself a gate.
+
 ### Verdict
 
 **`conditional`, unchanged.** Remote LLM processing of SVT Article text may be enabled only while
