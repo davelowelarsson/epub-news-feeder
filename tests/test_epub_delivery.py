@@ -64,7 +64,7 @@ def test_build_epub_creates_a_readable_attributed_epub() -> None:
             item.get("href") == "nav.xhtml" and item.get("properties") == "nav"
             for item in manifest_items
         )
-        assert len(spine_items) == 1
+        assert len(spine_items) == 2
         nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
         assert "Contents" in " ".join(text for text in nav.itertext() if isinstance(text, str))
         section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
@@ -85,7 +85,7 @@ def test_local_delivery_writes_and_acknowledges_the_verified_delivery_copy(tmp_p
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "3e029c210ffbbd498a1fe924d0840ef8ec0a3cf0f69049ffb60f32fda66fafed"
+    assert receipt.sha256 == "4d2ca7000311e628b484f12d3429c814a192cc8a9e5bfa9ba9b2f90292329c6a"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -122,6 +122,7 @@ def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() ->
         )
         world = etree.fromstring(archive.read(world_path))
         technology = etree.fromstring(archive.read(technology_path))
+        notes = etree.fromstring(archive.read("OEBPS/edition-notes.xhtml"))
         article_ids = [
             identifier
             for element in world.iter("{http://www.w3.org/1999/xhtml}article")
@@ -131,7 +132,8 @@ def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() ->
         article_id = article_ids[0]
 
         rendered = " ".join(text for text in technology.itertext() if isinstance(text, str))
-        assert "One Source was temporarily unavailable." in rendered
+        notes_text = " ".join(text for text in notes.itertext() if isinstance(text, str))
+        assert "One Source was temporarily unavailable." in notes_text
         assert "A complete report" in rendered
         assert "Example News: Relevant technology coverage" in rendered
         assert technology.xpath("//*[local-name()='a']/@href") == [

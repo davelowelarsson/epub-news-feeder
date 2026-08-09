@@ -42,6 +42,15 @@ class SectionPointerInput:
 
 
 @dataclass(frozen=True)
+class LinkInput:
+    """Attributed metadata-only Source item that opens at the publisher."""
+
+    title: str
+    source_name: str
+    canonical_url: str
+
+
+@dataclass(frozen=True)
 class SectionInput:
     """An ordered reader-facing Section."""
 
@@ -49,6 +58,7 @@ class SectionInput:
     title: str
     articles: tuple[ArticleInput, ...] = ()
     pointers: tuple[SectionPointerInput, ...] = ()
+    links: tuple[LinkInput, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,6 +94,10 @@ def build_epub(edition: EditionInput) -> bytes:
         ("OEBPS/nav.xhtml", _navigation_document(edition, section_paths), ZIP_DEFLATED),
         ("OEBPS/styles.css", _STYLESHEET, ZIP_DEFLATED),
     ]
+    if edition.notes:
+        members.append(
+            ("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED)
+        )
     members.extend(
         (
             str(section_paths[section.identifier]),
@@ -168,6 +182,14 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
         href="styles.css",
         attrib={"media-type": "text/css"},
     )
+    if edition.notes:
+        etree.SubElement(
+            manifest,
+            f"{{{_OPF_NS}}}item",
+            id="edition-notes",
+            href="edition-notes.xhtml",
+            attrib={"media-type": "application/xhtml+xml"},
+        )
     for section in edition.sections:
         path = section_paths[section.identifier]
         etree.SubElement(
@@ -178,6 +200,9 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
             attrib={"media-type": "application/xhtml+xml"},
         )
     spine = etree.SubElement(package, f"{{{_OPF_NS}}}spine")
+    etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="nav")
+    if edition.notes:
+        etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="edition-notes")
     for section in edition.sections:
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref=_manifest_id(section.identifier))
     return _serialize(package)
@@ -189,12 +214,27 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
     heading = etree.SubElement(nav, f"{{{_XHTML_NS}}}h1")
     heading.text = "Contents"
     ordered = etree.SubElement(nav, f"{{{_XHTML_NS}}}ol")
+    if edition.notes:
+        item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
+        link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href="edition-notes.xhtml")
+        link.text = "Edition notes"
     for section in edition.sections:
         item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
         link = etree.SubElement(
             item, f"{{{_XHTML_NS}}}a", href=str(section_paths[section.identifier].name)
         )
         link.text = section.title
+    return _serialize(html)
+
+
+def _notes_document(edition: EditionInput) -> bytes:
+    html, body = _xhtml_document(f"{edition.title} — Edition notes", edition.language)
+    main = etree.SubElement(body, f"{{{_XHTML_NS}}}main")
+    heading = etree.SubElement(main, f"{{{_XHTML_NS}}}h1")
+    heading.text = "Edition notes"
+    for note in edition.notes:
+        paragraph = etree.SubElement(main, f"{{{_XHTML_NS}}}p")
+        paragraph.text = note
     return _serialize(html)
 
 
@@ -212,13 +252,12 @@ def _section_document(
         _add_article(main, article)
     for pointer in section.pointers:
         _add_pointer(main, pointer, section.identifier, section_paths, article_locations)
-    if edition.notes:
-        notes = etree.SubElement(main, f"{{{_XHTML_NS}}}aside", attrib={"class": "edition-notes"})
-        note_heading = etree.SubElement(notes, f"{{{_XHTML_NS}}}h2")
-        note_heading.text = "Edition notes"
-        for note in edition.notes:
-            paragraph = etree.SubElement(notes, f"{{{_XHTML_NS}}}p")
-            paragraph.text = note
+    if section.links:
+        links_heading = etree.SubElement(main, f"{{{_XHTML_NS}}}h2")
+        links_heading.text = "Links from metadata-only Sources"
+        links = etree.SubElement(main, f"{{{_XHTML_NS}}}ul", attrib={"class": "source-links"})
+        for link in section.links:
+            _add_source_link(links, link)
     colophon = etree.SubElement(body, f"{{{_XHTML_NS}}}footer", attrib={"class": "colophon"})
     colophon.text = f"Run ID: {edition.run_id}"
     return _serialize(html)
@@ -285,6 +324,14 @@ def _add_pointer(
     link.text = pointer.headline
     detail = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p")
     detail.text = f"{pointer.source_name}: {pointer.relevance_reason}"
+
+
+def _add_source_link(parent: etree._Element, source_link: LinkInput) -> None:
+    item = etree.SubElement(parent, f"{{{_XHTML_NS}}}li")
+    link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href=source_link.canonical_url)
+    link.text = source_link.title
+    source = etree.SubElement(item, f"{{{_XHTML_NS}}}span")
+    source.text = f" — {source_link.source_name}"
 
 
 def _serialize(element: etree._Element) -> bytes:

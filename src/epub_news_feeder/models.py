@@ -65,6 +65,12 @@ class EligibilityEvidence(StrictModel):
     evidence_reviewed_at: date
     review_expires_at: date
     evidence_id: NonEmptyString
+    feed_acquisition: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
+    page_acquisition: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
+    retention: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
+    private_distribution: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
+    local_llm: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
+    remote_llm: Literal["allow", "deny", "conditional", "unknown"] = "unknown"
 
     @model_validator(mode="after")
     def expiry_follows_review(self) -> EligibilityEvidence:
@@ -75,6 +81,7 @@ class EligibilityEvidence(StrictModel):
 
 class Source(StrictModel):
     title: NonEmptyString
+    publisher_id: NonEmptyString | None = None
     feed_url: HttpUrl
     acquisition: Literal["auto", "feed", "web", "metadata_only"] = "auto"
     weight: Weight = 5
@@ -131,6 +138,7 @@ class Section(StrictModel):
 class Publication(StrictModel):
     id: NonEmptyString
     title: NonEmptyString
+    language: NonEmptyString = "en"
     policies: dict[NonEmptyString, PolicyPreset] = Field(default_factory=dict)
     budget: Budget | None = None
     editorial: EditorialConfig | None = None
