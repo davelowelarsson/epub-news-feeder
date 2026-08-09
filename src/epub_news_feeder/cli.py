@@ -1,15 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import webbrowser
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
 from epub_news_feeder import __version__
-from epub_news_feeder.application import GenerationError, generate_edition
+from epub_news_feeder.application import DriveTarget, GenerationError, generate_edition
 from epub_news_feeder.config import ConfigError, load_config
+from epub_news_feeder.drive import (
+    DriveConfigurationError,
+    HttpDriveClient,
+    credentials_from_environment,
+)
+from epub_news_feeder.drive_oauth import (
+    DriveAuthorizationError,
+    authorize,
+    find_client_secret,
+    load_client_secret,
+)
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
 
@@ -33,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("--run-id")
     generate.add_argument("--at")
     generate.add_argument("--epubcheck-jar", type=Path)
+    generate.add_argument(
+        "--drive-folder", help="Also deliver to this Google Drive folder ID (opt-in)."
+    )
 
     validate = commands.add_parser("validate", help="Validate configuration without side effects.")
     validate.add_argument("--config", required=True, type=Path)
@@ -42,6 +59,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     ollama.add_argument("--host", default="http://127.0.0.1:11434")
     ollama.add_argument("--model", required=True)
+
+    authorize_drive = commands.add_parser(
+        "authorize-drive",
+        help="One-time interactive Google Drive authorization (drive.file scope).",
+        description="One-time interactive Google Drive authorization (drive.file scope).",
+    )
+    authorize_drive.add_argument(
+        "--client-secret",
+        type=Path,
+        help="Path to the downloaded client_secret_*.json; defaults to the one in the cwd.",
+    )
     return parser
 
 
@@ -92,6 +120,17 @@ def _generate(arguments: argparse.Namespace) -> int:
         _report_failure(run_id, error.code, error.safe_message)
         return 2
     diagnostics = arguments.diagnostics or arguments.state.parent / "diagnostics"
+    drive_folder = arguments.drive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    drive_target = None
+    if drive_folder:
+        try:
+            credentials = credentials_from_environment()
+        except DriveConfigurationError as error:
+            _report_failure(run_id, "DRIVE_CONFIGURATION_INVALID", str(error))
+            return 2
+        drive_target = DriveTarget(
+            client=HttpDriveClient(credentials=credentials), folder_id=drive_folder
+        )
     try:
         result = generate_edition(
             configuration,
@@ -102,6 +141,7 @@ def _generate(arguments: argparse.Namespace) -> int:
             generated_at=generated_at,
             publication_id=arguments.publication,
             epubcheck_jar=arguments.epubcheck_jar,
+            drive_target=drive_target,
         )
     except GenerationError as error:
         _report_failure(run_id, error.code, error.safe_message)
@@ -128,6 +168,25 @@ def _ollama_check(host: str, model: str) -> int:
     return 0
 
 
+def _open_url(url: str) -> None:
+    print(f"Open this URL to authorize (or it may open automatically): {url}")
+    with suppress(Exception):
+        webbrowser.open(url)
+
+
+def _authorize_drive(client_secret_path: Path | None) -> int:
+    try:
+        path = client_secret_path or find_client_secret(Path.cwd())
+        client_secret = load_client_secret(path)
+        refresh_token = authorize(client_secret, open_url=_open_url)
+    except DriveAuthorizationError as error:
+        print(f"code=DRIVE_AUTHORIZATION_FAILED message={error}", file=sys.stderr)
+        return 3
+    print(f"GOOGLE_OAUTH_REFRESH_TOKEN={refresh_token}")
+    print("Store this value as a GitHub secret; this command has not saved it anywhere.")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
@@ -136,4 +195,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _validate(arguments.config)
     if arguments.command == "ollama-check":
         return _ollama_check(arguments.host, arguments.model)
+    if arguments.command == "authorize-drive":
+        return _authorize_drive(arguments.client_secret)
     raise AssertionError(f"Unhandled command: {arguments.command}")
