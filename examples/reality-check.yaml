@@ -115,6 +115,516 @@ sources:
       private_distribution: conditional
       local_llm: deny
       remote_llm: deny
+  runnersworld:
+    title: Runner's World Sverige
+    default_article_language: sv
+    publisher_id: runnersworld.se
+    allowed_publisher_origins: [https://www.runnersworld.se]
+    feed_url: https://www.runnersworld.se/feed
+    acquisition: auto
+    llm_processing: disabled
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-runnersworld-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: deny
+      remote_llm: deny
+  svt_kultur:
+    title: SVT Kultur
+    default_article_language: sv
+    publisher_id: svt.se
+    allowed_publisher_origins: [https://www.svt.se]
+    feed_url: https://www.svt.se/kultur/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    weight: 4
+    rights:
+      basis: published_content_signal_ai_input_allowed
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-svt_kultur-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: conditional
+  attention:
+    title: Riksförbundet Attention
+    default_article_language: sv
+    publisher_id: attention.se
+    allowed_publisher_origins: [https://attention.se]
+    feed_url: https://attention.se/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-attention-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  forskning_skola:
+    title: forskning.se — skola och utbildning
+    default_article_language: sv
+    publisher_id: forskning.se
+    allowed_publisher_origins: [https://forskning.se, https://www.forskning.se]
+    feed_url: https://forskning.se/kategori/utbildning-skola/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-forskning_skola-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  specialnest:
+    title: Special Nest
+    default_article_language: sv
+    publisher_id: specialnest.se
+    allowed_publisher_origins: [https://www.specialnest.se]
+    feed_url: https://www.specialnest.se/rss.xml
+    acquisition: web
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-specialnest-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  elle:
+    title: Elle Sverige
+    default_article_language: sv
+    publisher_id: elle.se
+    allowed_publisher_origins: [https://www.elle.se]
+    feed_url: https://www.elle.se/rss
+    acquisition: web
+    llm_processing: disabled
+    weight: 3
+    rights:
+      basis: published_ai_refusal_reproduction_silent
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-elle-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: deny
+      remote_llm: deny
+  svt_vetenskap:
+    title: SVT Vetenskap
+    default_article_language: sv
+    publisher_id: svt.se
+    allowed_publisher_origins: [https://www.svt.se]
+    feed_url: https://www.svt.se/nyheter/vetenskap/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_content_signal_ai_input_allowed
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-svt_vetenskap-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: conditional
+  nasa:
+    title: NASA
+    default_article_language: en
+    publisher_id: nasa.gov
+    allowed_publisher_origins: [https://www.nasa.gov]
+    feed_url: https://www.nasa.gov/news-release/feed/
+    acquisition: auto
+    llm_processing: remote_allowed
+    rights:
+      basis: united_states_government_work_public_domain
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-nasa-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: allow
+  kubernetes:
+    title: Kubernetes Blog
+    default_article_language: en
+    publisher_id: kubernetes.io
+    allowed_publisher_origins: [https://kubernetes.io]
+    feed_url: https://kubernetes.io/feed.xml
+    acquisition: web
+    llm_processing: remote_allowed
+    rights:
+      basis: published_creative_commons_attribution_4_0
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-kubernetes-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: allow
+  krebs:
+    title: Krebs on Security
+    default_article_language: en
+    publisher_id: krebsonsecurity.com
+    allowed_publisher_origins: [https://krebsonsecurity.com]
+    feed_url: https://krebsonsecurity.com/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-krebs-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  hackaday:
+    title: Hackaday
+    default_article_language: en
+    publisher_id: hackaday.com
+    allowed_publisher_origins: [https://hackaday.com]
+    feed_url: https://hackaday.com/feed/
+    acquisition: auto
+    llm_processing: local_only
+    weight: 3
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-hackaday-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  prusa:
+    title: Prusa Blog
+    default_article_language: en
+    publisher_id: blog.prusa3d.com
+    allowed_publisher_origins: [https://blog.prusa3d.com]
+    feed_url: https://blog.prusa3d.com/feed/
+    acquisition: web
+    llm_processing: local_only
+    rights:
+      basis: published_personal_use_permission
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-prusa-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  bleepingcomputer:
+    title: BleepingComputer
+    default_article_language: en
+    publisher_id: bleepingcomputer.com
+    allowed_publisher_origins: [https://www.bleepingcomputer.com]
+    feed_url: https://www.bleepingcomputer.com/feed/
+    acquisition: auto
+    llm_processing: disabled
+    rights:
+      basis: published_ai_refusal_reproduction_silent
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-bleepingcomputer-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: deny
+      remote_llm: deny
+  cybersecuritynews:
+    title: Cyber Security News
+    default_article_language: en
+    publisher_id: cybersecuritynews.com
+    allowed_publisher_origins: [https://cybersecuritynews.com]
+    feed_url: https://cybersecuritynews.com/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-cybersecuritynews-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  opensourcemalware:
+    title: Open Source Malware
+    default_article_language: en
+    publisher_id: opensourcemalware.com
+    allowed_publisher_origins: [https://opensourcemalware.com]
+    feed_url: https://opensourcemalware.com/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-opensourcemalware-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  githubblog:
+    title: The GitHub Blog
+    default_article_language: en
+    publisher_id: github.blog
+    allowed_publisher_origins: [https://github.blog]
+    feed_url: https://github.blog/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-githubblog-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  danstidningen:
+    title: Danstidningen
+    default_article_language: sv
+    publisher_id: danstidningen.se
+    allowed_publisher_origins: [https://www.danstidningen.se]
+    feed_url: https://www.danstidningen.se/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_private_offline_reprint_guidance
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-danstidningen-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  snexplores:
+    title: Science News Explores
+    default_article_language: en
+    publisher_id: snexplores.org
+    allowed_publisher_origins: [https://www.snexplores.org]
+    feed_url: https://www.snexplores.org/feed
+    acquisition: auto
+    llm_processing: disabled
+    rights:
+      basis: published_ai_refusal_internal_use_permitted
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-snexplores-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: deny
+      remote_llm: deny
+  svt_damallsvenskan:
+    title: SVT Sport — Damallsvenskan
+    default_article_language: sv
+    publisher_id: svt.se
+    allowed_publisher_origins: [https://www.svt.se]
+    feed_url: https://www.svt.se/sport/om/damallsvenskan/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_content_signal_ai_input_allowed
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-svt_damallsvenskan-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: conditional
+  svt_fotboll:
+    title: SVT Sport — Fotboll
+    default_article_language: sv
+    publisher_id: svt.se
+    allowed_publisher_origins: [https://www.svt.se]
+    feed_url: https://www.svt.se/sport/fotboll/rss.xml
+    acquisition: auto
+    llm_processing: local_only
+    weight: 2
+    rights:
+      basis: published_content_signal_ai_input_allowed
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-svt_fotboll-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: conditional
+  wwf:
+    title: Världsnaturfonden WWF
+    default_article_language: sv
+    publisher_id: wwf.se
+    allowed_publisher_origins: [https://www.wwf.se]
+    feed_url: https://www.wwf.se/feed/
+    acquisition: auto
+    llm_processing: local_only
+    rights:
+      basis: published_family_use_permission
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-wwf-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: unknown
+      remote_llm: unknown
+  natgeokids:
+    title: National Geographic Kids UK
+    default_article_language: en
+    publisher_id: natgeokids.com
+    allowed_publisher_origins: [https://www.natgeokids.com]
+    feed_url: https://www.natgeokids.com/uk/feed/
+    acquisition: auto
+    llm_processing: disabled
+    rights:
+      basis: published_ai_refusal_personal_reference_permitted
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: issue-73-natgeokids-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: deny
+      remote_llm: deny
 publications:
   - id: local-reality-check
     title: Local Reality Check
@@ -144,15 +654,33 @@ publications:
         sources: [david, ars, svt, ekot]
   # The scheduled Edition. It shares the Sources above rather than restating them, so a
   # rights review recorded once governs both Publications and cannot drift between them.
-  # Editorial runs remotely here because a GitHub-hosted runner has no Ollama. Dated model
-  # pins, not floating aliases: a Model Pair that silently changed under a schedule would
-  # change the Edition with nobody reading the diff.
+  # The household Edition. One book, six sections, read by four people: everyone shares
+  # Aktuellt, and each reader has their own section that anyone else may also read.
+  #
+  # Editorial runs remotely because a GitHub-hosted runner has no Ollama. Dated model pins,
+  # not floating aliases: a Model Pair that silently changed under a schedule would change
+  # the Edition with nobody reading the diff. Note that remote eligibility still reaches one
+  # Source only, so almost nothing here is ever summarised.
   - id: daily
-    title: Daily News
-    language: en
+    title: Morgonutgavan
+    language: sv
+    max_briefs: 6
     budget:
-      max_articles: 8
+      max_articles: 15
       min_articles: 1
+    policies:
+      # Source plurality is a current-affairs value: an Edition should not see the day
+      # through one publisher's eyes.
+      aktuellt:
+        type: coverage
+        minimum_sources: 2
+      # A personal section owes nobody a second opinion. Requiring plurality here would
+      # report a shortfall every single morning, and a warning that always fires is a
+      # warning nobody reads.
+      personlig:
+        type: interest
+        minimum_sources: 1
+        single_source_cap: 1.0
     editorial:
       enabled: true
       remote_processing: true
@@ -168,6 +696,45 @@ publications:
         max_calls: 12
         max_tokens: 12000
     sections:
-      - id: current
-        title: Current reporting
-        sources: [david, ars, svt, ekot]
+      - id: aktuellt
+        title: Aktuellt
+        policy: aktuellt
+        budget:
+          max_articles: 4
+        sources: [svt, ekot]
+      - id: anna
+        title: Anna
+        policy: personlig
+        budget:
+          max_articles: 3
+        sources: [runnersworld, svt_kultur, attention, forskning_skola, specialnest, elle]
+      - id: david
+        title: David
+        policy: personlig
+        budget:
+          max_articles: 3
+        sources:
+          - david
+          - ars
+          - svt_vetenskap
+          - nasa
+          - kubernetes
+          - krebs
+          - hackaday
+          - prusa
+          - bleepingcomputer
+          - cybersecuritynews
+          - opensourcemalware
+          - githubblog
+      - id: alice
+        title: Alice
+        policy: personlig
+        budget:
+          max_articles: 3
+        sources: [danstidningen, snexplores]
+      - id: linnea
+        title: Linnea
+        policy: personlig
+        budget:
+          max_articles: 2
+        sources: [svt_damallsvenskan, svt_fotboll, wwf, natgeokids]

@@ -3,12 +3,15 @@ name: Daily Edition
 # The only thing that runs with nobody watching. It restores the State Store from Drive,
 # builds one Edition, delivers it to the Kobo folder, and saves the State Store back.
 #
+# Weekdays only. Saturday carries the weekly Edition, which is a separate Publication and a
+# separate workflow; Sunday has none.
+#
 # GitHub cron is UTC and does not observe DST: 04:00 UTC is 06:00 in Stockholm through the
 # summer and 05:00 through the winter. Either way the Edition is on the device before the
 # reader wakes, which is the requirement; an hour of drift is not worth a second schedule.
 on:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * 1-5"
   workflow_dispatch:
 
 permissions:
