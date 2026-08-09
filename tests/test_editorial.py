@@ -33,6 +33,8 @@ def _evidence() -> tuple[ArticleEvidence, ...]:
             publisher="Example News",
             canonical_url="https://example.test/rescue",
             published_at="2026-08-09T07:30:00Z",
+            language="en",
+            lead_passage="Rescue crews continued searching on Sunday.",
             body="Rescue crews continued searching on Sunday. Two people were brought ashore.",
         ),
     )
@@ -102,6 +104,12 @@ def test_accepts_labelled_summary_when_every_sentence_is_independently_supported
     ]
     assert all(call.tools == () and call.web_access is False for call in provider.calls)
     assert all(call.response_schema["additionalProperties"] is False for call in provider.calls)
+    proposal_def = provider.calls[0].response_schema["$defs"]["_ProposedSummary"]  # type: ignore[index]
+    sentence_def = provider.calls[0].response_schema["$defs"]["CitedSentence"]  # type: ignore[index]
+    assert proposal_def["properties"]["article_id"]["enum"] == ["article-1"]
+    assert sentence_def["properties"]["citations"]["items"]["enum"] == ["article-1"]
+    assert provider.calls[0].input["articles"][0]["language"] == "en"  # type: ignore[index]
+    assert "do not translate" in provider.calls[0].system_prompt
     retained = result.evidence.model_dump_json()
     assert _evidence()[0].body not in retained
     assert provider.calls[0].system_prompt not in retained
@@ -222,6 +230,51 @@ def test_provider_and_schema_failures_return_the_same_body_free_fallback(failure
     assert secret_body not in retained
     assert "Write short article summaries" not in retained
     assert "Independently classify" not in retained
+
+
+@pytest.mark.editorial
+def test_failure_evidence_distinguishes_provider_from_invalid_model_output() -> None:
+    from epub_news_feeder.editorial import StructuredProviderError
+
+    provider_failure = generate_editorial(
+        _evidence(), _models(), FakeProvider([StructuredProviderError("unavailable")])
+    )
+    invalid_output = generate_editorial(_evidence(), _models(), FakeProvider([{"summaries": []}]))
+
+    assert provider_failure.evidence.failure_code == "provider_failure"
+    assert invalid_output.evidence.failure_code == "invalid_model_output"
+
+
+@pytest.mark.editorial
+def test_wrong_language_summary_is_rejected_before_verifier_call() -> None:
+    provider = FakeProvider(
+        [
+            {
+                "summaries": [
+                    {
+                        "article_id": "article-1",
+                        "sentences": [
+                            {
+                                "text": (
+                                    "Artikeln beskriver räddningsarbetet och de personer "
+                                    "som fördes i land."
+                                ),
+                                "citations": ["article-1"],
+                            }
+                        ],
+                    }
+                ]
+            },
+            AssertionError("wrong-language prose must not reach the verifier"),
+        ]
+    )
+
+    result = generate_editorial(_evidence(), _models(), provider)
+
+    assert result.additions == []
+    assert result.evidence.failure_code == "invalid_model_output"
+    assert result.evidence.calls == 1
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.editorial

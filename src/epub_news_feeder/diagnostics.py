@@ -22,6 +22,7 @@ _ALLOWED_FIELDS = {
     "publisher_links",
     "publication_id",
     "read_items",
+    "reason",
     "source_id",
 }
 

@@ -47,6 +47,7 @@ class SourceRequest:
     mode: AcquisitionMode
     llm_processing: str
     evidence: EligibilityEvidence
+    default_article_language: str | None = None
     allowed_publisher_origins: tuple[str, ...] = ()
     minimum_full_words: int = 80
     allow_short_as_published: bool = False
@@ -63,6 +64,7 @@ class AcquiredArticle:
     canonical_url: str
     published_at: datetime | None
     categories: tuple[str, ...]
+    language: str | None
     body: str | None
     classification: str
 
@@ -140,7 +142,60 @@ def _html_text(fragment: str) -> str:
         root = html.fragment_fromstring(fragment, create_parent="div")
     except (ValueError, TypeError):
         return ""
+    unwanted = cast(
+        list[HtmlElement], root.xpath(".//script|.//style|.//nav|.//footer|.//aside|.//form")
+    )
+    for element in unwanted:
+        element.drop_tree()
+    code_blocks = cast(list[HtmlElement], root.xpath(".//pre[code]"))
+    for block in code_blocks:
+        code = " ".join(block.text_content().split()).casefold()
+        if code.startswith(
+            (
+                "flowchart ",
+                "graph ",
+                "sequencediagram",
+                "classdiagram",
+                "statediagram",
+                "erdiagram",
+                "journey ",
+                "gantt ",
+                "pie ",
+            )
+        ):
+            block.drop_tree()
+    terminal_controls = cast(
+        list[HtmlElement],
+        root.xpath(".//p[count(*) = 1 and a and not(normalize-space(text())) and not(a/*)]"),
+    )
+    for paragraph in terminal_controls:
+        if " ".join(paragraph.text_content().split()).casefold() in {
+            "read full article",
+            "comments",
+        }:
+            paragraph.drop_tree()
+    blocks = cast(
+        list[HtmlElement],
+        root.xpath(".//p | .//blockquote | .//li[not(.//p)] | .//pre"),
+    )
+    paragraphs = [" ".join(block.text_content().split()) for block in blocks]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    if paragraphs:
+        return "\n\n".join(paragraphs)
     return " ".join(root.text_content().split())
+
+
+def _has_full_article_cta(fragment: str) -> bool:
+    try:
+        root = html.fragment_fromstring(fragment, create_parent="div")
+    except (ValueError, TypeError):
+        return False
+    paragraphs = cast(list[HtmlElement], root.xpath(".//p[position() > last() - 3]"))
+    return any(
+        len(paragraph.xpath("./a")) == 1
+        and " ".join(paragraph.text_content().split()).casefold() == "read full article"
+        for paragraph in paragraphs
+    )
 
 
 def _page_content(document: bytes, base_url: httpx.URL) -> tuple[str, str | None]:
@@ -188,6 +243,13 @@ def _entry_datetime(value: object) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _article_language(value: object, fallback: str | None) -> str | None:
+    declared = str(value).strip() if value is not None else ""
+    if re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", declared):
+        return declared
+    return fallback
 
 
 class _RouteDenied(Exception):
@@ -431,6 +493,7 @@ class SourceClient:
         author_value = entry.get("author")
         author = str(author_value).strip() if author_value else None
         published = _entry_datetime(entry.get("published") or entry.get("updated"))
+        language = _article_language(entry.get("language"), request.default_article_language)
         tags: Sequence[Mapping[str, Any]] = entry.get("tags", ())
         categories = tuple(
             str(tag.get("term", "")).strip() for tag in tags if str(tag.get("term", "")).strip()
@@ -447,6 +510,7 @@ class SourceClient:
                 str(link_url),
                 published,
                 categories,
+                language,
                 None,
                 "metadata_only",
             )
@@ -459,7 +523,10 @@ class SourceClient:
         ):
             for item in content:
                 if isinstance(item, Mapping):
-                    candidate = _html_text(str(item.get("value", "")))
+                    fragment = str(item.get("value", ""))
+                    candidate = _html_text(fragment)
+                    if request.mode == AcquisitionMode.AUTO and _has_full_article_cta(fragment):
+                        continue
                     if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
                         continue
                     if len(candidate.split()) >= request.minimum_full_words:
@@ -510,6 +577,7 @@ class SourceClient:
             str(link_url),
             published,
             categories,
+            language,
             body,
             classification,
         )

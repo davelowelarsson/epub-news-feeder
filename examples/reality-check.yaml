@@ -2,6 +2,7 @@ version: 1
 sources:
   david:
     title: David Lowe Larsson
+    default_article_language: en
     publisher_id: davidlowelarsson.com
     copyright_notice: Copyright David Lowe Larsson
     allowed_publisher_origins: [https://davidlowelarsson.com]
@@ -25,11 +26,12 @@ sources:
       remote_llm: unknown
   ars:
     title: Ars Technica
+    default_article_language: en
     publisher_id: arstechnica.com
     copyright_notice: Copyright Condé Nast
     allowed_publisher_origins: [https://arstechnica.com, https://www.arstechnica.com]
     feed_url: https://feeds.arstechnica.com/arstechnica/index
-    acquisition: auto
+    acquisition: web
     llm_processing: local_only
     rights:
       basis: published_private_offline_reprint_guidance
@@ -48,6 +50,7 @@ sources:
       remote_llm: deny
   svt:
     title: SVT Nyheter
+    default_article_language: sv
     publisher_id: svt.se
     copyright_notice: Copyright Sveriges Television AB
     allowed_publisher_origins: [https://www.svt.se]
@@ -71,6 +74,7 @@ sources:
       remote_llm: conditional
   ekot:
     title: Sveriges Radio Ekot
+    default_article_language: sv
     publisher_id: sverigesradio.se
     allowed_publisher_origins:
       - https://www.sverigesradio.se
@@ -113,7 +117,7 @@ publications:
         schema_version: 1
       capabilities: [article_summary]
       cost_envelope:
-        max_calls: 4
+        max_calls: 24
         max_tokens: 12000
       ollama_host: http://127.0.0.1:11434
     sections:

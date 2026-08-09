@@ -35,7 +35,10 @@ private spool is revalidated and delivered without reacquiring Sources.
 The example configuration uses `gemma4:12b-mlx` as editor and `gemma4:e4b-mlx` as an independent
 verifier. Both must be installed in Ollama. Every sentence requires a publisher citation; malformed,
 unsupported, unavailable, or policy-ineligible output is omitted without blocking the Edition.
-Metadata-only sources such as Ekot are never sent to a model.
+English and Swedish Articles are processed in separate language batches and pass a deterministic
+language check before verifier acceptance. Generated text is visibly separated from publisher text,
+with one method note in Edition end matter. Metadata-only sources such as Ekot are never sent to a
+model.
 
 ```bash
 uv run epub-news-feeder ollama-check --model gemma4:12b-mlx

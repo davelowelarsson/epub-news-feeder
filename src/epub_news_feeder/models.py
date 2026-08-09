@@ -6,6 +6,13 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints, model_validator
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+LanguageTag = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
+    ),
+]
 PositiveInt = Annotated[int, Field(gt=0)]
 NonNegativeInt = Annotated[int, Field(ge=0)]
 Weight = Annotated[int, Field(ge=1, le=10)]
@@ -81,6 +88,7 @@ class EligibilityEvidence(StrictModel):
 
 class Source(StrictModel):
     title: NonEmptyString
+    default_article_language: LanguageTag | None = None
     publisher_id: NonEmptyString | None = None
     copyright_notice: NonEmptyString | None = None
     allowed_publisher_origins: list[HttpUrl] = Field(default_factory=list)
@@ -156,7 +164,7 @@ class Section(StrictModel):
 class Publication(StrictModel):
     id: NonEmptyString
     title: NonEmptyString
-    language: NonEmptyString = "en"
+    language: LanguageTag = "en"
     policies: dict[NonEmptyString, PolicyPreset] = Field(default_factory=dict)
     budget: Budget | None = None
     editorial: EditorialConfig | None = None

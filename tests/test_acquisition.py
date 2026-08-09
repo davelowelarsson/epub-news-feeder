@@ -339,6 +339,92 @@ def test_ticket_05_feed_page_and_metadata_routes_never_use_previews_as_articles(
 
 
 @pytest.mark.acceptance
+def test_feed_article_preserves_paragraphs_and_omits_raw_mermaid_diagrams() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    first = " ".join(f"first-{index}" for index in range(50)) + "."
+    second = " ".join(f"second-{index}" for index in range(50)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Structured</title><item><title>Structured report</title>
+    <link>https://publisher.example/structured</link><guid>structured-1</guid>
+    <content:encoded><![CDATA[
+      <p>{first}</p>
+      <pre><code>flowchart TD task--&gt;result</code></pre>
+      <p>{second}</p>
+    ]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="structured",
+                publisher_id="publisher.example",
+                title="Structured",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                default_article_language="en",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].body == f"{first}\n\n{second}"
+    assert outcome.articles[0].language == "en"
+    assert "flowchart" not in outcome.articles[0].body
+
+
+@pytest.mark.acceptance
+def test_auto_route_rejects_a_feed_teaser_and_fetches_the_complete_page() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    teaser = " ".join(f"teaser-{index}" for index in range(100))
+    first = " ".join(f"complete-first-{index}" for index in range(80))
+    second = " ".join(f"complete-second-{index}" for index in range(80))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Auto</title><item><title>Complete report</title>
+    <link>REPLACE/article</link><guid>auto-1</guid>
+    <content:encoded><![CDATA[
+      <p>{teaser}</p>
+      <p><a href="REPLACE/article">Read full article</a></p>
+      <p><a href="REPLACE/article#comments">Comments</a></p>
+    ]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", b""),
+            "/article": (
+                200,
+                "text/html",
+                f"<html><body><article><p>{first}</p><p>{second}</p></article></body></html>".encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            feed.replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="auto",
+                publisher_id="publisher",
+                title="Auto",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.AUTO,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].classification == "verified_page_body"
+    assert outcome.articles[0].body == f"{first}\n\n{second}"
+    assert "Read full article" not in outcome.articles[0].body
+    assert "Comments" not in outcome.articles[0].body
+    assert site.hits == ["/robots.txt", "/feed.xml", "/article"]
+
+
+@pytest.mark.acceptance
 @pytest.mark.parametrize(
     ("mode", "publisher_link"),
     [

@@ -16,6 +16,10 @@ _Avoid_: Cache, config database
 A configured recurring news product with its own structure, selection rules, budgets, and delivery targets.
 _Avoid_: Digest configuration, family feed
 
+**Publication Language**:
+The language of Edition navigation, labels, and end matter. It does not translate publisher text or determine an Article Language.
+_Avoid_: Article Language, translation language
+
 **Edition**:
 One generated EPUB belonging to a Publication and identified by its publication time and Run ID.
 _Avoid_: Build, artifact, issue
@@ -52,9 +56,21 @@ _Avoid_: Feed section
 An origin from which article metadata or journalistic content is discovered, such as an RSS or Atom feed and its linked publisher pages.
 _Avoid_: Publisher
 
+**Source Default Article Language**:
+The BCP 47 language applied when a Source or its publisher item does not declare a more specific Article Language.
+_Avoid_: Publication Language, language detection
+
 **Article**:
 An attributed piece of journalism discovered from a Source. An Article is distinct from feed metadata and editorial annotations.
 _Avoid_: Feed item, story
+
+**Article Language**:
+The language of an Article’s publisher text, declared by its Source or publisher metadata and inherited by Article-specific Editorial Additions.
+_Avoid_: Publication language, detected user language
+
+**Publisher Link Brief**:
+A selected, attributed reading item whose Source permits a publisher route but not reproduction of Article text. It is part of the finite Edition, not an inventory of acquired feed items.
+_Avoid_: Article, Source list, dead link
 
 **Canonical Rendition**:
 The single complete rendering of an Article within an Edition, regardless of how many Sections consider it relevant.
@@ -172,6 +188,10 @@ _Avoid_: Log line, Publication Note
 Clearly labelled generated prose, such as an Article Summary, Revision Summary, or Main Section Overview, grounded in cited Articles and distinct from publisher journalism.
 _Avoid_: Article, journalism, objective summary
 
+**Editorial Boundary**:
+The visible and semantic start and end of an Editorial Addition, separating generated prose from publisher text without relying on colour.
+_Avoid_: Disclaimer paragraph, styling hint
+
 **Editorial Proposal**:
 A structured optional LLM response containing bounded ranking and clustering suggestions plus cited Editorial Additions. It has no authority until deterministic constraints and verification accept its parts.
 _Avoid_: Final selection, generated Edition
@@ -217,8 +237,8 @@ A size- and time-bounded private record of structured proposals, Verification Fi
 _Avoid_: Diagnostic Event, training dataset
 
 **Editorial Language**:
-The language used for an Editorial Addition, derived from its Article or Section unless explicitly configured.
-_Avoid_: Source language, translation policy
+The language used for an Editorial Addition. An Article-specific addition uses its Article Language; translation requires a separate explicit capability.
+_Avoid_: Publication language, implicit translation
 
 **Revision Summary**:
 An optional verified Editorial Addition that explains material differences between a Delivered Revision and a newer Content Revision, including why the Article appears again.

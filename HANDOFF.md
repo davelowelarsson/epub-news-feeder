@@ -2,8 +2,8 @@
 
 ## Status
 
-**Working local MVP implemented; upgraded reader experience and local verified-summary path passed
-automated and live acceptance on 2026-08-09. Human/device acceptance remains pending.**
+**Working local MVP implemented; the reader-feedback remediation passed automated and fresh local
+mixed-language acceptance on 2026-08-09. Human/device acceptance remains pending.**
 
 The repository has progressed through `/to-spec`, `/to-tickets`, and the automated local
 `/implement` slice. GitHub issue #16 is the authoritative specification; issues #17–#29 define
@@ -24,14 +24,18 @@ Source-specific processing rules while adding either.
   leaf minima, ancestor ceilings, cluster diversity, and one-body multi-Section placement.
 - Deterministic EPUB 3.3 with an Edition overview, article-level nested navigation, explicit
   author/date fallbacks, notes, corrections, Story hubs, reciprocal links, attribution, update
-  metadata, and a body-free colophon Run ID.
+  metadata, visible/semantic AI-versus-publisher boundaries, one AI-method endnote, and a body-free
+  colophon Run ID.
 - Metadata-only reports compete in the same finite selection budget and appear as attributed,
   navigable publisher-link briefs. Unselected acquisition inventory is never rendered or stored.
 - Digest-pinned EPUBCheck 5.3.0 gating, immutable private local delivery, and revalidated
   same-Run recovery from a private pending spool.
 - Body-free allowlisted JSONL diagnostics with private permissions and retention.
 - Optional local Ollama summaries using separate `gemma4:12b-mlx` editor and `gemma4:e4b-mlx`
-  verifier roles, strict cited schemas, one repair maximum, and deterministic omission on failure.
+  verifier roles, isolated per-Article calls, deterministic English/Swedish language checking,
+  strict cited schemas, one repair maximum, and deterministic omission on failure.
+- Feed HTML preserves paragraph boundaries, strips terminal publisher CTAs, omits raw Mermaid
+  source, and treats an Ars RSS “Read full article” teaser as discovery rather than full text.
 
 ## Reproduce locally
 
@@ -66,6 +70,10 @@ uv run pytest
 Private live evidence is recorded under ignored `.local/`; never commit Editions, state,
 detailed diagnostics, Run IDs, delivery identifiers, or digests.
 
+Latest acceptance: 6 complete Articles + 2 selected publisher-link briefs; 5 independently accepted
+summaries (2 Swedish, 3 English) and 1 safely omitted; exact and Calibre-round-tripped EPUBs both
+passed EPUBCheck 5.3.0 with zero warnings. See ignored `.local/MVP_ACCEPTANCE.md` for private details.
+
 An interrupted final delivery is resumed with the original `--run-id` and `--at`. The private
 spool sits beside the State Store under `pending-editions/` until State finalization succeeds.
 
@@ -76,7 +84,8 @@ spool sits beside the State Store under `pending-editions/` until State finaliza
 2. Add narrow Google user OAuth `drive.file` delivery into the preselected `Rakuten Kobo`
    folder. Reconcile by pre-generated file ID and Pending Delivery; Drive remains a target,
    never the State Store.
-3. Record a human Calibre visual review and physical Kobo Libra Colour acceptance for the exact
+3. Review the project-owned Edition-cover direction in issue #39, then record a human Calibre
+   visual review and physical Kobo Libra Colour acceptance for the exact
    private digest. Automated EPUBCheck and Calibre parsing already pass but do not replace those
    human/device checks.
 4. Complete the remaining editorial qualification: hard sentence/word/language ceilings,
@@ -88,6 +97,8 @@ spool sits beside the State Store under `pending-editions/` until State finaliza
 - Full Article bodies exist only in transient memory and private EPUB snapshots—not state,
   diagnostics, public logs, tests, or tracked artifacts.
 - Ekot stays metadata/link-only and never enters an LLM prompt.
+- Sveriges Radio API terms are the reason Ekot remains title/metadata/link-only; do not infer body
+  reproduction permission from a publicly readable web page.
 - David Lowe Larsson and Ars Technica remain local-only for LLM processing. SVT remote use needs
   explicit Publication opt-in plus a current compatible provider preflight.
 - Eligibility evidence is dated operational policy, not legal advice. Re-review it before expiry

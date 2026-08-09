@@ -47,6 +47,7 @@ class ArticleInput:
     body: str
     source_name: str
     canonical_url: str
+    language: str | None = None
     author: str | None = None
     published_at: str | None = None
     update_label: str | None = None
@@ -72,6 +73,7 @@ class LinkInput:
     title: str
     source_name: str
     canonical_url: str
+    language: str | None = None
     author: str | None = None
     published_at: str | None = None
 
@@ -193,6 +195,14 @@ def build_epub(edition: EditionInput) -> bytes:
         )
         for section in edition.sections
     )
+    if _has_editorial_summaries(edition):
+        members.append(
+            (
+                "OEBPS/about-ai-summaries.xhtml",
+                _about_ai_document(edition),
+                ZIP_DEFLATED,
+            )
+        )
     return _archive(members)
 
 
@@ -298,6 +308,14 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
             href="corrections.xhtml",
             attrib={"media-type": "application/xhtml+xml"},
         )
+    if _has_editorial_summaries(edition):
+        etree.SubElement(
+            manifest,
+            f"{{{_OPF_NS}}}item",
+            id="about-ai-summaries",
+            href="about-ai-summaries.xhtml",
+            attrib={"media-type": "application/xhtml+xml"},
+        )
     for section in edition.sections:
         path = section_paths[section.identifier]
         etree.SubElement(
@@ -315,6 +333,8 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="corrections")
     for section in edition.sections:
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref=_manifest_id(section.identifier))
+    if _has_editorial_summaries(edition):
+        etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="about-ai-summaries")
     return _serialize(package)
 
 
@@ -361,6 +381,10 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
     )
     sections = {section.identifier: section for section in edition.sections}
     _add_navigation_items(ordered, navigation, section_paths, sections)
+    if _has_editorial_summaries(edition):
+        item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
+        link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href="about-ai-summaries.xhtml")
+        link.text = _localized(edition.language, "about_ai")
     return _serialize(html)
 
 
@@ -435,6 +459,22 @@ def _notes_document(edition: EditionInput) -> bytes:
     for note in edition.notes:
         paragraph = etree.SubElement(main, f"{{{_XHTML_NS}}}p")
         paragraph.text = note
+    return _serialize(html)
+
+
+def _about_ai_document(edition: EditionInput) -> bytes:
+    html, body = _xhtml_document(_localized(edition.language, "about_ai"), edition.language)
+    body.set(f"{{{_EPUB_NS}}}type", "backmatter")
+    main = etree.SubElement(body, f"{{{_XHTML_NS}}}main")
+    section = etree.SubElement(
+        main,
+        f"{{{_XHTML_NS}}}section",
+        attrib={"aria-labelledby": "about-ai-heading"},
+    )
+    heading = etree.SubElement(section, f"{{{_XHTML_NS}}}h1", id="about-ai-heading")
+    heading.text = _localized(edition.language, "about_ai")
+    paragraph = etree.SubElement(section, f"{{{_XHTML_NS}}}p")
+    paragraph.text = _localized(edition.language, "ai_method")
     return _serialize(html)
 
 
@@ -535,6 +575,9 @@ def _add_article(
         f"{{{_XHTML_NS}}}article",
         id=_article_fragment(article.identifier),
     )
+    article_language = article.language or "und"
+    rendered.set("lang", article_language)
+    rendered.set(f"{{{_XML_NS}}}lang", article_language)
     title = etree.SubElement(rendered, f"{{{_XHTML_NS}}}h2")
     title.text = article.title
     if article.update_label:
@@ -548,22 +591,29 @@ def _add_article(
         author=article.author,
         source_name=article.source_name,
         published_at=article.published_at,
+        language=article_language,
     )
     if article.copyright_notice:
         copyright_element = etree.SubElement(
             metadata, f"{{{_XHTML_NS}}}p", attrib={"class": "copyright"}
         )
-        copyright_element.text = f"Rights: {article.copyright_notice}"
+        copyright_element.text = _localized(
+            article_language,
+            "rights_supplied",
+            source_name=article.copyright_notice,
+        )
     else:
         copyright_element = etree.SubElement(
             metadata, f"{{{_XHTML_NS}}}p", attrib={"class": "copyright"}
         )
-        copyright_element.text = "Rights: Copyright information not supplied; see publisher."
-    canonical = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
-    link = etree.SubElement(canonical, f"{{{_XHTML_NS}}}a", href=article.canonical_url)
-    link.text = "Read full article at publisher"
+        copyright_element.text = _localized(article_language, "rights_missing")
     if article.editorial_summary is not None:
-        _add_editorial_summary(rendered, article.editorial_summary)
+        _add_editorial_summary(
+            rendered,
+            article.editorial_summary,
+            article_language,
+            article.identifier,
+        )
     related = related_sections[article.identifier]
     if related:
         related_heading = etree.SubElement(rendered, f"{{{_XHTML_NS}}}h3")
@@ -578,23 +628,50 @@ def _add_article(
             )
             related_link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href=href)
             related_link.text = section_titles[section_id]
+    publisher_heading_id = f"publisher-content-{_token(article.identifier)}"
+    publisher = etree.SubElement(
+        rendered,
+        f"{{{_XHTML_NS}}}section",
+        attrib={
+            "class": "publisher-content",
+            "aria-labelledby": publisher_heading_id,
+            "lang": article_language,
+            f"{{{_XML_NS}}}lang": article_language,
+        },
+    )
+    publisher_heading = etree.SubElement(publisher, f"{{{_XHTML_NS}}}h3", id=publisher_heading_id)
+    publisher_heading.text = _localized(
+        article_language, "publisher_article", source_name=article.source_name
+    )
     for paragraph_text in article.body.split("\n\n"):
-        paragraph = etree.SubElement(rendered, f"{{{_XHTML_NS}}}p")
+        paragraph = etree.SubElement(publisher, f"{{{_XHTML_NS}}}p")
         paragraph.text = paragraph_text
+    canonical = etree.SubElement(publisher, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
+    link = etree.SubElement(canonical, f"{{{_XHTML_NS}}}a", href=article.canonical_url)
+    link.text = _localized(article_language, "read_at_publisher", source_name=article.source_name)
 
 
-def _add_editorial_summary(parent: etree._Element, summary: EditorialSummaryInput) -> None:
+def _add_editorial_summary(
+    parent: etree._Element,
+    summary: EditorialSummaryInput,
+    language: str,
+    article_identifier: str,
+) -> None:
+    heading_id = f"summary-{_token(article_identifier)}"
     aside = etree.SubElement(
         parent,
         f"{{{_XHTML_NS}}}aside",
-        attrib={"class": "editorial-summary", f"{{{_EPUB_NS}}}type": "annotation"},
+        attrib={
+            "class": "editorial-summary",
+            "role": "note",
+            "aria-labelledby": heading_id,
+            "lang": language,
+            f"{{{_XML_NS}}}lang": language,
+            f"{{{_EPUB_NS}}}type": "annotation",
+        },
     )
-    heading = etree.SubElement(aside, f"{{{_XHTML_NS}}}h3")
-    heading.text = "AI-generated summary"
-    disclosure = etree.SubElement(aside, f"{{{_XHTML_NS}}}p", attrib={"class": "disclosure"})
-    disclosure.text = (
-        "Generated from cited reporting and independently checked by a local verifier."
-    )
+    heading = etree.SubElement(aside, f"{{{_XHTML_NS}}}h3", id=heading_id)
+    heading.text = _localized(language, "ai_summary")
     for sentence in summary.sentences:
         paragraph = etree.SubElement(aside, f"{{{_XHTML_NS}}}p")
         paragraph.text = sentence.text
@@ -638,20 +715,36 @@ def _add_pointer(
 
 
 def _add_source_link(parent: etree._Element, source_link: LinkInput, fragment: str) -> None:
-    item = etree.SubElement(parent, f"{{{_XHTML_NS}}}li", id=fragment)
+    language = source_link.language or "und"
+    item = etree.SubElement(
+        parent,
+        f"{{{_XHTML_NS}}}li",
+        id=fragment,
+        lang=language,
+        attrib={f"{{{_XML_NS}}}lang": language},
+    )
     title = etree.SubElement(item, f"{{{_XHTML_NS}}}h3")
     title.text = source_link.title
     kind = etree.SubElement(item, f"{{{_XHTML_NS}}}p", attrib={"class": "item-kind"})
-    kind.text = "Publisher link; this Edition does not reproduce the article text."
+    kind.text = (
+        "Länk till publicisten; den här utgåvan återger inte artikeltexten."
+        if language.casefold().startswith("sv")
+        else "Publisher link; this Edition does not reproduce the article text."
+    )
     _add_publisher_metadata(
         item,
         author=source_link.author,
         source_name=source_link.source_name,
         published_at=source_link.published_at,
+        language=language,
     )
     route = etree.SubElement(item, f"{{{_XHTML_NS}}}p", attrib={"class": "canonical-link"})
     link = etree.SubElement(route, f"{{{_XHTML_NS}}}a", href=source_link.canonical_url)
-    link.text = "Read report at publisher"
+    link.text = (
+        f"Läs rapporten hos {source_link.source_name}"
+        if language.casefold().startswith("sv")
+        else "Read report at publisher"
+    )
 
 
 def _add_publisher_metadata(
@@ -660,13 +753,19 @@ def _add_publisher_metadata(
     author: str | None,
     source_name: str,
     published_at: str | None,
+    language: str,
 ) -> None:
+    swedish = language.casefold().startswith("sv")
     byline = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "byline"})
-    byline.text = f"By {author}" if author else "Byline: Not supplied by publisher"
+    byline.text = (
+        (f"Av {author}" if author else "Byline: Inte angiven av publicisten")
+        if swedish
+        else (f"By {author}" if author else "Byline: Not supplied by publisher")
+    )
     source = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "source"})
-    source.text = f"Source: {source_name}"
+    source.text = f"Källa: {source_name}" if swedish else f"Source: {source_name}"
     published = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "published"})
-    published.text = "Published by publisher: "
+    published.text = "Publicerad av publicisten: " if swedish else "Published by publisher: "
     if published_at:
         published_time = etree.SubElement(
             published,
@@ -675,7 +774,7 @@ def _add_publisher_metadata(
         )
         published_time.text = published_at
     else:
-        published.text += "Date not supplied"
+        published.text += "Datum saknas" if swedish else "Date not supplied"
 
 
 def _add_story_hub(
@@ -721,7 +820,45 @@ def _add_story_hub(
 
 
 def _serialize(element: etree._Element) -> bytes:
-    return etree.tostring(element, encoding="utf-8", xml_declaration=True, pretty_print=False)
+    return etree.tostring(element, encoding="utf-8", xml_declaration=True, pretty_print=True)
+
+
+def _has_editorial_summaries(edition: EditionInput) -> bool:
+    return any(
+        article.editorial_summary is not None
+        for section in edition.sections
+        for article in section.articles
+    )
+
+
+def _localized(language: str, key: str, *, source_name: str = "") -> str:
+    swedish = language.casefold().split("-", 1)[0] == "sv"
+    values = {
+        "about_ai": ("Om AI-sammanfattningar" if swedish else "About AI summaries"),
+        "ai_method": (
+            "AI-sammanfattningar skapas från citerad publicistisk text och granskas "
+            "oberoende av en lokal verifierare. Citatlänkarna visar vilket underlag som "
+            "användes för varje mening."
+            if swedish
+            else "AI summaries are generated from cited publisher reporting and independently "
+            "checked by a local verifier. Citation links identify the reporting used for each "
+            "sentence."
+        ),
+        "ai_summary": "AI-genererad sammanfattning" if swedish else "AI-generated summary",
+        "publisher_article": (
+            f"Artikel från {source_name}" if swedish else f"Article from {source_name}"
+        ),
+        "read_at_publisher": (
+            f"Läs hela artikeln hos {source_name}" if swedish else "Read full article at publisher"
+        ),
+        "rights_supplied": (f"Rättigheter: {source_name}" if swedish else f"Rights: {source_name}"),
+        "rights_missing": (
+            "Rättigheter: Upphovsrättsinformation saknas; se publicisten."
+            if swedish
+            else "Rights: Copyright information not supplied; see publisher."
+        ),
+    }
+    return values[key]
 
 
 def _section_path(identifier: str) -> PurePosixPath:
@@ -777,5 +914,9 @@ _STYLESHEET = (
     b".item-kind { font-weight: bold; }\n"
     b".section-pointer, .edition-notes { border-left: 0.2em solid; margin: 1em 0; "
     b"padding-left: 0.8em; }\n"
+    b".editorial-summary { border: 0.12em solid; margin: 1.25em 0; "
+    b"padding: 0.25em 0.85em 0.65em; }\n"
+    b".publisher-content { border-top: 0.08em solid; border-bottom: 0.08em solid; "
+    b"margin-top: 1.25em; padding: 0.35em 0 0.75em; }\n"
     b".colophon { border-top: 0.06em solid; margin-top: 3em; padding-top: 0.6em; }\n"
 )

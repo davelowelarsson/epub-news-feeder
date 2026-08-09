@@ -81,12 +81,14 @@ def test_ticket_12_diagnostics_allowlist_and_private_retention(tmp_path: Path) -
 
     diagnostics = Diagnostics(tmp_path, "20260809T060000Z-BBBBBBBB")
     diagnostics.emit("RUN_STARTED", phase="run", publication_id="daily")
+    diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=1, reason="provider_failure")
 
     with pytest.raises(ValueError, match="Diagnostic field is not allowlisted"):
         diagnostics.emit("UNSAFE", phase="run", body="private journalism")
 
     assert not old.exists()
     assert diagnostics.path.stat().st_mode & 0o077 == 0
+    assert "provider_failure" in diagnostics.path.read_text()
 
 
 @pytest.mark.security

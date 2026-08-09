@@ -92,10 +92,11 @@ def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
 def test_verified_editorial_summary_is_labeled_and_cited() -> None:
     article = replace(
         _edition().sections[0].articles[0],
+        language="sv",
         editorial_summary=EditorialSummaryInput(
             sentences=(
                 EditorialSentenceInput(
-                    text="The report describes a verified development.",
+                    text="Rapporten beskriver en verifierad utveckling.",
                     citations=(
                         EditorialCitationInput(
                             label="Example News",
@@ -108,20 +109,94 @@ def test_verified_editorial_summary_is_labeled_and_cited() -> None:
     )
     edition = replace(
         _edition(),
+        language="sv",
         sections=(replace(_edition().sections[0], articles=(article,)),),
     )
 
     with ZipFile(BytesIO(build_epub(edition))) as archive:
         section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
         section = etree.fromstring(archive.read(section_path))
+        about_ai = etree.fromstring(archive.read("OEBPS/about-ai-summaries.xhtml"))
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+        all_xhtml = b" ".join(
+            archive.read(path) for path in archive.namelist() if path.endswith(".xhtml")
+        )
 
     rendered = " ".join(text for text in section.itertext() if isinstance(text, str))
-    assert "AI-generated summary" in rendered
-    assert "independently checked by a local verifier" in rendered
-    assert "The report describes a verified development." in rendered
+    assert "AI-genererad sammanfattning" in rendered
+    assert "Artikel från Example News" in rendered
+    assert "Rättigheter: Upphovsrättsinformation saknas; se publicisten." in rendered
+    assert "Rapporten beskriver en verifierad utveckling." in rendered
+    assert "oberoende lokal verifierare" not in rendered
+    article_node = cast(list[etree._Element], section.xpath("//*[local-name()='article']"))[0]
+    summary_node = cast(
+        list[etree._Element], section.xpath("//*[contains(@class, 'editorial-summary')]")
+    )[0]
+    publisher_node = cast(
+        list[etree._Element], section.xpath("//*[contains(@class, 'publisher-content')]")
+    )[0]
+    assert article_node.get("lang") == "sv"
+    assert summary_node.get("lang") == "sv"
+    assert summary_node.get("role") == "note"
+    assert publisher_node.get("lang") == "sv"
     assert section.xpath(
         "//*[contains(@class, 'editorial-summary')]//*[local-name()='a']/@href"
     ) == ["https://example.test/articles/1"]
+    assert "Om AI-sammanfattningar" in " ".join(
+        text for text in about_ai.itertext() if isinstance(text, str)
+    )
+    assert all_xhtml.count(b"granskas oberoende") == 1
+    assert nav.xpath("//*[local-name()='a' and @href='about-ai-summaries.xhtml']")
+    spine_ids = cast(
+        list[str], package.xpath("//*[local-name()='spine']/*[local-name()='itemref']/@idref")
+    )
+    assert spine_ids[-1] == "about-ai-summaries"
+    assert b"Excerpt From" not in all_xhtml
+    assert b"This material may be protected by copyright" not in all_xhtml
+
+
+def test_mixed_language_articles_localize_each_summary_independently() -> None:
+    original = _edition().sections[0].articles[0]
+    swedish = replace(
+        original,
+        identifier="article-sv",
+        title="Svensk artikel",
+        language="sv",
+        editorial_summary=EditorialSummaryInput(
+            (EditorialSentenceInput("En svensk sammanfattning.", ()),)
+        ),
+    )
+    english = replace(
+        original,
+        identifier="article-en",
+        title="English article",
+        language="en",
+        editorial_summary=EditorialSummaryInput(
+            (EditorialSentenceInput("An English summary.", ()),)
+        ),
+    )
+    edition = replace(
+        _edition(),
+        language="sv",
+        sections=(replace(_edition().sections[0], articles=(swedish, english)),),
+    )
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+
+    summaries = cast(
+        list[etree._Element], section.xpath("//*[contains(@class, 'editorial-summary')]")
+    )
+    assert [summary.get("lang") for summary in summaries] == ["sv", "en"]
+    assert [
+        " ".join(" ".join(text for text in summary.itertext() if isinstance(text, str)).split())
+        for summary in summaries
+    ] == [
+        "AI-genererad sammanfattning En svensk sammanfattning.",
+        "AI-generated summary An English summary.",
+    ]
 
 
 def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path: Path) -> None:
@@ -131,7 +206,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "86b04e825f221324fa0641e73c6e489f9e49f881d100a574919072658d5a5730"
+    assert receipt.sha256 == "d7eab1be3e6d386dfbbef075e71727eb6e8706d308ac1a81ef295ccf5a974d9e"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -209,8 +284,8 @@ def test_ticket_09_ticket_11_epub_is_deterministic_with_notes_and_pointers() -> 
         technology_section_ids = cast(list[str], technology.xpath("//*[local-name()='h1']/@id"))
         technology_section_id = technology_section_ids[0]
         assert world.xpath("//*[local-name()='a']/@href") == [
-            "https://example.test/articles/1",
             f"{Path(technology_path).name}#{technology_section_id}",
+            "https://example.test/articles/1",
             f"#{article_id}",
             "https://other.example/earlier",
         ]
@@ -442,6 +517,32 @@ def test_metadata_only_item_shows_attribution_and_an_explicit_publisher_route() 
     )
     assert [link.get("href") for link in routes] == ["https://radio.example/news/developing-story"]
     assert not publisher_item.xpath(".//*[local-name()='article']")
+
+
+def test_swedish_metadata_only_item_localizes_reader_facing_labels() -> None:
+    link = LinkInput(
+        identifier="ekot-report",
+        title="En svensk rapport",
+        source_name="Sveriges Radio Ekot",
+        canonical_url="https://www.sverigesradio.se/artikel/example",
+        language="sv",
+        author="Ekot",
+        published_at="2026-08-09",
+    )
+    edition = replace(
+        _edition(),
+        sections=(replace(_edition().sections[0], articles=(), links=(link,)),),
+    )
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        rendered = archive.read(section_path).decode()
+
+    assert "Länk till publicisten; den här utgåvan återger inte artikeltexten." in rendered
+    assert "Av Ekot" in rendered
+    assert "Källa: Sveriges Radio Ekot" in rendered
+    assert "Publicerad av publicisten:" in rendered
+    assert "Läs rapporten hos Sveriges Radio Ekot" in rendered
 
 
 def test_missing_publisher_metadata_is_explicit_in_articles_and_link_briefs() -> None:

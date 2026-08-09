@@ -215,6 +215,7 @@ def _run(
                     feed_url=str(source.feed_url),
                     mode=AcquisitionMode(source.acquisition),
                     llm_processing=source.llm_processing,
+                    default_article_language=source.default_article_language,
                     allowed_publisher_origins=tuple(
                         str(origin) for origin in source.allowed_publisher_origins
                     ),
@@ -269,6 +270,7 @@ def _run(
                             title=acquired.title,
                             source_name=acquired.source_title,
                             canonical_url=acquired.canonical_url,
+                            language=acquired.language,
                             author=acquired.author,
                             published_at=(
                                 acquired.published_at.astimezone(UTC).date().isoformat()
@@ -303,6 +305,7 @@ def _run(
                         body=acquired.body,
                         source_name=acquired.source_title,
                         canonical_url=acquired.canonical_url,
+                        language=acquired.language,
                         author=acquired.author,
                         published_at=(
                             acquired.published_at.astimezone(UTC).date().isoformat()
@@ -919,11 +922,13 @@ def _apply_editorial(
         for article_id in selected_ids
         if isinstance((record := records[article_id]), _ArticleRecord)
         and _allows_local_editorial(configuration, record.source_id)
+        and record.article.language is not None
     ]
     if not eligible_records:
         diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=0)
         return
     max_tokens = editorial.cost_envelope.max_tokens if editorial.cost_envelope else 12000
+    max_calls = editorial.cost_envelope.max_calls if editorial.cost_envelope else 4
     body_character_budget = min(2000, max(1000, max_tokens * 4 // len(eligible_records)))
     evidence = tuple(
         ArticleEvidence(
@@ -932,23 +937,46 @@ def _apply_editorial(
             publisher=record.article.source_name,
             canonical_url=record.article.canonical_url,
             published_at=record.article.published_at or generated_at.date().isoformat(),
+            language=record.article.language or "und",
+            lead_passage=_lead_passage(record.article.body),
             body=record.article.body[:body_character_budget],
         )
         for record in eligible_records
     )
     try:
-        provider = OllamaStructuredProvider(host=editorial.ollama_host)
+        provider = OllamaStructuredProvider(host=editorial.ollama_host, timeout=300)
     except OllamaError:
         diagnostics.emit("EDITORIAL_OMITTED", phase="editorial", calls=0)
         return
-    result = generate_editorial(evidence, editorial.model_pair, provider)
+    results = []
+    reserved_calls = 0
+    budget_omissions = 0
+    for batch in _editorial_batches(evidence):
+        if reserved_calls + 4 > max_calls:
+            budget_omissions += 1
+            continue
+        reserved_calls += 4
+        results.append(generate_editorial(batch, editorial.model_pair, provider))
+    additions = [addition for result in results for addition in result.additions]
+    calls = sum(result.evidence.calls for result in results)
+    failure_codes = [
+        result.evidence.failure_code
+        for result in results
+        if result.evidence.failure_code is not None
+    ]
     diagnostics.emit(
-        "EDITORIAL_ACCEPTED" if result.evidence.status == "accepted" else "EDITORIAL_OMITTED",
+        "EDITORIAL_ACCEPTED" if additions else "EDITORIAL_OMITTED",
         phase="editorial",
-        calls=result.evidence.calls,
+        calls=calls,
+        omitted=len(failure_codes) + budget_omissions,
+        **(
+            {"reason": failure_codes[0] if failure_codes else "call_budget"}
+            if not additions and (failure_codes or budget_omissions)
+            else {}
+        ),
     )
     evidence_by_id = {item.article.identifier: item for item in eligible_records}
-    for addition in result.additions:
+    for addition in additions:
         target = records.get(addition.article_id)
         if not isinstance(target, _ArticleRecord):
             continue
@@ -976,6 +1004,16 @@ def _apply_editorial(
             )
 
 
+def _editorial_batches(
+    evidence: tuple[ArticleEvidence, ...],
+) -> tuple[tuple[ArticleEvidence, ...], ...]:
+    by_language: dict[str, list[ArticleEvidence]] = {}
+    for item in evidence:
+        language = item.language.casefold().split("-", 1)[0]
+        by_language.setdefault(language, []).append(item)
+    return tuple((item,) for language in sorted(by_language) for item in by_language[language])
+
+
 def _allows_local_editorial(configuration: Configuration, source_id: str) -> bool:
     source = configuration.sources[source_id]
     return (
@@ -983,6 +1021,12 @@ def _allows_local_editorial(configuration: Configuration, source_id: str) -> boo
         and source.eligibility is not None
         and source.eligibility.local_llm == "allow"
     )
+
+
+def _lead_passage(body: str) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", body.replace("\n", " "))
+    lead = " ".join(sentence.strip() for sentence in sentences[:2] if sentence.strip())
+    return " ".join(lead.split()[:100]) or body[:500]
 
 
 def _story_signals(title: str, categories: tuple[str, ...]) -> tuple[str, ...]:

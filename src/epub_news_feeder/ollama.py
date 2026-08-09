@@ -10,11 +10,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .editorial import StructuredProviderError
+
 if TYPE_CHECKING:
     from .editorial import StructuredCall
 
 
-class OllamaError(Exception):
+class OllamaError(StructuredProviderError):
     """Safe local provider failure."""
 
 

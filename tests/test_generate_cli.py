@@ -17,7 +17,39 @@ from epub_news_feeder import application
 from epub_news_feeder.application import RetryableGenerationError, generate_edition
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
-from epub_news_feeder.editorial import StructuredCall
+from epub_news_feeder.editorial import ArticleEvidence, StructuredCall
+
+
+def test_editorial_evidence_is_batched_by_article_language() -> None:
+    def evidence(article_id: str, language: str) -> ArticleEvidence:
+        return ArticleEvidence(
+            article_id=article_id,
+            title="Title",
+            publisher="Publisher",
+            canonical_url=f"https://example.test/{article_id}",
+            published_at="2026-08-09",
+            language=language,
+            lead_passage="Lead passage with enough context.",
+            body="Body text with enough context for a summary.",
+        )
+
+    batches = application._editorial_batches(
+        (
+            evidence("sv-1", "sv"),
+            evidence("en-1", "en"),
+            evidence("sv-2", "sv-SE"),
+            evidence("en-2", "en"),
+            evidence("en-3", "en"),
+        )
+    )
+
+    assert [[item.article_id for item in batch] for batch in batches] == [
+        ["en-1"],
+        ["en-2"],
+        ["en-3"],
+        ["sv-1"],
+        ["sv-2"],
+    ]
 
 
 class EditionFixtureHandler(BaseHTTPRequestHandler):
@@ -246,6 +278,7 @@ version: 1
 sources:
   full:
     title: Full Publisher
+    default_article_language: en
     publisher_id: publisher.example
     feed_url: http://127.0.0.1:{server.server_port}/full.xml
     acquisition: feed
@@ -390,6 +423,7 @@ version: 1
 sources:
   full:
     title: Full Publisher
+    default_article_language: en
     publisher_id: publisher.example
     feed_url: http://127.0.0.1:{server.server_port}/full.xml
     acquisition: feed
@@ -441,6 +475,7 @@ publications:
         def complete(self, call: StructuredCall) -> object:
             if call.role == "editorial":
                 articles = cast(list[dict[str, object]], call.input["articles"])
+                assert articles[0]["language"] == "en"
                 article_id = str(articles[0]["article_id"])
                 return {
                     "summaries": [

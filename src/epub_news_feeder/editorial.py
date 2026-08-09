@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from copy import deepcopy
 from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
@@ -17,8 +19,13 @@ __all__ = [
     "ModelPair",
     "StructuredCall",
     "StructuredProvider",
+    "StructuredProviderError",
     "generate_editorial",
 ]
+
+
+class StructuredProviderError(Exception):
+    """Provider transport or structured-response failure safe for classification."""
 
 
 class ArticleEvidence(StrictModel):
@@ -29,6 +36,8 @@ class ArticleEvidence(StrictModel):
     publisher: NonEmptyString
     canonical_url: NonEmptyString
     published_at: NonEmptyString
+    language: NonEmptyString
+    lead_passage: NonEmptyString
     body: NonEmptyString
 
 
@@ -81,6 +90,9 @@ class LLMEvidenceRecord(StrictModel):
     model_pair: ModelPair
     proposal_sha256: str | None = None
     findings: list[EvidenceFinding] = Field(default_factory=list)
+    failure_code: (
+        Literal["provider_failure", "invalid_model_output", "verification_rejected"] | None
+    ) = None
 
 
 class EditorialResult(StrictModel):
@@ -114,16 +126,23 @@ class StructuredProvider(Protocol):
 
 
 _EDITORIAL_SYSTEM_PROMPT = (
-    "Write short article summaries using only the supplied evidence. Return strict JSON. "
-    "Every sentence must cite one or more supplied article_id values. Do not use outside knowledge."
+    "Write short article summaries using only the supplied evidence. Write each summary in its "
+    "Article language; do not translate. Add useful orientation beyond the supplied lead_passage "
+    "and do not copy a complete publisher sentence. Omit a summary when no non-redundant value is "
+    "possible. Return strict JSON. Every sentence must cite one or more supplied article_id "
+    "values. Do not use outside knowledge."
 )
 _VERIFIER_SYSTEM_PROMPT = (
     "Independently classify every proposed sentence against only the supplied article evidence as "
-    "supported, unsupported, or uncertain. Return strict JSON and do not repair prose."
+    "supported, unsupported, or uncertain. A sentence is unsupported when it uses a language other "
+    "than that Article's language, copies a complete publisher sentence, or merely repeats the "
+    "lead without adding useful orientation. Return strict JSON and do not repair prose."
 )
 _REPAIR_SYSTEM_PROMPT = (
     "Repair only sentences classified unsupported or uncertain using only the supplied evidence. "
-    "Return the complete proposal as strict JSON with citations. Do not use outside knowledge."
+    "Use each Article's language, avoid complete publisher sentences, and add useful orientation "
+    "beyond its lead_passage. Return the complete proposal as strict JSON with citations. Do not "
+    "use outside knowledge."
 )
 
 
@@ -146,11 +165,12 @@ def generate_editorial(
             prompt_version=model_pair.editorial_prompt_version,
             system_prompt=_EDITORIAL_SYSTEM_PROMPT,
             input={"articles": [item.model_dump(mode="json") for item in evidence]},
-            response_schema=_EditorialProposal.model_json_schema(),
+            response_schema=_proposal_schema(evidence),
         )
         calls += 1
         proposal = _EditorialProposal.model_validate(provider.complete(proposal_call))
         _validate_citations(proposal, evidence)
+        _validate_summary_languages(proposal, evidence)
 
         verification_call = _verification_call(
             evidence=evidence, proposal=proposal, model_pair=model_pair
@@ -170,11 +190,12 @@ def generate_editorial(
                     "proposal": proposal.model_dump(mode="json"),
                     "findings": verification.model_dump(mode="json")["findings"],
                 },
-                response_schema=_EditorialProposal.model_json_schema(),
+                response_schema=_proposal_schema(evidence),
             )
             calls += 1
             proposal = _EditorialProposal.model_validate(provider.complete(repair_call))
             _validate_citations(proposal, evidence)
+            _validate_summary_languages(proposal, evidence)
 
             fresh_verification_call = _verification_call(
                 evidence=evidence, proposal=proposal, model_pair=model_pair
@@ -186,7 +207,12 @@ def generate_editorial(
             _validate_finding_coverage(proposal, verification)
             evidence_findings.extend(_evidence_findings(verification, verification_round=2))
             if any(finding.status != "supported" for finding in verification.findings):
-                return _empty_result(model_pair, calls, evidence_findings)
+                return _empty_result(
+                    model_pair,
+                    calls,
+                    evidence_findings,
+                    failure_code="verification_rejected",
+                )
 
         serialized = json.dumps(
             proposal.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
@@ -204,8 +230,25 @@ def generate_editorial(
                 findings=evidence_findings,
             ),
         )
+    except StructuredProviderError:
+        return _empty_result(model_pair, calls, evidence_findings, failure_code="provider_failure")
     except Exception:
-        return _empty_result(model_pair, calls, evidence_findings)
+        return _empty_result(
+            model_pair, calls, evidence_findings, failure_code="invalid_model_output"
+        )
+
+
+def _proposal_schema(evidence: tuple[ArticleEvidence, ...]) -> dict[str, object]:
+    schema = deepcopy(_EditorialProposal.model_json_schema())
+    article_ids = [item.article_id for item in evidence]
+    definitions = schema["$defs"]
+    assert isinstance(definitions, dict)
+    proposal = definitions["_ProposedSummary"]
+    sentence = definitions["CitedSentence"]
+    assert isinstance(proposal, dict) and isinstance(sentence, dict)
+    proposal["properties"]["article_id"]["enum"] = article_ids
+    sentence["properties"]["citations"]["items"]["enum"] = article_ids
+    return schema
 
 
 def _verification_call(
@@ -255,6 +298,81 @@ def _validate_citations(
                 raise ValueError("sentence citation references unavailable Article evidence")
 
 
+_LANGUAGE_MARKERS = {
+    "en": frozenset(
+        {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "by",
+            "for",
+            "from",
+            "has",
+            "in",
+            "is",
+            "of",
+            "on",
+            "that",
+            "the",
+            "this",
+            "to",
+            "was",
+            "were",
+            "which",
+            "will",
+            "with",
+        }
+    ),
+    "sv": frozenset(
+        {
+            "att",
+            "av",
+            "de",
+            "den",
+            "det",
+            "en",
+            "ett",
+            "för",
+            "från",
+            "har",
+            "i",
+            "inte",
+            "med",
+            "och",
+            "på",
+            "som",
+            "till",
+            "vilket",
+            "visar",
+            "är",
+        }
+    ),
+}
+
+
+def _validate_summary_languages(
+    proposal: _EditorialProposal, evidence: tuple[ArticleEvidence, ...]
+) -> None:
+    languages = {item.article_id: item.language.casefold().split("-", 1)[0] for item in evidence}
+    for summary in proposal.summaries:
+        expected = languages[summary.article_id]
+        if expected not in _LANGUAGE_MARKERS:
+            raise ValueError("summary language cannot be verified deterministically")
+        tokens = re.findall(
+            r"[^\W\d_]+", " ".join(sentence.text for sentence in summary.sentences).casefold()
+        )
+        scores = {
+            language: sum(token in markers for token in tokens)
+            for language, markers in _LANGUAGE_MARKERS.items()
+        }
+        competing = max(score for language, score in scores.items() if language != expected)
+        if scores[expected] == 0 or scores[expected] <= competing:
+            raise ValueError("summary does not match the Article language")
+
+
 def _validate_finding_coverage(
     proposal: _EditorialProposal, verification: _VerificationResponse
 ) -> None:
@@ -272,10 +390,16 @@ def _empty_result(
     model_pair: ModelPair,
     calls: int,
     findings: list[EvidenceFinding] | None = None,
+    failure_code: Literal["provider_failure", "invalid_model_output", "verification_rejected"]
+    | None = None,
 ) -> EditorialResult:
     return EditorialResult(
         additions=[],
         evidence=LLMEvidenceRecord(
-            status="omitted", calls=calls, model_pair=model_pair, findings=findings or []
+            status="omitted",
+            calls=calls,
+            model_pair=model_pair,
+            findings=findings or [],
+            failure_code=failure_code,
         ),
     )
