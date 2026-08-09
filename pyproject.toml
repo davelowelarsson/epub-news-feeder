@@ -53,3 +53,6 @@ python_version = "3.13"
 strict = true
 files = ["src", "tests"]
 
+[[tool.mypy.overrides]]
+module = ["feedparser"]
+ignore_missing_imports = true
