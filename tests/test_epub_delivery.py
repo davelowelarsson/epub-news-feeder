@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+from typing import cast
 from zipfile import ZIP_STORED, ZipFile
 
 import pytest
@@ -11,11 +12,17 @@ from lxml import etree
 from epub_news_feeder.delivery import deliver_local
 from epub_news_feeder.epub import (
     ArticleInput,
+    CorrectionInput,
     EditionInput,
+    NavigationInput,
+    PriorCoverageInput,
     SectionInput,
     SectionPointerInput,
+    StoryArticleLinkInput,
+    StoryHubInput,
     build_epub,
 )
+from epub_news_feeder.validation import validate_epub
 
 
 def _edition() -> EditionInput:
@@ -43,7 +50,7 @@ def _edition() -> EditionInput:
     )
 
 
-def test_build_epub_creates_a_readable_attributed_epub() -> None:
+def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
     epub_bytes = build_epub(_edition())
 
     with ZipFile(BytesIO(epub_bytes)) as archive:
@@ -78,7 +85,7 @@ def test_build_epub_creates_a_readable_attributed_epub() -> None:
         assert section.xpath("//*[local-name()='a']/@href") == ["https://example.test/articles/1"]
 
 
-def test_local_delivery_writes_and_acknowledges_the_verified_delivery_copy(tmp_path: Path) -> None:
+def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path: Path) -> None:
     epub_bytes = build_epub(_edition())
 
     receipt = deliver_local(epub_bytes, output_directory=tmp_path, filename="morning.epub")
@@ -90,12 +97,39 @@ def test_local_delivery_writes_and_acknowledges_the_verified_delivery_copy(tmp_p
     assert list(tmp_path.iterdir()) == [receipt.path]
 
 
-def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() -> None:
+@pytest.mark.property
+@pytest.mark.epubcheck
+def test_ticket_09_ticket_11_epub_is_deterministic_with_notes_and_pointers() -> None:
     edition = replace(
         _edition(),
         notes=("One Source was temporarily unavailable.",),
+        corrections=(
+            CorrectionInput(
+                "A complete report",
+                "Example News",
+                "https://example.test/articles/1",
+                "correction",
+                "2026-08-09",
+            ),
+        ),
         sections=(
-            _edition().sections[0],
+            replace(
+                _edition().sections[0],
+                story_hubs=(
+                    StoryHubInput(
+                        "harbor-story",
+                        (StoryArticleLinkInput("article-1", "A complete report", "Example News"),),
+                        (
+                            PriorCoverageInput(
+                                "Earlier report",
+                                "Other News",
+                                "https://other.example/earlier",
+                                "2026-08-01",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
             SectionInput(
                 identifier="technology",
                 title="Technology",
@@ -115,6 +149,7 @@ def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() ->
     second = build_epub(edition)
 
     assert first == second
+    validate_epub(first)
     with ZipFile(BytesIO(first)) as archive:
         world_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
         technology_path = next(
@@ -123,6 +158,7 @@ def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() ->
         world = etree.fromstring(archive.read(world_path))
         technology = etree.fromstring(archive.read(technology_path))
         notes = etree.fromstring(archive.read("OEBPS/edition-notes.xhtml"))
+        corrections = etree.fromstring(archive.read("OEBPS/corrections.xhtml"))
         article_ids = [
             identifier
             for element in world.iter("{http://www.w3.org/1999/xhtml}article")
@@ -131,11 +167,30 @@ def test_build_epub_is_deterministic_and_renders_notes_and_section_pointers() ->
         assert len(article_ids) == 1
         article_id = article_ids[0]
 
+        technology_section_ids = cast(list[str], technology.xpath("//*[local-name()='h1']/@id"))
+        technology_section_id = technology_section_ids[0]
+        assert world.xpath("//*[local-name()='a']/@href") == [
+            "https://example.test/articles/1",
+            f"{Path(technology_path).name}#{technology_section_id}",
+            f"#{article_id}",
+            "https://other.example/earlier",
+        ]
+        world_text = " ".join(text for text in world.itertext() if isinstance(text, str))
+        assert "Continuing coverage" in world_text
+        assert "Earlier report" in world_text
+        assert "old article body" not in world_text
+
         rendered = " ".join(text for text in technology.itertext() if isinstance(text, str))
         notes_text = " ".join(text for text in notes.itertext() if isinstance(text, str))
         assert "One Source was temporarily unavailable." in notes_text
+        corrections_text = " ".join(
+            text for text in corrections.itertext() if isinstance(text, str)
+        )
+        assert "Corrections and updates" in corrections_text
+        assert "Read the publisher correction" in corrections_text
         assert "A complete report" in rendered
         assert "Example News: Relevant technology coverage" in rendered
+        assert "Primary placement: World" in rendered
         assert technology.xpath("//*[local-name()='a']/@href") == [
             f"{Path(world_path).name}#{article_id}"
         ]
@@ -149,3 +204,29 @@ def test_local_delivery_never_overwrites_an_immutable_delivery_copy(tmp_path: Pa
         deliver_local(b"different bytes", output_directory=tmp_path, filename="morning.epub")
 
     assert receipt.path.read_bytes() == epub_bytes
+
+
+@pytest.mark.acceptance
+def test_ticket_11_navigation_preserves_nested_main_sections() -> None:
+    edition = replace(
+        _edition(),
+        navigation=(
+            NavigationInput(
+                "news",
+                "News",
+                children=(NavigationInput("world", "World"),),
+            ),
+        ),
+    )
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
+
+    labels = [text.strip() for text in nav.itertext() if isinstance(text, str) and text.strip()]
+    assert labels == ["Morning Briefing", "Contents", "News", "World"]
+    assert nav.xpath("//*[local-name()='span' and text()='News']")
+    nested_lists = cast(
+        list[etree._Element],
+        nav.xpath("//*[local-name()='span' and text()='News']/../*[local-name()='ol']"),
+    )
+    assert len(nested_lists) == 1

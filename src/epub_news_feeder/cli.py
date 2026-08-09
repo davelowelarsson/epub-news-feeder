@@ -106,21 +106,24 @@ def _generate(arguments: argparse.Namespace) -> int:
     except GenerationError as error:
         _report_failure(run_id, error.code, error.safe_message)
         return 3
+    except Exception:
+        _report_failure(run_id, "GENERATION_FAILED", "Edition generation failed")
+        return 3
     print(
         f"run_id={run_id} code=EDITION_DELIVERED articles={result.article_count} "
-        f"partial={str(result.partial).lower()} digest={result.receipt.sha256} "
-        f"path={result.receipt.path}"
+        f"partial={str(result.partial).lower()}"
     )
     return 0
 
 
 def _ollama_check(host: str, model: str) -> int:
+    run_id = create_run_id()
     try:
         check_ollama(host=host, model=model)
     except OllamaError as error:
-        print(f"code=OLLAMA_UNAVAILABLE message={error}", file=sys.stderr)
+        _report_failure(run_id, "OLLAMA_UNAVAILABLE", str(error))
         return 3
-    print(f"code=OLLAMA_READY model={model}")
+    print(f"run_id={run_id} code=OLLAMA_READY model={model}")
     return 0
 
 

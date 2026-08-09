@@ -1,80 +1,93 @@
-# EPUB News Feeder — Wayfinder to Specification Handoff
+# EPUB News Feeder — Implementation Handoff
 
-## Purpose
+## Status
 
-Start a fresh agent session at the end of planning, convert the settled Wayfinder map into an implementation specification, decompose that specification into executable tickets, then implement test-first.
+**Working local MVP implemented and automated acceptance verified on 2026-08-09; human/device
+release acceptance remains pending.**
 
-## Readiness
+The repository has progressed through `/to-spec`, `/to-tickets`, and the automated local
+`/implement` slice. GitHub issue #16 is the authoritative specification; issues #17–#29 define
+the implementation tickets. The next implementation session should start with private state and
+Google Drive delivery, then test the OpenAI adapter. Do not weaken the deterministic core or
+Source-specific processing rules while adding either.
 
-**Status: READY for `/to-spec`.** Map completed 2026-08-09.
+## Working local surface
 
-All readiness checks pass:
+- Locked CPython 3.13 `uv` project with installed `epub-news-feeder` CLI.
+- Strict version-1 YAML validation before network/state/delivery effects.
+- Dated, independent Source route gates; fail-closed robots/access/origin handling.
+- Configured full-text feed/page acquisition, metadata-only Ekot, bounded downloads, safe
+  degradation, fail-closed robots redirects, and connected-peer address validation.
+- Private SQLite identity, provenance, keyed fingerprints, revision/correction/cluster history,
+  writer lock, reservations, Pending Delivery, and acknowledged delivery lifecycle.
+- Coverage/Interest selection with Essential Coverage, configurable plurality, Discovery, Mutes,
+  leaf minima, ancestor ceilings, cluster diversity, and one-body multi-Section placement.
+- Deterministic EPUB 3.3 with nested navigation, notes, corrections, Story hubs, reciprocal links,
+  attribution, update metadata, and a body-free colophon Run ID.
+- Digest-pinned EPUBCheck 5.3.0 gating, immutable private local delivery, and revalidated
+  same-Run recovery from a private pending spool.
+- Body-free allowlisted JSONL diagnostics with private permissions and retention.
+- Local Ollama named-model and strict structured-JSON readiness probe.
 
-1. [Source acquisition and LLM processing eligibility](https://github.com/davelowelarsson/epub-news-feeder/issues/15) is resolved and closed.
-2. The [Wayfinder map](https://github.com/davelowelarsson/epub-news-feeder/issues/1) has 14 closed child decisions and no remaining in-scope fog.
-3. The handoff commit is pushed to `main`; the commands below verify synchronization before `/to-spec` begins.
-
-## Authoritative planning artifacts
-
-- [Wayfinder map](https://github.com/davelowelarsson/epub-news-feeder/issues/1) — index of every settled decision. Resolution details live in each linked ticket comment.
-- [Domain language](./CONTEXT.md) — canonical terminology; implementation details do not belong here.
-- [Initial discussion](./initial-discussion.md) — origin and examples only. When it conflicts with a later ticket resolution, the ticket wins.
-- [LLM editor prototype](https://github.com/davelowelarsson/epub-news-feeder/tree/prototype/issue-14-llm-editor) — throwaway primary-source artifact, not production code and not intended for merge.
-- [Source eligibility research](https://github.com/davelowelarsson/epub-news-feeder/blob/research/issue-15-source-eligibility/docs/research/0015-source-eligibility.md) — dated evidence and acceptance checks for acquisition, LLM processing, retention, and private distribution.
-- Research reports live on their linked `research/*` branches. Their ticket resolution comments are authoritative.
-
-## Non-negotiable route
-
-- Build a configurable, general-purpose, open-source Python application. Personal/family configuration is an instance of the product, not its domain model.
-- The deterministic core must ingest, select, deduplicate, package, validate, and deliver Editions without an agent framework or LLM.
-- Feed excerpts are discovery metadata, never a substitute for complete journalism. Use verified full feed content or extract the publisher page; omit failed Articles with minimal reader notes and private diagnostics.
-- Use strict versioned YAML, reusable Sources and Policy Presets, ordered nested Sections, inherited policies/Budgets, and pre-fetch validation.
-- Use private environment-isolated SQLite state, canonical Article identity, Content Revision hashes, per-Publication delivery history, reservations, and conservative deduplication/clustering.
-- Preserve complete attributed Articles. Never rewrite, merge, invent, or publicly distribute publisher journalism.
-- Generate a standards-first non-DRM EPUB 3.3 with a deterministic project-owned Python writer; gate with pinned EPUBCheck, inspect locally in Calibre, and physically accept on Kobo Libra Colour. KEPUB is optional and derived.
-- First remote delivery is an immutable EPUB in Google Drive's `Rakuten Kobo` folder using narrow user OAuth and an idempotent Pending Delivery. Google Drive is not the State Store.
-- Public repository and GitHub Actions workflows contain no private Editions, state, detailed diagnostics, credentials, or delivery identifiers. Public logs are allowlisted aggregates only.
-- One failed Source or optional LLM enhancement does not block an otherwise publishable Edition. Only the Publication minimum, EPUB validation, or failed required delivery blocks completion.
-- The early optional LLM editor uses strict structured proposals, separate pinned Editorial/Verifier Models, sentence citations, independent verification, at most one repair plus re-verification, bounded cost/privacy, measurable influence, and deterministic fallback.
-- Source eligibility is independently gated. David Lowe Larsson and Ars Technica default to local-only LLM processing; SVT remote processing requires explicit Publication opt-in and provider preflight; Ekot remains metadata/link-only and excluded from LLM processing. Unknown permission never becomes allow.
-
-## Specification sequence
-
-The fresh session should run:
-
-1. `/to-spec` using the Wayfinder map as the decision source and this file as the handoff.
-2. Review the generated specification against every closed map ticket; cite the ticket title/link beside each requirement or acceptance criterion.
-3. `/to-tickets` from the reviewed specification. Preserve dependency order and define testable acceptance commands per ticket.
-4. Implement with TDD (`red → green → refactor`) in vertical slices.
-
-Recommended delivery slices, without changing settled scope:
-
-1. **Local reality check:** config validation; real feed discovery/acquisition; Source health; identity/state; exact/content deduplication; deterministic selection/Budgets; EPUB construction; EPUBCheck and Calibre acceptance.
-2. **Private delivery:** reservations; diagnostics; scheduled public-repo workflow; external private state persistence; idempotent Google Drive handoff; Kobo physical acceptance.
-3. **Early optional LLM:** provider adapters; structured proposal/gate; evaluation and evidence; independently releasable editorial capabilities. The deterministic core remains complete without it.
-
-## Implementation safeguards
-
-- Start by selecting the Python toolchain and repository skeleton in the specification; do not infer code from the obsolete illustrative snippets in `initial-discussion.md`.
-- Pin runtime and validation dependencies. Pin third-party Actions by full commit SHA.
-- Do not merge throwaway prototype branches into `main`; port only decisions and independently implemented production logic.
-- Preserve unrelated local `.vscode/` and `prototypes/` files unless their owner explicitly scopes them into the work.
-- Never store full Article bodies in SQLite or diagnostics. Private EPUBs are the retained content snapshots.
-- Do not silently substitute Sources, Delivery Targets, Model Pairs, or relaxed constraints.
-- Reproduce GitHub Actions failures locally using Run ID correlation before fixing them.
-
-## Verification before starting `/to-spec`
+## Reproduce locally
 
 ```bash
-git status --short
-git diff --check
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-gh issue view 1 --json state,body,url
-gh issue list --state open --label 'wayfinder:research' --json number,title,state,assignees,url
+uv sync --frozen --all-groups
+uv run epub-news-feeder validate --config examples/reality-check.yaml
+mkdir -p .local/editions
+uv run epub-news-feeder generate \
+  --config examples/reality-check.yaml \
+  --state .local/state.sqlite3 \
+  --output .local/editions \
+  --diagnostics .local/diagnostics
+uv run epub-news-feeder ollama-check --model qwen3.5:27b
 ```
 
-Expected tracked worktree: clean. Existing untracked `.vscode/` and `prototypes/` are user-owned and intentionally untouched.
+The default local EPUBCheck path is
+`.local/tools/epubcheck-5.3.0/epubcheck.jar`; `EPUBCHECK_JAR` may point to the exact reviewed
+binary. Preserve the state database and its adjacent `.key` file together. Losing the key
+removes comparability of privacy-preserving revision fingerprints.
 
-## Fresh-session prompt
+Quality gate:
 
-> Read `AGENTS.md` instructions supplied by the user, then read `HANDOFF.md` and `CONTEXT.md`. Verify the Wayfinder readiness checks and load the map plus every linked resolution comment. Run `/to-spec` without reopening settled decisions. After the specification is verified against the map, run `/to-tickets`, then begin TDD implementation in dependency order. Preserve the deterministic no-LLM core and treat optional LLM capabilities as the final early slice.
+```bash
+uv sync --frozen --all-groups
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy
+uv run pytest
+```
+
+Private live evidence is recorded under ignored `.local/`; never commit Editions, state,
+detailed diagnostics, Run IDs, delivery identifiers, or digests.
+
+An interrupted final delivery is resumed with the original `--run-id` and `--at`. The private
+spool sits beside the State Store under `pending-editions/` until State finalization succeeds.
+
+## Next implementation session
+
+1. Add external private state persistence and lease/conditional-generation semantics. Store and
+   restore the SQLite database plus fingerprint key as one integrity-checked private unit.
+2. Add narrow Google user OAuth `drive.file` delivery into the preselected `Rakuten Kobo`
+   folder. Reconcile by pre-generated file ID and Pending Delivery; Drive remains a target,
+   never the State Store.
+3. Record a human Calibre visual review and physical Kobo Libra Colour acceptance for the exact
+   private digest. Automated EPUBCheck and Calibre parsing already pass but do not replace those
+   human/device checks.
+4. Implement provider-neutral optional editorial proposals. Exercise local Ollama first, then
+   OpenAI Responses with `store: false`, no tools, exact Model Pair, cost/privacy preflight,
+   independent verification, and deterministic fallback.
+
+## Safeguards
+
+- Full Article bodies exist only in transient memory and private EPUB snapshots—not state,
+  diagnostics, public logs, tests, or tracked artifacts.
+- Ekot stays metadata/link-only and never enters an LLM prompt.
+- David Lowe Larsson and Ars Technica remain local-only for LLM processing. SVT remote use needs
+  explicit Publication opt-in plus a current compatible provider preflight.
+- Eligibility evidence is dated operational policy, not legal advice. Re-review it before expiry
+  or any changed terms, robots signal, origin, model, provider, audience, or use.
+- Full-body eligibility is an explicit Source-route assertion plus conservative size/word gates;
+  it does not infer publisher completeness. Re-review each route when its format changes.
+- Preserve user-owned `.vscode/` and `prototypes/` files.
+- Google Drive/OpenAI/Kobo work is not part of the completed local delivery path.

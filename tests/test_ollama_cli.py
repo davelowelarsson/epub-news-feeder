@@ -9,6 +9,8 @@ import pytest
 
 
 class OllamaFixtureHandler(BaseHTTPRequestHandler):
+    malformed = False
+
     def do_GET(self) -> None:
         if self.path != "/api/tags":
             self.send_error(404)
@@ -31,7 +33,10 @@ class OllamaFixtureHandler(BaseHTTPRequestHandler):
             "required": ["status"],
             "additionalProperties": False,
         }
-        self._reply({"message": {"role": "assistant", "content": '{"status":"ok"}'}})
+        if type(self).malformed:
+            self._reply({"message": []})
+        else:
+            self._reply({"message": {"role": "assistant", "content": '{"status":"ok"}'}})
 
     def _reply(self, value: object) -> None:
         payload = json.dumps(value).encode()
@@ -47,6 +52,7 @@ class OllamaFixtureHandler(BaseHTTPRequestHandler):
 
 @pytest.mark.contract
 def test_ollama_check_requires_named_model_and_valid_structured_output() -> None:
+    OllamaFixtureHandler.malformed = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), OllamaFixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -70,6 +76,38 @@ def test_ollama_check_requires_named_model_and_valid_structured_output() -> None
         server.server_close()
 
     assert result.returncode == 0, result.stderr
+    assert "run_id=" in result.stdout
     assert "code=OLLAMA_READY" in result.stdout
     assert "model=fixture-editor:latest" in result.stdout
     assert result.stderr == ""
+
+
+@pytest.mark.security
+def test_ollama_check_sanitizes_malformed_provider_output() -> None:
+    OllamaFixtureHandler.malformed = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), OllamaFixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = subprocess.run(
+            [
+                "epub-news-feeder",
+                "ollama-check",
+                "--host",
+                f"http://127.0.0.1:{server.server_port}",
+                "--model",
+                "fixture-editor:latest",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert result.returncode == 3
+    assert "run_id=" in result.stderr
+    assert "code=OLLAMA_UNAVAILABLE" in result.stderr
+    assert "Traceback" not in result.stderr

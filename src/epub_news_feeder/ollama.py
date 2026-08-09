@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import httpx
@@ -23,6 +24,8 @@ _READY_SCHEMA: dict[str, Any] = {
 def check_ollama(*, host: str, model: str, timeout: float = 120) -> None:
     """Prove the named model exists and obeys a minimal strict JSON contract."""
 
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:+\-]{0,127}", model) is None:
+        raise OllamaError("Ollama model identifier is invalid")
     try:
         with httpx.Client(base_url=host.rstrip("/"), timeout=timeout) as client:
             tags = client.get("/api/tags")
@@ -51,10 +54,12 @@ def check_ollama(*, host: str, model: str, timeout: float = 120) -> None:
             )
             response.raise_for_status()
             result = response.json()
-            content = result.get("message", {}).get("content")
+            if not isinstance(result, dict) or not isinstance(result.get("message"), dict):
+                raise OllamaError("Ollama returned invalid structured output")
+            content = result["message"].get("content")
             if not isinstance(content, str) or json.loads(content) != {"status": "ok"}:
                 raise OllamaError("Ollama returned invalid structured output")
     except OllamaError:
         raise
-    except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError) as error:
+    except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError, AttributeError) as error:
         raise OllamaError("Ollama readiness check failed") from error

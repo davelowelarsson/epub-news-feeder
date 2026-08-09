@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import math
 import re
+import sqlite3
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder.acquisition import (
@@ -18,14 +21,18 @@ from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
 from epub_news_feeder.epub import (
     ArticleInput,
+    CorrectionInput,
     EditionInput,
     LinkInput,
+    NavigationInput,
+    PriorCoverageInput,
     SectionInput,
     SectionPointerInput,
+    StoryArticleLinkInput,
+    StoryHubInput,
     build_epub,
 )
 from epub_news_feeder.models import (
-    Budget,
     Configuration,
     MatchRule,
     PolicyPreset,
@@ -33,6 +40,7 @@ from epub_news_feeder.models import (
     Section,
 )
 from epub_news_feeder.selection import (
+    AncestorBudget,
     Candidate,
     Policy,
     PublicationRequest,
@@ -52,6 +60,10 @@ class GenerationError(Exception):
         super().__init__(safe_message)
 
 
+class RetryableGenerationError(GenerationError):
+    """A validated immutable Edition remains pending and must not be abandoned."""
+
+
 @dataclass(frozen=True, slots=True)
 class GenerationResult:
     receipt: DeliveryReceipt
@@ -65,14 +77,17 @@ class _ArticleRecord:
     observation: ArticleObservation
     categories: tuple[str, ...]
     published_at: datetime
+    publisher_published_at: datetime | None
     source_id: str
+    publisher_id: str
+    cluster_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class _Leaf:
     section: Section
     policy_id: str | None
-    budget: Budget | None
+    ancestor_budgets: tuple[AncestorBudget, ...]
 
 
 def generate_edition(
@@ -110,13 +125,20 @@ def generate_edition(
                 output_directory,
                 epubcheck_jar,
             )
+        except RetryableGenerationError as error:
+            with suppress(OSError):
+                diagnostics.emit(error.code, phase="run", outcome="pending")
+            raise
         except GenerationError as error:
             state.abandon_run(run_id, reason=error.code)
-            diagnostics.emit(error.code, phase="run", outcome="failed")
+            with suppress(OSError):
+                diagnostics.emit(error.code, phase="run", outcome="failed")
             raise
         except Exception as error:
-            state.abandon_run(run_id, reason="GENERATION_FAILED")
-            diagnostics.emit("GENERATION_FAILED", phase="run", outcome="failed")
+            with suppress(Exception):
+                state.abandon_run(run_id, reason="GENERATION_FAILED")
+            with suppress(OSError):
+                diagnostics.emit("GENERATION_FAILED", phase="run", outcome="failed")
             raise GenerationError("GENERATION_FAILED", "Edition generation failed") from error
 
 
@@ -132,11 +154,23 @@ def _run(
     epubcheck_jar: Path | None,
 ) -> GenerationResult:
     leaves = tuple(_leaves(publication.sections))
+    resumed = _resume_spooled_delivery(
+        state,
+        diagnostics,
+        publication,
+        run_id,
+        generated_at,
+        output_directory,
+        epubcheck_jar,
+    )
+    if resumed is not None:
+        return resumed
     source_ids = tuple(dict.fromkeys(source for leaf in leaves for source in leaf.section.sources))
     records: dict[str, _ArticleRecord] = {}
     source_records: dict[str, list[str]] = {source_id: [] for source_id in source_ids}
     source_links: dict[str, list[LinkInput]] = {source_id: [] for source_id in source_ids}
     notes: list[str] = []
+    degraded_source_ids: set[str] = set()
 
     client = SourceClient(now=lambda: generated_at)
     try:
@@ -149,6 +183,7 @@ def _run(
                 )
                 diagnostics.emit(code, phase="acquisition", source_id=source_id)
                 notes.append(f"{source.title} was omitted because eligibility evidence is missing.")
+                degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
             outcome = client.acquire(
@@ -159,6 +194,9 @@ def _run(
                     feed_url=str(source.feed_url),
                     mode=AcquisitionMode(source.acquisition),
                     llm_processing=source.llm_processing,
+                    allowed_publisher_origins=tuple(
+                        str(origin) for origin in source.allowed_publisher_origins
+                    ),
                     evidence=EligibilityEvidence(
                         evidence_id=evidence.evidence_id,
                         reviewed_at=datetime.combine(
@@ -192,7 +230,10 @@ def _run(
                 omitted=outcome.omitted,
             )
             if outcome.code != "SOURCE_OK":
-                notes.append(f"{source.title} was partially available or omitted ({outcome.code}).")
+                degraded_source_ids.add(source_id)
+                notes.append(
+                    f"Some reporting from {source.title} was unavailable for this Edition."
+                )
             for acquired in outcome.articles:
                 if acquired.body is None:
                     source_links[source_id].append(
@@ -209,6 +250,7 @@ def _run(
                     normalized_body=acquired.body,
                     observed_at=generated_at,
                     publication_id=publication.id,
+                    run_id=run_id,
                 )
                 if not observation.eligible:
                     continue
@@ -220,18 +262,38 @@ def _run(
                         source_name=acquired.source_title,
                         canonical_url=acquired.canonical_url,
                         author=acquired.author,
+                        published_at=(
+                            acquired.published_at.astimezone(UTC).date().isoformat()
+                            if acquired.published_at is not None
+                            else None
+                        ),
+                        update_label=(
+                            "Updated since your previous Edition"
+                            if observation.materially_changed
+                            else None
+                        ),
+                        copyright_notice=source.copyright_notice,
                     ),
                     observation=observation,
                     categories=acquired.categories,
                     published_at=acquired.published_at or generated_at,
+                    publisher_published_at=acquired.published_at,
                     source_id=source_id,
+                    publisher_id=acquired.publisher_id,
+                    cluster_id=state.match_story_cluster(
+                        observation.article_id,
+                        signals=_story_signals(acquired.title, acquired.categories),
+                        observed_at=generated_at,
+                    ),
                 )
-                records[observation.article_id] = record
+                records.setdefault(observation.article_id, record)
                 source_records[source_id].append(observation.article_id)
     finally:
         client.close()
 
-    request = _selection_request(publication, leaves, configuration, records, source_records)
+    request = _selection_request(
+        publication, leaves, configuration, records, source_records, generated_at
+    )
     selection = select_publication(request)
     for warning in selection.warnings:
         diagnostics.emit(warning, phase="selection")
@@ -248,6 +310,43 @@ def _run(
         )
 
     placements = place_articles(selection)
+    cluster_articles: dict[str, list[str]] = {}
+    for article_id in selection.unique_article_ids:
+        cluster_id = records[article_id].cluster_id
+        if cluster_id is not None:
+            cluster_articles.setdefault(cluster_id, []).append(article_id)
+    hubs_by_section: dict[str, list[StoryHubInput]] = {}
+    for cluster_id, article_ids in cluster_articles.items():
+        prior = [
+            coverage
+            for coverage in state.prior_cluster_coverage(publication.id, cluster_id, limit=10)
+            if coverage.article_id not in article_ids
+        ][:3]
+        if len(article_ids) < 2 and not prior:
+            continue
+        host_section = placements[article_ids[0]].primary_section_id
+        hubs_by_section.setdefault(host_section, []).append(
+            StoryHubInput(
+                cluster_id,
+                tuple(
+                    StoryArticleLinkInput(
+                        article_id,
+                        records[article_id].article.title,
+                        records[article_id].article.source_name,
+                    )
+                    for article_id in article_ids
+                ),
+                tuple(
+                    PriorCoverageInput(
+                        coverage.title,
+                        _publisher_title(configuration, coverage.publisher_id),
+                        coverage.canonical_url,
+                        coverage.publisher_published_at.astimezone(UTC).date().isoformat(),
+                    )
+                    for coverage in prior
+                ),
+            )
+        )
     sections: list[SectionInput] = []
     for leaf in leaves:
         section_id = leaf.section.id
@@ -266,10 +365,26 @@ def _run(
             for article_id, placement in placements.items()
             if section_id in placement.pointer_section_ids
         )
-        links = tuple(
+        all_links = tuple(
             link for source_id in leaf.section.sources for link in source_links[source_id]
         )
-        sections.append(SectionInput(section_id, leaf.section.title, primary, pointers, links))
+        link_limit = publication.budget.max_articles if publication.budget else None
+        link_limit = link_limit or min(18, max(6, 3 * len(publication.sections)))
+        links_by_url = {link.canonical_url: link for link in all_links}
+        links = tuple(links_by_url.values())[:link_limit]
+        sections.append(
+            SectionInput(
+                identifier=section_id,
+                title=leaf.section.title,
+                articles=primary,
+                pointers=pointers,
+                links=links,
+                has_edition_note=any(
+                    source_id in degraded_source_ids for source_id in leaf.section.sources
+                ),
+                story_hubs=tuple(hubs_by_section.get(section_id, ())),
+            )
+        )
 
     edition = EditionInput(
         title=publication.title,
@@ -277,7 +392,18 @@ def _run(
         language=publication.language,
         run_id=run_id,
         sections=tuple(sections),
+        navigation=_navigation(publication.sections),
         notes=tuple(notes),
+        corrections=tuple(
+            CorrectionInput(
+                correction.title,
+                _publisher_title(configuration, correction.publisher_id),
+                correction.canonical_url,
+                correction.kind,
+                correction.signaled_at.astimezone(UTC).date().isoformat(),
+            )
+            for correction in state.pending_corrections(publication.id)
+        ),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
     epub_bytes = build_epub(edition)
@@ -295,22 +421,182 @@ def _run(
         expires_at=generated_at + timedelta(hours=24),
     )
     output_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.chmod(0o700)
     filename = f"epub-news--{generated_at.strftime('%Y-%m-%dT%H%M%SZ')}--{run_id}.epub"
+    spool_directory = state.path.parent / "pending-editions"
+    spool_directory.mkdir(parents=True, exist_ok=True)
+    spool_directory.chmod(0o700)
+    spool_receipt = deliver_local(
+        epub_bytes, output_directory=spool_directory, filename=f"{run_id}.epub"
+    )
+    state.prepare_delivery(
+        run_id=run_id,
+        publication_id=publication.id,
+        delivery_target=str(output_directory / filename),
+        delivery_digest=spool_receipt.sha256,
+        prepared_at=generated_at,
+    )
+    try:
+        receipt = deliver_local(
+            spool_receipt.path.read_bytes(),
+            output_directory=output_directory,
+            filename=filename,
+        )
+    except (OSError, ValueError) as error:
+        raise RetryableGenerationError(
+            "LOCAL_DELIVERY_PENDING", "Validated local Delivery remains pending"
+        ) from error
+    try:
+        state.finalize_delivery(
+            run_id, publication.id, delivered_at=generated_at, delivery_digest=receipt.sha256
+        )
+    except (OSError, RuntimeError) as error:
+        raise RetryableGenerationError(
+            "DELIVERY_FINALIZATION_PENDING", "Delivered copy awaits State finalization"
+        ) from error
+    with suppress(sqlite3.Error):
+        state.acknowledge_corrections(
+            publication.id,
+            (correction.signal_id for correction in state.pending_corrections(publication.id)),
+            delivered_at=generated_at,
+        )
+        for article_id in selection.unique_article_ids:
+            record = records[article_id]
+            if record.cluster_id is None or record.publisher_published_at is None:
+                continue
+            state.record_cluster_delivery(
+                publication_id=publication.id,
+                cluster_id=record.cluster_id,
+                article_id=article_id,
+                title=record.article.title,
+                publisher_id=record.publisher_id,
+                canonical_url=record.article.canonical_url,
+                publisher_published_at=record.publisher_published_at,
+                delivered_at=generated_at,
+            )
+    with suppress(OSError):
+        diagnostics.emit(
+            "EDITION_DELIVERED",
+            phase="delivery",
+            articles=len(selection.unique_article_ids),
+            partial=selection.partial,
+            digest=receipt.sha256,
+        )
+    spool_receipt.path.unlink(missing_ok=True)
+    return GenerationResult(receipt, len(selection.unique_article_ids), selection.partial)
+
+
+def _resume_spooled_delivery(
+    state: StateStore,
+    diagnostics: Diagnostics,
+    publication: Publication,
+    run_id: str,
+    generated_at: datetime,
+    output_directory: Path,
+    epubcheck_jar: Path | None,
+) -> GenerationResult | None:
+    pending = state.pending_deliveries(publication.id)
+    current = next((delivery for delivery in pending if delivery.run_id == run_id), None)
+    spool_path = state.path.parent / "pending-editions" / f"{run_id}.epub"
+    filename = f"epub-news--{generated_at.strftime('%Y-%m-%dT%H%M%SZ')}--{run_id}.epub"
+    target = output_directory / filename
+    status, delivered_digest = state.run_delivery_status(run_id)
+    if status == "delivered":
+        if delivered_digest is None or not target.is_file():
+            raise GenerationError(
+                "DELIVERED_COPY_MISSING", "Delivered State cannot reconcile its local copy"
+            )
+        receipt = deliver_local(
+            target.read_bytes(), output_directory=output_directory, filename=filename
+        )
+        if receipt.sha256 != delivered_digest:
+            raise GenerationError(
+                "DELIVERED_COPY_MISMATCH", "Delivered local copy is not immutable"
+            )
+        spool_path.unlink(missing_ok=True)
+        article_count = state.delivered_article_count(run_id)
+        _, publication_maximum = _publication_limits(publication)
+        return GenerationResult(receipt, article_count, article_count < publication_maximum)
+    if current is None and not spool_path.is_file():
+        if pending:
+            raise GenerationError(
+                "EARLIER_DELIVERY_PENDING", "An earlier validated Delivery must be resumed"
+            )
+        if status == "validated":
+            raise GenerationError(
+                "VALIDATED_ARTIFACT_MISSING",
+                "Validated reservations have no immutable Delivery artifact",
+            )
+        return None
+    if current is not None and Path(current.delivery_target) != target:
+        raise GenerationError("DELIVERY_TARGET_MISMATCH", "Delivery Target is immutable")
+    if not spool_path.is_file() and current is not None and target.is_file():
+        target_bytes = target.read_bytes()
+        if sha256(target_bytes).hexdigest() == current.delivery_digest:
+            receipt = deliver_local(
+                target_bytes, output_directory=output_directory, filename=filename
+            )
+            state.finalize_delivery(
+                run_id,
+                publication.id,
+                delivered_at=generated_at,
+                delivery_digest=receipt.sha256,
+            )
+            article_count = state.delivered_article_count(run_id)
+            _, publication_maximum = _publication_limits(publication)
+            return GenerationResult(receipt, article_count, article_count < publication_maximum)
+    if not spool_path.is_file():
+        raise GenerationError(
+            "DELIVERY_SPOOL_MISSING", "Validated Delivery artifact is unavailable"
+        )
+    epub_bytes = spool_path.read_bytes()
+    digest = sha256(epub_bytes).hexdigest()
+    try:
+        validate_epub(epub_bytes, jar_path=epubcheck_jar)
+    except EpubValidationError as error:
+        raise RetryableGenerationError(
+            "DELIVERY_SPOOL_INVALID", "Validated Delivery spool failed revalidation"
+        ) from error
+    if current is not None and (
+        current.delivery_digest != digest or Path(current.delivery_target) != target
+    ):
+        raise RetryableGenerationError(
+            "DELIVERY_SPOOL_MISMATCH", "Validated Delivery spool is immutable"
+        )
+    if current is None:
+        state.prepare_delivery(
+            run_id=run_id,
+            publication_id=publication.id,
+            delivery_target=str(target),
+            delivery_digest=digest,
+            prepared_at=generated_at,
+        )
+    output_directory.mkdir(parents=True, exist_ok=True)
+    output_directory.chmod(0o700)
     try:
         receipt = deliver_local(epub_bytes, output_directory=output_directory, filename=filename)
-    except (OSError, ValueError) as error:
-        raise GenerationError("LOCAL_DELIVERY_FAILED", "Local Delivery failed") from error
-    state.finalize_delivery(
-        run_id, publication.id, delivered_at=generated_at, delivery_digest=receipt.sha256
-    )
-    diagnostics.emit(
-        "EDITION_DELIVERED",
-        phase="delivery",
-        articles=len(selection.unique_article_ids),
-        partial=selection.partial,
-        digest=receipt.sha256,
-    )
-    return GenerationResult(receipt, len(selection.unique_article_ids), selection.partial)
+        state.finalize_delivery(
+            run_id, publication.id, delivered_at=generated_at, delivery_digest=digest
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise RetryableGenerationError(
+            "DELIVERY_FINALIZATION_PENDING", "Delivered copy awaits State finalization"
+        ) from error
+    article_count = len(state.active_reservations(publication.id, as_of=generated_at))
+    # Reservations are cleared by finalization; recover the delivered count from state.
+    if article_count == 0:
+        article_count = state.delivered_article_count(run_id)
+    _, publication_maximum = _publication_limits(publication)
+    with suppress(OSError):
+        diagnostics.emit(
+            "EDITION_DELIVERED",
+            phase="delivery",
+            articles=article_count,
+            partial=article_count < publication_maximum,
+            digest=receipt.sha256,
+        )
+    spool_path.unlink(missing_ok=True)
+    return GenerationResult(receipt, article_count, article_count < publication_maximum)
 
 
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
@@ -324,18 +610,39 @@ def _publication(configuration: Configuration, publication_id: str | None) -> Pu
     raise GenerationError("PUBLICATION_NOT_FOUND", "Requested publication is not configured")
 
 
+def _publisher_title(configuration: Configuration, publisher_id: str) -> str:
+    for source_id, source in configuration.sources.items():
+        if (source.publisher_id or source_id) == publisher_id:
+            return source.title
+    return publisher_id
+
+
 def _leaves(
-    sections: list[Section], policy_id: str | None = None, budget: Budget | None = None
+    sections: list[Section],
+    policy_id: str | None = None,
+    ancestor_budgets: tuple[AncestorBudget, ...] = (),
 ) -> list[_Leaf]:
     leaves: list[_Leaf] = []
     for section in sections:
         inherited_policy = section.policy or policy_id
-        inherited_budget = section.budget or budget
         if section.sections:
-            leaves.extend(_leaves(section.sections, inherited_policy, inherited_budget))
+            child_ancestors = ancestor_budgets
+            if section.budget is not None and section.budget.max_articles is not None:
+                child_ancestors = (
+                    *ancestor_budgets,
+                    AncestorBudget(section.id, section.budget.max_articles),
+                )
+            leaves.extend(_leaves(section.sections, inherited_policy, child_ancestors))
         else:
-            leaves.append(_Leaf(section, inherited_policy, inherited_budget))
+            leaves.append(_Leaf(section, inherited_policy, ancestor_budgets))
     return leaves
+
+
+def _navigation(sections: list[Section]) -> tuple[NavigationInput, ...]:
+    return tuple(
+        NavigationInput(section.id, section.title, _navigation(section.sections))
+        for section in sections
+    )
 
 
 def _selection_request(
@@ -344,18 +651,49 @@ def _selection_request(
     configuration: Configuration,
     records: dict[str, _ArticleRecord],
     source_records: dict[str, list[str]],
+    generated_at: datetime,
 ) -> PublicationRequest:
-    default_max = min(18, max(6, 3 * len(leaves)))
+    pub_min, pub_max = _publication_limits(publication)
+    requests = _section_requests(
+        publication,
+        leaves,
+        configuration,
+        records,
+        source_records,
+        generated_at,
+        pub_max,
+    )
+    return PublicationRequest(pub_max, pub_min, tuple(requests))
+
+
+def _publication_limits(publication: Publication) -> tuple[int, int]:
+    default_max = min(18, max(6, 3 * len(publication.sections)))
     maximum = publication.budget.max_articles if publication.budget else None
     minimum = publication.budget.min_articles if publication.budget else None
     pub_max = maximum or default_max
     pub_min = minimum if minimum is not None else max(1, math.ceil(pub_max * 0.25))
+    return pub_min, pub_max
+
+
+def _section_requests(
+    publication: Publication,
+    leaves: tuple[_Leaf, ...],
+    configuration: Configuration,
+    records: dict[str, _ArticleRecord],
+    source_records: dict[str, list[str]],
+    generated_at: datetime,
+    pub_max: int,
+) -> list[SectionRequest]:
     requests: list[SectionRequest] = []
     for order, leaf in enumerate(leaves):
         policy = publication.policies.get(leaf.policy_id) if leaf.policy_id else None
         policy = policy or PolicyPreset(type="coverage")
-        budget = leaf.budget
-        section_max = budget.max_articles if budget and budget.max_articles else pub_max
+        budget = leaf.section.budget
+        section_max = min(
+            pub_max,
+            budget.max_articles if budget and budget.max_articles else pub_max,
+            *(ancestor.max_articles for ancestor in leaf.ancestor_budgets),
+        )
         section_min = budget.min_articles if budget and budget.min_articles is not None else 0
         section_weight = budget.weight if budget and budget.weight else 5
         candidates: list[SectionCandidate] = []
@@ -370,17 +708,31 @@ def _selection_request(
                     record.article.canonical_url,
                     record.published_at,
                     policy.source_weights.get(source_id, source.weight),
+                    record.cluster_id,
                 )
                 candidates.append(
                     SectionCandidate(
                         candidate,
-                        relevance=_score(policy.positive_rules, record),
-                        interest_score=_score(policy.positive_rules, record)
-                        - _score(policy.negative_rules, record),
-                        essential=any(_matches(rule, record) for rule in policy.essential_coverage),
+                        relevance=_score(policy.positive_rules, record, policy.full_body_matching),
+                        interest_score=_score(
+                            policy.positive_rules, record, policy.full_body_matching
+                        )
+                        - _score(policy.negative_rules, record, policy.full_body_matching),
+                        essential=any(
+                            _matches(rule, record)
+                            for rule in policy.essential_coverage
+                            if rule.field != "body" or policy.full_body_matching
+                        ),
                         muted=any(
-                            (mute.source == source_id)
-                            or (mute.rule is not None and _matches(mute.rule, record))
+                            (mute.expires_at is None or mute.expires_at >= generated_at.date())
+                            and (
+                                (mute.source == source_id)
+                                or (
+                                    mute.rule is not None
+                                    and (mute.rule.field != "body" or policy.full_body_matching)
+                                    and _matches(mute.rule, record)
+                                )
+                            )
                             for mute in policy.mute_rules
                         ),
                     )
@@ -396,13 +748,20 @@ def _selection_request(
                 section_weight,
                 policy.discovery_slice,
                 tuple(candidates),
+                policy.minimum_sources,
+                policy.single_source_cap,
+                leaf.ancestor_budgets,
             )
         )
-    return PublicationRequest(pub_max, pub_min, tuple(requests))
+    return requests
 
 
-def _score(rules: list[MatchRule], record: _ArticleRecord) -> int:
-    return sum((rule.weight or 1) for rule in rules if _matches(rule, record))
+def _score(rules: list[MatchRule], record: _ArticleRecord, full_body_matching: bool) -> int:
+    return sum(
+        (rule.weight or 1)
+        for rule in rules
+        if (rule.field != "body" or full_body_matching) and _matches(rule, record)
+    )
 
 
 def _matches(rule: MatchRule, record: _ArticleRecord) -> bool:
@@ -418,3 +777,14 @@ def _matches(rule: MatchRule, record: _ArticleRecord) -> bool:
         return any(needle in value.casefold() for value in values)
     pattern = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)", re.IGNORECASE)
     return any(pattern.search(value) is not None for value in values)
+
+
+def _story_signals(title: str, categories: tuple[str, ...]) -> tuple[str, ...]:
+    signals = {f"category:{category.casefold()}" for category in categories if category.strip()}
+    title_tokens = re.findall(r"[^\W_]+", title, flags=re.UNICODE)
+    signals.update(
+        f"entity:{token.casefold()}"
+        for index, token in enumerate(title_tokens)
+        if (index > 0 and len(token) >= 4 and token[:1].isupper()) or token.isdigit()
+    )
+    return tuple(sorted(signals))

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import re
+import socket
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
+from ipaddress import ip_address
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 import feedparser
+import httpcore
 import httpx
 from lxml import html
 from lxml.html import HtmlElement
@@ -43,6 +47,7 @@ class SourceRequest:
     mode: AcquisitionMode
     llm_processing: str
     evidence: EligibilityEvidence
+    allowed_publisher_origins: tuple[str, ...] = ()
     minimum_full_words: int = 80
     allow_short_as_published: bool = False
 
@@ -82,13 +87,22 @@ class _RobotsRules:
             for directive, pattern in rules:
                 if not pattern:
                     continue
-                normalized = pattern.split("*", 1)[0]
-                if path.startswith(normalized):
-                    matching.append((len(normalized), directive == "allow"))
+                anchored = pattern.endswith("$")
+                value = pattern[:-1] if anchored else pattern
+                expression = re.escape(value).replace(r"\*", ".*")
+                if anchored:
+                    expression = f"{expression}$"
+                if re.match(expression, path):
+                    specificity = len(value.replace("*", ""))
+                    matching.append((specificity, directive == "allow"))
         if not matching:
             return True
         longest = max(length for length, _ in matching)
         return any(allowed for length, allowed in matching if length == longest)
+
+
+class _RobotsParseError(Exception):
+    pass
 
 
 def _parse_robots(body: str) -> _RobotsRules:
@@ -98,16 +112,22 @@ def _parse_robots(body: str) -> _RobotsRules:
     saw_rules = False
     for raw_line in body.splitlines():
         line = raw_line.split("#", 1)[0].strip()
-        if not line or ":" not in line:
+        if not line:
             continue
+        if ":" not in line:
+            raise _RobotsParseError
         name, value = (part.strip() for part in line.split(":", 1))
         directive = name.casefold()
         if directive == "user-agent":
+            if not value:
+                raise _RobotsParseError
             if saw_rules and agents:
                 groups.append((tuple(agents), tuple(rules)))
                 agents, rules, saw_rules = [], [], False
             agents.append(value.casefold())
-        elif directive in {"allow", "disallow"} and agents:
+        elif directive in {"allow", "disallow"}:
+            if not agents:
+                raise _RobotsParseError
             rules.append((directive, value))
             saw_rules = True
     if agents:
@@ -123,8 +143,19 @@ def _html_text(fragment: str) -> str:
     return " ".join(root.text_content().split())
 
 
-def _page_text(document: bytes) -> str:
+def _page_content(document: bytes, base_url: httpx.URL) -> tuple[str, str | None]:
     root = cast(HtmlElement, html.fromstring(document))
+    canonical_values = cast(
+        list[str],
+        root.xpath(
+            "//link[contains(concat(' ', normalize-space(translate(@rel, "
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')), ' '), "
+            "' canonical ')]/@href"
+        ),
+    )
+    canonical_url = None
+    if canonical_values and canonical_values[0].strip():
+        canonical_url = str(base_url.join(canonical_values[0].strip()))
     unwanted_elements = cast(
         list[HtmlElement], root.xpath("//script|//style|//nav|//footer|//aside")
     )
@@ -141,7 +172,7 @@ def _page_text(document: bytes) -> str:
             value = " ".join(paragraph.text_content().split())
             if value:
                 paragraphs.append(value)
-    return "\n\n".join(paragraphs)
+    return "\n\n".join(paragraphs), canonical_url
 
 
 def _entry_datetime(value: object) -> datetime | None:
@@ -165,6 +196,131 @@ class _RouteDenied(Exception):
         super().__init__(code)
 
 
+type _Origin = tuple[str, str, int]
+
+
+def _origin(url: httpx.URL) -> _Origin:
+    default_port = 443 if url.scheme == "https" else 80
+    return url.scheme, url.host.casefold(), url.port or default_port
+
+
+def _is_loopback(url: httpx.URL) -> bool:
+    try:
+        return ip_address(url.host).is_loopback
+    except ValueError:
+        return url.host.casefold() == "localhost" or url.host.casefold().endswith(".localhost")
+
+
+def _is_non_public_address(url: httpx.URL) -> bool:
+    try:
+        return not ip_address(url.host).is_global
+    except ValueError:
+        hostname = url.host.casefold().rstrip(".")
+        return hostname == "localhost" or hostname.endswith((".localhost", ".local"))
+
+
+def _parse_safe_url(value: str, *, loopback_origin: _Origin | None = None) -> httpx.URL:
+    try:
+        url = httpx.URL(value)
+    except (httpx.InvalidURL, ValueError) as error:
+        raise _RouteDenied("SOURCE_URL_UNSAFE") from error
+    if url.scheme not in {"http", "https"} or not url.host or url.userinfo:
+        raise _RouteDenied("SOURCE_URL_UNSAFE")
+    if _is_non_public_address(url) and not (
+        _is_loopback(url) and loopback_origin is not None and _origin(url) == loopback_origin
+    ):
+        raise _RouteDenied("SOURCE_URL_UNSAFE")
+    return url
+
+
+def _feed_url_context(value: str) -> tuple[httpx.URL, _Origin, _Origin | None]:
+    try:
+        raw_url = httpx.URL(value)
+    except (httpx.InvalidURL, ValueError) as error:
+        raise _RouteDenied("SOURCE_URL_UNSAFE") from error
+    raw_origin = _origin(raw_url)
+    loopback_origin = raw_origin if _is_loopback(raw_url) else None
+    return _parse_safe_url(value, loopback_origin=loopback_origin), raw_origin, loopback_origin
+
+
+def _require_public_resolution(url: httpx.URL, loopback_origin: _Origin | None) -> None:
+    if loopback_origin is not None and _origin(url) == loopback_origin and _is_loopback(url):
+        return
+    try:
+        addresses = socket.getaddrinfo(url.host, url.port, type=socket.SOCK_STREAM)
+    except OSError as error:
+        raise _RouteDenied("SOURCE_HOST_UNRESOLVED") from error
+    if not addresses:
+        raise _RouteDenied("SOURCE_HOST_UNRESOLVED")
+    for address in addresses:
+        resolved = str(address[4][0]).split("%", 1)[0]
+        try:
+            if not ip_address(resolved).is_global:
+                raise _RouteDenied("SOURCE_URL_UNSAFE")
+        except ValueError as error:
+            raise _RouteDenied("SOURCE_HOST_UNRESOLVED") from error
+
+
+class _PinnedNetworkBackend(httpcore.SyncBackend):
+    """Resolve once, validate, then connect to that exact address."""
+
+    def __init__(self) -> None:
+        self._loopback_origins: set[tuple[str, int]] = set()
+
+    def allow_loopback(self, origin: _Origin | None) -> None:
+        if origin is not None:
+            self._loopback_origins.add((origin[1], origin[2]))
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Any = None,
+    ) -> httpcore.NetworkStream:
+        try:
+            addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as error:
+            raise httpcore.ConnectError("Host resolution failed") from error
+        resolved: list[str] = []
+        for address_info in addresses:
+            value = str(address_info[4][0]).split("%", 1)[0]
+            try:
+                parsed = ip_address(value)
+            except ValueError as error:
+                raise httpcore.ConnectError("Host resolution was invalid") from error
+            if not parsed.is_global and not (
+                parsed.is_loopback and (host.casefold(), port) in self._loopback_origins
+            ):
+                raise httpcore.ConnectError("Host resolution was not public")
+            if value not in resolved:
+                resolved.append(value)
+        if not resolved:
+            raise httpcore.ConnectError("Host resolution was empty")
+        last_error: httpcore.ConnectError | None = None
+        for resolved_address in resolved:
+            try:
+                return super().connect_tcp(
+                    resolved_address,
+                    port,
+                    timeout=timeout,
+                    local_address=local_address,
+                    socket_options=socket_options,
+                )
+            except httpcore.ConnectError as error:
+                last_error = error
+        assert last_error is not None
+        raise last_error
+
+
+class _PinnedHTTPTransport(httpx.HTTPTransport):
+    def __init__(self, backend: _PinnedNetworkBackend) -> None:
+        super().__init__(trust_env=False)
+        self._pool.close()
+        self._pool = httpcore.ConnectionPool(network_backend=backend)
+
+
 class SourceClient:
     def __init__(
         self,
@@ -173,13 +329,22 @@ class SourceClient:
         user_agent: str = "epub-news-feeder/0.1 (+https://github.com/davelowelarsson/epub-news-feeder)",
         timeout: float = 20,
         max_attempts: int = 3,
+        max_response_bytes: int = 5 * 1024 * 1024,
+        max_article_body_bytes: int = 1024 * 1024,
     ) -> None:
         self._now = now or (lambda: datetime.now(UTC))
         self._product = "epub-news-feeder"
+        self._network_backend = _PinnedNetworkBackend()
         self._client = httpx.Client(
-            headers={"User-Agent": user_agent}, timeout=timeout, follow_redirects=False
+            headers={"User-Agent": user_agent},
+            timeout=timeout,
+            follow_redirects=False,
+            trust_env=False,
+            transport=_PinnedHTTPTransport(self._network_backend),
         )
         self._max_attempts = max_attempts
+        self._max_response_bytes = max_response_bytes
+        self._max_article_body_bytes = max_article_body_bytes
         self._robots: dict[str, _RobotsRules | str] = {}
 
     def close(self) -> None:
@@ -190,7 +355,12 @@ class SourceClient:
         if denied is not None:
             return AcquisitionOutcome(request.source_id, denied, ())
         try:
-            feed = self._get_permitted(request.feed_url)
+            feed_url, feed_origin, loopback_origin = _feed_url_context(request.feed_url)
+            feed = self._get_permitted(
+                feed_url,
+                allowed_origins={feed_origin},
+                loopback_origin=loopback_origin,
+            )
         except _RouteDenied as error:
             return AcquisitionOutcome(request.source_id, error.code, ())
 
@@ -231,6 +401,31 @@ class SourceClient:
         link = str(entry.get("link", "")).strip()
         if not title or not link:
             return None
+        try:
+            _, feed_origin, loopback_origin = _feed_url_context(request.feed_url)
+            link_url = _parse_safe_url(link, loopback_origin=loopback_origin)
+            publisher_origins = self._publisher_origins(request, feed_origin, loopback_origin)
+        except _RouteDenied:
+            return None
+        if (
+            request.mode
+            in {
+                AcquisitionMode.WEB,
+                AcquisitionMode.AUTO,
+                AcquisitionMode.METADATA_ONLY,
+            }
+            and _origin(link_url) not in publisher_origins
+        ):
+            return None
+        if request.mode in {
+            AcquisitionMode.WEB,
+            AcquisitionMode.AUTO,
+            AcquisitionMode.METADATA_ONLY,
+        }:
+            try:
+                _require_public_resolution(link_url, loopback_origin)
+            except _RouteDenied:
+                return None
         guid_value = entry.get("id") or entry.get("guid")
         guid = str(guid_value) if guid_value is not None else None
         author_value = entry.get("author")
@@ -249,7 +444,7 @@ class SourceClient:
                 guid,
                 title,
                 author,
-                link,
+                str(link_url),
                 published,
                 categories,
                 None,
@@ -265,6 +460,8 @@ class SourceClient:
             for item in content:
                 if isinstance(item, Mapping):
                     candidate = _html_text(str(item.get("value", "")))
+                    if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
+                        continue
                     if len(candidate.split()) >= request.minimum_full_words:
                         body, classification = candidate, "verified_feed_body"
                         break
@@ -273,10 +470,30 @@ class SourceClient:
                         break
         if body is None and request.mode in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
             try:
-                response = self._get_permitted(link)
+                response = self._get_permitted(
+                    link_url,
+                    allowed_origins=publisher_origins,
+                    loopback_origin=loopback_origin,
+                )
             except _RouteDenied:
                 return None
-            candidate = _page_text(response.content)
+            candidate, canonical = _page_content(response.content, response.url)
+            if canonical is not None:
+                try:
+                    canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
+                except _RouteDenied:
+                    return None
+                if _origin(canonical_url) not in publisher_origins:
+                    return None
+                try:
+                    _require_public_resolution(canonical_url, loopback_origin)
+                except _RouteDenied:
+                    return None
+                link_url = canonical_url
+            else:
+                link_url = response.url
+            if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
+                return None
             if len(candidate.split()) >= request.minimum_full_words:
                 body, classification = candidate, "verified_page_body"
             elif candidate and request.allow_short_as_published:
@@ -290,23 +507,55 @@ class SourceClient:
             guid,
             title,
             author,
-            link,
+            str(link_url),
             published,
             categories,
             body,
             classification,
         )
 
-    def _get_permitted(self, url: str) -> httpx.Response:
-        current = httpx.URL(url)
+    def _publisher_origins(
+        self,
+        request: SourceRequest,
+        feed_origin: _Origin,
+        loopback_origin: _Origin | None,
+    ) -> set[_Origin]:
+        if request.allowed_publisher_origins:
+            values = request.allowed_publisher_origins
+        else:
+            inferred = [f"{feed_origin[0]}://{feed_origin[1]}:{feed_origin[2]}"]
+            publisher = request.publisher_id.casefold().rstrip(".")
+            if re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", publisher) and "." in publisher:
+                inferred.extend((f"https://{publisher}", f"https://www.{publisher}"))
+            values = tuple(inferred)
+        origins: set[_Origin] = set()
+        for value in values:
+            url = _parse_safe_url(value, loopback_origin=loopback_origin)
+            origins.add(_origin(url))
+        return origins
+
+    def _get_permitted(
+        self,
+        url: str | httpx.URL,
+        *,
+        allowed_origins: set[_Origin],
+        loopback_origin: _Origin | None,
+    ) -> httpx.Response:
+        current = _parse_safe_url(str(url), loopback_origin=loopback_origin)
+        self._network_backend.allow_loopback(loopback_origin)
         for _ in range(6):
-            self._require_robots(current)
-            response = self._request(current)
+            if _origin(current) not in allowed_origins:
+                raise _RouteDenied("SOURCE_ORIGIN_NOT_ALLOWED")
+            _require_public_resolution(current, loopback_origin)
+            self._require_robots(current, loopback_origin)
+            response = self._request(current, loopback_origin)
             if response.status_code in {301, 302, 303, 307, 308}:
                 location = response.headers.get("location")
                 if not location:
                     raise _RouteDenied("SOURCE_REDIRECT_INVALID")
-                current = current.join(location)
+                current = _parse_safe_url(
+                    str(current.join(location)), loopback_origin=loopback_origin
+                )
                 continue
             if response.status_code in {401, 403, 451}:
                 raise _RouteDenied("SOURCE_ACCESS_CONTROLLED")
@@ -315,11 +564,11 @@ class SourceClient:
             return response
         raise _RouteDenied("SOURCE_REDIRECT_LIMIT")
 
-    def _request(self, url: httpx.URL) -> httpx.Response:
+    def _request(self, url: httpx.URL, loopback_origin: _Origin | None) -> httpx.Response:
         last_response: httpx.Response | None = None
         for _ in range(self._max_attempts):
             try:
-                response = self._client.get(url)
+                response = self._download(url, loopback_origin)
             except httpx.TransportError:
                 continue
             last_response = response
@@ -329,7 +578,52 @@ class SourceClient:
             return last_response
         raise _RouteDenied("SOURCE_TRANSPORT_FAILED")
 
-    def _require_robots(self, url: httpx.URL) -> None:
+    def _download(self, url: httpx.URL, loopback_origin: _Origin | None) -> httpx.Response:
+        with self._client.stream("GET", url) as response:
+            stream = response.extensions.get("network_stream")
+            if stream is None:
+                raise _RouteDenied("SOURCE_PEER_UNVERIFIED")
+            peer = stream.get_extra_info("server_addr")
+            if not (isinstance(peer, tuple) and peer and isinstance(peer[0], str)):
+                raise _RouteDenied("SOURCE_PEER_UNVERIFIED")
+            resolved = peer[0].split("%", 1)[0]
+            try:
+                address = ip_address(resolved)
+            except ValueError as error:
+                raise _RouteDenied("SOURCE_HOST_UNRESOLVED") from error
+            loopback_allowed = (
+                address.is_loopback
+                and loopback_origin is not None
+                and _origin(url) == loopback_origin
+            )
+            if not address.is_global and not loopback_allowed:
+                raise _RouteDenied("SOURCE_URL_UNSAFE")
+            content_length = response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    declared_size = 0
+                if declared_size > self._max_response_bytes:
+                    raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                content.extend(chunk)
+                if len(content) > self._max_response_bytes:
+                    raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
+            return httpx.Response(
+                response.status_code,
+                headers={
+                    name: value
+                    for name, value in response.headers.items()
+                    if name.casefold()
+                    not in {"content-encoding", "content-length", "transfer-encoding"}
+                },
+                content=bytes(content),
+                request=response.request,
+            )
+
+    def _require_robots(self, url: httpx.URL, loopback_origin: _Origin | None) -> None:
         origin = f"{url.scheme}://{url.host}"
         if url.port is not None:
             origin = f"{origin}:{url.port}"
@@ -337,21 +631,30 @@ class SourceClient:
         if cached is None:
             robots_url = httpx.URL(f"{origin}/robots.txt")
             try:
-                response = self._request(robots_url)
+                response = self._request(robots_url, loopback_origin)
             except _RouteDenied:
                 self._robots[origin] = "SOURCE_ROBOTS_UNAVAILABLE"
             else:
                 if response.status_code == 404:
                     self._robots[origin] = _RobotsRules(())
+                elif response.status_code in {301, 302, 303, 307, 308}:
+                    self._robots[origin] = "SOURCE_ROBOTS_UNAVAILABLE"
                 elif response.status_code in {401, 403, 451}:
                     self._robots[origin] = "SOURCE_ACCESS_CONTROLLED"
                 elif response.status_code >= 400:
                     self._robots[origin] = "SOURCE_ROBOTS_UNAVAILABLE"
                 else:
-                    self._robots[origin] = _parse_robots(response.text)
+                    try:
+                        body = response.content.decode("utf-8-sig", errors="strict")
+                        self._robots[origin] = _parse_robots(body)
+                    except (UnicodeDecodeError, _RobotsParseError):
+                        self._robots[origin] = "SOURCE_ROBOTS_INVALID"
             cached = self._robots[origin]
         if isinstance(cached, str):
             raise _RouteDenied(cached)
-        path = urlsplit(str(url)).path or "/"
-        if not cached.allows(self._product, path):
+        parsed = urlsplit(str(url))
+        path_and_query = parsed.path or "/"
+        if parsed.query:
+            path_and_query = f"{path_and_query}?{parsed.query}"
+        if not cached.allows(self._product, path_and_query):
             raise _RouteDenied("SOURCE_ROBOTS_DENIED")

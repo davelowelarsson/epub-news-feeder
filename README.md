@@ -1,14 +1,15 @@
 # EPUB News Feeder
 
 Build private, finite news Editions as standards-first EPUBs. The local MVP validates
-strict YAML, applies dated Source eligibility, acquires complete permitted Articles,
+strict YAML, applies dated Source eligibility, acquires Articles from configured full-text routes,
 selects a finite Edition, gates a deterministic EPUB 3.3 with EPUBCheck, and atomically
 delivers it while retaining only body-free SQLite state and JSONL diagnostics.
 
 ## Local setup
 
-Requirements: `uv`, Java 17+, and EPUBCheck 5.3.0. The expected EPUBCheck archive
-SHA-256 is `6c07e68584b2e2ce2f89fe06e1246dfead3eb36b46b340e7d93524f29dcff6c5`.
+Requirements: `uv`, Java 17+, and EPUBCheck 5.3.0. The expected `epubcheck.jar`
+SHA-256 is `f7f96617c929371821609b88c8484d6dc9f24fe916499863c46094c5fb778a65`.
+Calibre is optional for local reader inspection (`brew install --cask calibre` on macOS).
 
 ```bash
 uv sync --frozen --all-groups
@@ -24,6 +25,9 @@ uv run epub-news-feeder generate \
 
 Eligibility evidence is dated operational policy, not legal advice. Re-review it before
 expiry or any route/provider change. Generated Editions are private single-operator copies.
+Back up the SQLite file and its adjacent `.key` sidecar together.
+If final delivery is interrupted, rerun with the same `--run-id` and `--at`; the validated
+private spool is revalidated and delivered without reacquiring Sources.
 
 ## Ollama readiness
 

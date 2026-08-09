@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from epub_news_feeder.selection import (
+    AncestorBudget,
     Candidate,
     Policy,
     PublicationRequest,
@@ -93,6 +94,49 @@ def test_ticket_07_below_minimum_cannot_publish() -> None:
 
 
 @pytest.mark.acceptance
+@pytest.mark.property
+def test_ticket_07_budget_feasible_section_minima_precede_weighted_redistribution() -> None:
+    main_budget = AncestorBudget("main", max_articles=2)
+    high_weight = SectionRequest(
+        "high-weight",
+        "High weight",
+        0,
+        Policy.COVERAGE,
+        3,
+        min_articles=1,
+        weight=10,
+        candidates=(
+            candidate("high-1", "a", hours_old=0),
+            candidate("high-2", "a", hours_old=1),
+            candidate("high-3", "a", hours_old=2),
+        ),
+        ancestor_budgets=(main_budget,),
+    )
+    low_weight = SectionRequest(
+        "low-weight",
+        "Low weight",
+        1,
+        Policy.COVERAGE,
+        3,
+        min_articles=1,
+        weight=1,
+        candidates=(
+            candidate("low-1", "b", hours_old=0),
+            candidate("low-2", "b", hours_old=1),
+        ),
+        ancestor_budgets=(main_budget,),
+    )
+
+    result = select_publication(
+        PublicationRequest(max_articles=4, min_articles=1, sections=(high_weight, low_weight))
+    )
+
+    assert [slot.article.article_id for slot in result.for_section("high-weight")] == ["high-1"]
+    assert [slot.article.article_id for slot in result.for_section("low-weight")] == ["low-1"]
+    assert len(result.unique_article_ids) == 2
+
+
+@pytest.mark.acceptance
 def test_ticket_08_interest_changes_rank_mute_excludes_and_discovery_survives() -> None:
     interests = SectionRequest(
         section_id="interests",
@@ -122,6 +166,55 @@ def test_ticket_08_interest_changes_rank_mute_excludes_and_discovery_survives() 
 
 
 @pytest.mark.acceptance
+@pytest.mark.property
+def test_ticket_08_interest_one_slot_discovery_selects_unscored_coverage() -> None:
+    interests = SectionRequest(
+        "interests",
+        "Interests",
+        0,
+        Policy.INTEREST,
+        1,
+        discovery_percent=0.2,
+        candidates=(
+            candidate("preferred", "a", hours_old=0, interest=10),
+            candidate("discovery", "b", hours_old=8, interest=0),
+        ),
+    )
+
+    result = select_publication(
+        PublicationRequest(max_articles=1, min_articles=1, sections=(interests,))
+    )
+
+    assert [slot.article.article_id for slot in result.for_section("interests")] == ["discovery"]
+
+
+@pytest.mark.acceptance
+def test_ticket_07_plurality_values_are_configurable_per_section() -> None:
+    unconstrained = SectionRequest(
+        "unconstrained",
+        "Unconstrained",
+        0,
+        Policy.COVERAGE,
+        3,
+        minimum_sources=1,
+        single_source_cap=1.0,
+        candidates=(
+            candidate("a-essential-1", "a", hours_old=0, essential=True),
+            candidate("a-essential-2", "a", hours_old=1, essential=True),
+            candidate("b", "b", hours_old=2),
+        ),
+    )
+
+    result = select_publication(
+        PublicationRequest(max_articles=3, min_articles=1, sections=(unconstrained,))
+    )
+
+    assert len(result.for_section("unconstrained")) == 3
+    assert result.warnings == ()
+
+
+@pytest.mark.acceptance
+@pytest.mark.property
 def test_ticket_09_one_canonical_placement_has_reciprocal_section_pointers() -> None:
     shared_primary = candidate("shared", "source", hours_old=0, relevance=9)
     shared_secondary = candidate("shared", "source", hours_old=0, relevance=4)
@@ -155,3 +248,63 @@ def test_ticket_09_one_canonical_placement_has_reciprocal_section_pointers() -> 
     assert shared.primary_section_id == "technology"
     assert shared.pointer_section_ids == ("world",)
     assert shared.relevant_section_ids == ("technology", "world")
+
+
+@pytest.mark.property
+def test_ticket_09_identity_is_unique_within_a_section_and_once_per_ancestor() -> None:
+    shared_a = candidate("shared", "source-a", hours_old=0, relevance=3)
+    shared_b = candidate("shared", "source-b", hours_old=0, relevance=2)
+    main_budget = AncestorBudget("main", max_articles=1)
+    result = select_publication(
+        PublicationRequest(
+            max_articles=1,
+            min_articles=1,
+            sections=(
+                SectionRequest(
+                    "technology",
+                    "Technology",
+                    0,
+                    Policy.COVERAGE,
+                    2,
+                    candidates=(shared_a, shared_b),
+                    ancestor_budgets=(main_budget,),
+                ),
+                SectionRequest(
+                    "world",
+                    "World",
+                    1,
+                    Policy.COVERAGE,
+                    2,
+                    candidates=(shared_a,),
+                    ancestor_budgets=(main_budget,),
+                ),
+            ),
+        )
+    )
+
+    assert result.unique_article_ids == ("shared",)
+    assert len(result.for_section("technology")) == 1
+    assert len(result.for_section("world")) == 1
+
+
+@pytest.mark.acceptance
+@pytest.mark.property
+def test_ticket_10_cluster_round_robin_precedes_another_perspective() -> None:
+    now = datetime(2026, 8, 9, 6, tzinfo=UTC)
+    section = SectionRequest(
+        "world",
+        "World",
+        0,
+        Policy.COVERAGE,
+        3,
+        minimum_sources=1,
+        candidates=(
+            SectionCandidate(Candidate("a1", "a", "A1", "https://a/1", now, cluster_id="story-a")),
+            SectionCandidate(Candidate("a2", "a", "A2", "https://a/2", now, cluster_id="story-a")),
+            SectionCandidate(Candidate("b1", "a", "B1", "https://a/3", now, cluster_id="story-b")),
+        ),
+    )
+
+    result = select_publication(PublicationRequest(3, 1, (section,)))
+
+    assert [slot.article.article_id for slot in result.slots] == ["a1", "b1", "a2"]

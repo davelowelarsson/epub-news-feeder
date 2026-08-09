@@ -82,6 +82,8 @@ class EligibilityEvidence(StrictModel):
 class Source(StrictModel):
     title: NonEmptyString
     publisher_id: NonEmptyString | None = None
+    copyright_notice: NonEmptyString | None = None
+    allowed_publisher_origins: list[HttpUrl] = Field(default_factory=list)
     feed_url: HttpUrl
     acquisition: Literal["auto", "feed", "web", "metadata_only"] = "auto"
     weight: Weight = 5

@@ -3,6 +3,8 @@ sources:
   david:
     title: David Lowe Larsson
     publisher_id: davidlowelarsson.com
+    copyright_notice: Copyright David Lowe Larsson
+    allowed_publisher_origins: [https://davidlowelarsson.com]
     feed_url: https://davidlowelarsson.com/rss.xml
     acquisition: feed
     llm_processing: local_only
@@ -24,6 +26,8 @@ sources:
   ars:
     title: Ars Technica
     publisher_id: arstechnica.com
+    copyright_notice: Copyright Condé Nast
+    allowed_publisher_origins: [https://arstechnica.com, https://www.arstechnica.com]
     feed_url: https://feeds.arstechnica.com/arstechnica/index
     acquisition: auto
     llm_processing: local_only
@@ -45,6 +49,8 @@ sources:
   svt:
     title: SVT Nyheter
     publisher_id: svt.se
+    copyright_notice: Copyright Sveriges Television AB
+    allowed_publisher_origins: [https://www.svt.se]
     feed_url: https://www.svt.se/rss.xml
     acquisition: auto
     llm_processing: local_only
@@ -66,6 +72,9 @@ sources:
   ekot:
     title: Sveriges Radio Ekot
     publisher_id: sverigesradio.se
+    allowed_publisher_origins:
+      - https://www.sverigesradio.se
+      - https://sverigesradio.se
     feed_url: https://api.sr.se/api/rss/program/83
     acquisition: metadata_only
     llm_processing: disabled

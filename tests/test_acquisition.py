@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,6 +23,7 @@ class FixtureSite:
     base_url: str
     routes: dict[str, tuple[int, str, bytes]]
     hits: list[str] = field(default_factory=list)
+    headers: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @contextmanager
@@ -38,6 +40,8 @@ def fixture_site(
             )
             self.send_response(status)
             self.send_header("Content-Type", content_type)
+            for name, value in site.headers.get(self.path, {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -71,6 +75,42 @@ def evidence(now: datetime) -> EligibilityEvidence:
 
 
 @pytest.mark.acceptance
+def test_ticket_05_compressed_responses_are_decoded_once() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    feed = b"""<rss version="2.0"><channel><title>Compressed</title><item>
+    <title>Linked report</title><link>REPLACE/report</link><guid>compressed-1</guid>
+    </item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", gzip.compress(b"User-agent: *\nAllow: /\n")),
+            "/feed.xml": (200, "application/rss+xml", b""),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            gzip.compress(feed.replace(b"REPLACE", site.base_url.encode())),
+        )
+        site.headers["/robots.txt"] = {"Content-Encoding": "gzip"}
+        site.headers["/feed.xml"] = {"Content-Encoding": "gzip"}
+
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="compressed",
+                publisher_id="publisher",
+                title="Compressed",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.METADATA_ONLY,
+                llm_processing="disabled",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_OK"
+    assert [article.title for article in outcome.articles] == ["Linked report"]
+
+
+@pytest.mark.acceptance
 def test_ticket_04_exact_robots_group_denies_before_feed_fetch() -> None:
     now = datetime(2026, 8, 9, tzinfo=UTC)
     robots = b"""User-agent: *
@@ -100,6 +140,101 @@ Disallow: /feed.xml
     assert outcome.articles == ()
     assert outcome.code == "SOURCE_ROBOTS_DENIED"
     assert site.hits == ["/robots.txt"]
+
+
+@pytest.mark.acceptance
+def test_ticket_04_malformed_robots_fails_closed_before_feed_fetch() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"this is not a robots record"),
+            "/feed.xml": (200, "application/rss+xml", b"must not be fetched"),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="malformed-rep",
+                publisher_id="publisher",
+                title="Malformed REP",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_ROBOTS_INVALID"
+    assert outcome.articles == ()
+    assert site.hits == ["/robots.txt"]
+
+
+@pytest.mark.acceptance
+def test_ticket_04_robots_redirect_fails_closed_before_feed_fetch() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    with fixture_site(
+        {
+            "/robots.txt": (302, "text/plain", b""),
+            "/feed.xml": (200, "application/rss+xml", b"must not be fetched"),
+        }
+    ) as site:
+        site.headers["/robots.txt"] = {"Location": "/different-policy"}
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="redirected-rep",
+                publisher_id="publisher",
+                title="Redirected REP",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_ROBOTS_UNAVAILABLE"
+    assert outcome.articles == ()
+    assert site.hits == ["/robots.txt"]
+
+
+@pytest.mark.acceptance
+def test_ticket_04_robots_wildcards_and_end_anchors_follow_rfc_matching() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    robots = b"""User-agent: epub-news-feeder
+Disallow: /private/*.xml$
+Allow: /private/public-*.xml$
+"""
+    empty_feed = b'<rss version="2.0"><channel><title>Empty</title></channel></rss>'
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", robots),
+            "/private/public-news.xml": (200, "application/rss+xml", empty_feed),
+            "/private/news.xml?view=full": (200, "application/rss+xml", empty_feed),
+            "/private/news.xml": (200, "application/rss+xml", b"must not be fetched"),
+        }
+    ) as site:
+        client = SourceClient(now=lambda: now)
+
+        def acquire(path: str) -> str:
+            return client.acquire(
+                SourceRequest(
+                    source_id=path,
+                    publisher_id="publisher",
+                    title="REP fixture",
+                    feed_url=f"{site.base_url}{path}",
+                    mode=AcquisitionMode.FEED,
+                    llm_processing="local_only",
+                    evidence=evidence(now),
+                )
+            ).code
+
+        allowed_by_specific_rule = acquire("/private/public-news.xml")
+        allowed_because_anchor_does_not_match_query = acquire("/private/news.xml?view=full")
+        denied_at_end = acquire("/private/news.xml")
+        client.close()
+
+    assert allowed_by_specific_rule == "SOURCE_OK"
+    assert allowed_because_anchor_does_not_match_query == "SOURCE_OK"
+    assert denied_at_end == "SOURCE_ROBOTS_DENIED"
+    assert "/private/news.xml" not in site.hits
 
 
 @pytest.mark.acceptance
@@ -201,3 +336,227 @@ def test_ticket_05_feed_page_and_metadata_routes_never_use_previews_as_articles(
     assert metadata.articles[0].body is None
     assert metadata.articles[0].classification == "metadata_only"
     assert "forbidden retained summary" not in repr(metadata.articles[0])
+
+
+@pytest.mark.acceptance
+@pytest.mark.parametrize(
+    ("mode", "publisher_link"),
+    [
+        (AcquisitionMode.WEB, "http://10.0.0.1/private"),
+        (AcquisitionMode.WEB, "http://169.254.169.254/latest/meta-data"),
+        (AcquisitionMode.WEB, "http://127.0.0.1:9/private"),
+        (AcquisitionMode.WEB, "https://attacker.example/article"),
+        (AcquisitionMode.METADATA_ONLY, "javascript:alert(1)"),
+        (AcquisitionMode.METADATA_ONLY, "https://user:secret@publisher.example/article"),
+    ],
+)
+def test_ticket_05_unsafe_publisher_links_are_omitted_without_fetch(
+    mode: AcquisitionMode, publisher_link: str
+) -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    feed = f"""<rss version="2.0"><channel><title>Unsafe</title><item>
+    <title>Unsafe target</title><link>{publisher_link}</link><guid>unsafe-1</guid>
+    </item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="unsafe",
+                publisher_id="publisher.example",
+                title="Unsafe",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=mode,
+                llm_processing="disabled",
+                evidence=evidence(now),
+                allowed_publisher_origins=("https://publisher.example",),
+            )
+        )
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+    assert site.hits == ["/robots.txt", "/feed.xml"]
+
+
+@pytest.mark.acceptance
+def test_ticket_05_page_redirect_cannot_pivot_to_another_loopback_origin() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    with (
+        fixture_site(
+            {
+                "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+                "/private": (200, "text/plain", b"must not be fetched"),
+            }
+        ) as target,
+        fixture_site(
+            {
+                "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+                "/feed.xml": (
+                    200,
+                    "application/rss+xml",
+                    b'<rss version="2.0"><channel><title>Redirect</title><item>'
+                    b"<title>Redirect target</title><link>REPLACE/article</link>"
+                    b"<guid>redirect-1</guid></item></channel></rss>",
+                ),
+                "/article": (302, "text/plain", b""),
+            }
+        ) as source,
+    ):
+        source.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            source.routes["/feed.xml"][2].replace(b"REPLACE", source.base_url.encode()),
+        )
+        source.headers["/article"] = {"Location": f"{target.base_url}/private"}
+        client = SourceClient(now=lambda: now)
+        outcome = client.acquire(
+            SourceRequest(
+                source_id="redirect",
+                publisher_id="publisher",
+                title="Redirect",
+                feed_url=f"{source.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+        client.close()
+
+    assert outcome.articles == ()
+    assert target.hits == []
+
+
+@pytest.mark.acceptance
+def test_ticket_05_page_canonical_must_match_the_publisher_origin_policy() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    body = " ".join(f"publisher-word-{index}" for index in range(100))
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (
+                200,
+                "application/rss+xml",
+                b'<rss version="2.0"><channel><title>Canonical</title><item>'
+                b"<title>Canonical target</title><link>REPLACE/article</link>"
+                b"<guid>canonical-1</guid></item></channel></rss>",
+            ),
+            "/article": (
+                200,
+                "text/html",
+                (
+                    '<html><head><link rel="canonical" href="https://attacker.example/item">'
+                    f"</head><body><article><p>{body}</p></article></body></html>"
+                ).encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            site.routes["/feed.xml"][2].replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="canonical",
+                publisher_id="publisher",
+                title="Canonical",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles == ()
+    assert site.hits == ["/robots.txt", "/feed.xml", "/article"]
+
+
+@pytest.mark.acceptance
+def test_ticket_05_oversized_response_fails_closed_at_the_download_boundary() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    oversized_feed = b"<rss>" + (b"x" * 1024) + b"</rss>"
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", oversized_feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now, max_response_bytes=256).acquire(
+            SourceRequest(
+                source_id="oversized",
+                publisher_id="publisher",
+                title="Oversized",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_RESPONSE_TOO_LARGE"
+    assert outcome.articles == ()
+
+
+@pytest.mark.acceptance
+def test_ticket_05_oversized_article_body_is_omitted() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    article_body = " ".join(f"article-word-{index}" for index in range(200))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Body limit</title><item><title>Large body</title>
+    <link>https://publisher.example/large</link><guid>large-1</guid>
+    <content:encoded><![CDATA[<p>{article_body}</p>]]></content:encoded>
+    </item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(
+            now=lambda: now,
+            max_response_bytes=16 * 1024,
+            max_article_body_bytes=512,
+        ).acquire(
+            SourceRequest(
+                source_id="body-limit",
+                publisher_id="publisher.example",
+                title="Body limit",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+@pytest.mark.acceptance
+@pytest.mark.parametrize("status", [401, 403, 451])
+def test_ticket_05_access_control_responses_are_never_retried(status: int) -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (status, "text/plain", b"access controlled"),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now, max_attempts=3).acquire(
+            SourceRequest(
+                source_id="access-controlled",
+                publisher_id="publisher",
+                title="Access controlled",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_ACCESS_CONTROLLED"
+    assert site.hits == ["/robots.txt", "/feed.xml"]

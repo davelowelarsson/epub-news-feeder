@@ -5,11 +5,15 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 
 
 class EpubValidationError(Exception):
     """A safe EPUBCheck failure."""
+
+
+_EPUBCHECK_JAR_SHA256 = "f7f96617c929371821609b88c8484d6dc9f24fe916499863c46094c5fb778a65"
 
 
 def default_epubcheck_jar() -> Path:
@@ -25,6 +29,8 @@ def validate_epub(epub_bytes: bytes, *, jar_path: Path | None = None) -> None:
     jar = jar_path or default_epubcheck_jar()
     if not jar.is_file():
         raise EpubValidationError("EPUBCheck is unavailable; set EPUBCHECK_JAR")
+    if sha256(jar.read_bytes()).hexdigest() != _EPUBCHECK_JAR_SHA256:
+        raise EpubValidationError("The reviewed EPUBCheck 5.3.0 binary is required")
     descriptor, temporary_name = tempfile.mkstemp(suffix=".epub")
     temporary = Path(temporary_name)
     try:

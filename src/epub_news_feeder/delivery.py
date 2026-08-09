@@ -49,12 +49,15 @@ def deliver_local(epub_bytes: bytes, *, output_directory: Path, filename: str) -
 
 
 def _target_path(output_directory: Path, filename: str) -> Path:
-    if not output_directory.is_dir():
+    if not output_directory.is_dir() or output_directory.is_symlink():
         raise ValueError("Local Delivery Target directory does not exist")
     candidate = Path(filename)
     if candidate.name != filename or candidate.suffix != ".epub":
         raise ValueError("Delivery Copy filename must be one .epub filename")
-    return output_directory / candidate
+    target = output_directory / candidate
+    if target.is_symlink():
+        raise ValueError("Delivery Copy cannot be a symbolic link")
+    return target
 
 
 def _verify_existing(target: Path, expected_digest: str, expected_size: int) -> DeliveryReceipt:

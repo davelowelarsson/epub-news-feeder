@@ -4,6 +4,7 @@ import json
 import sqlite3
 import subprocess
 import threading
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
@@ -11,6 +12,11 @@ from zipfile import ZipFile
 
 import pytest
 from lxml import etree
+
+from epub_news_feeder import application
+from epub_news_feeder.application import RetryableGenerationError, generate_edition
+from epub_news_feeder.config import load_config
+from epub_news_feeder.delivery import DeliveryReceipt
 
 
 class EditionFixtureHandler(BaseHTTPRequestHandler):
@@ -50,7 +56,9 @@ class EditionFixtureHandler(BaseHTTPRequestHandler):
 
 @pytest.mark.acceptance
 @pytest.mark.epubcheck
-def test_ticket_13_cli_generates_valid_body_free_local_edition(tmp_path: Path) -> None:
+def test_ticket_02_ticket_11_ticket_13_cli_generates_valid_body_free_edition(
+    tmp_path: Path,
+) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", 0), EditionFixtureHandler)
     EditionFixtureHandler.hits = []
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -64,6 +72,7 @@ sources:
   fixture:
     title: Fixture News
     publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
     feed_url: http://127.0.0.1:{server.server_port}/feed.xml
     acquisition: feed
     llm_processing: local_only
@@ -132,6 +141,8 @@ publications:
     editions = list(output.glob("*.epub"))
     assert len(editions) == 1
     epub_path = editions[0]
+    assert output.stat().st_mode & 0o077 == 0
+    assert epub_path.stat().st_mode & 0o077 == 0
 
     with ZipFile(epub_path) as archive:
         section_path = next(name for name in archive.namelist() if name.startswith("OEBPS/world-"))
@@ -174,3 +185,113 @@ publications:
         text=True,
     )
     assert validation.returncode == 0, validation.stdout + validation.stderr
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_validated_spool_resumes_without_reacquiring_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EditionFixtureHandler)
+    EditionFixtureHandler.hits = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config_path = tmp_path / "publication.yaml"
+    config_path.write_text(
+        f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture_private_use
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: fixture-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: unknown
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 2, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    configuration = load_config(config_path)
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+    diagnostics = tmp_path / "diagnostics"
+    run_id = "20260809T070000Z-BBBBBBBB"
+    generated_at = datetime(2026, 8, 9, 7, tzinfo=UTC)
+    original_delivery = application.deliver_local  # type: ignore[attr-defined]
+
+    def fail_final_delivery(
+        epub_bytes: bytes, *, output_directory: Path, filename: str
+    ) -> DeliveryReceipt:
+        if output_directory == output:
+            raise OSError("simulated unavailable final target")
+        return original_delivery(epub_bytes, output_directory=output_directory, filename=filename)
+
+    monkeypatch.setattr(application, "deliver_local", fail_final_delivery)
+    try:
+        with pytest.raises(RetryableGenerationError, match="Delivery remains pending"):
+            generate_edition(
+                configuration,
+                state_path=state,
+                output_directory=output,
+                diagnostics_directory=diagnostics,
+                run_id=run_id,
+                generated_at=generated_at,
+            )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    hits_before_resume = list(EditionFixtureHandler.hits)
+    monkeypatch.setattr(application, "deliver_local", original_delivery)
+    result = generate_edition(
+        configuration,
+        state_path=state,
+        output_directory=output,
+        diagnostics_directory=diagnostics,
+        run_id=run_id,
+        generated_at=generated_at,
+    )
+
+    assert result.article_count == 1
+    assert result.receipt.path.is_file()
+    assert EditionFixtureHandler.hits == hits_before_resume
+    assert not (tmp_path / "pending-editions" / f"{run_id}.epub").exists()
+    with sqlite3.connect(state) as connection:
+        assert connection.execute("SELECT status FROM runs").fetchone() == ("delivered",)
+        assert connection.execute("SELECT COUNT(*) FROM pending_deliveries").fetchone() == (0,)
+
+    repeated = generate_edition(
+        configuration,
+        state_path=state,
+        output_directory=output,
+        diagnostics_directory=diagnostics,
+        run_id=run_id,
+        generated_at=generated_at,
+    )
+    assert repeated.receipt == result.receipt
+    assert EditionFixtureHandler.hits == hits_before_resume

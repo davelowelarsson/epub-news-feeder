@@ -19,6 +19,7 @@ class Candidate:
     canonical_url: str
     published_at: datetime
     source_weight: int = 5
+    cluster_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +29,18 @@ class SectionCandidate:
     interest_score: int = 0
     essential: bool = False
     muted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class AncestorBudget:
+    """A named ancestor ceiling shared by one or more leaf Sections.
+
+    The ceiling counts Article identities once across the ancestor subtree, while
+    individual Sections count every Canonical Rendition or Section Pointer slot.
+    """
+
+    ancestor_id: str
+    max_articles: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +54,9 @@ class SectionRequest:
     weight: int = 5
     discovery_percent: float = 0.2
     candidates: tuple[SectionCandidate, ...] = ()
+    minimum_sources: int = 2
+    single_source_cap: float = 0.6
+    ancestor_budgets: tuple[AncestorBudget, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,12 +103,15 @@ def _freshness(candidate: SectionCandidate) -> float:
 
 
 def _apply_plurality(
-    ordered: list[SectionCandidate], limit: int
+    ordered: list[SectionCandidate],
+    limit: int,
+    minimum_sources: int,
+    single_source_cap: float,
 ) -> tuple[list[SectionCandidate], bool]:
     sources = {candidate.article.source_id for candidate in ordered}
-    if len(sources) < 2 or limit < 2:
+    if len(sources) < minimum_sources or limit < minimum_sources:
         return ordered[:limit], False
-    cap = max(1, math.floor(limit * 0.6))
+    cap = max(1, math.floor(limit * single_source_cap))
     selected: list[SectionCandidate] = []
     deferred: list[SectionCandidate] = []
     counts: dict[str, int] = {}
@@ -147,10 +166,11 @@ def _interest_order(
     if not candidates:
         return []
     discovery_count = 0
-    if limit >= 2:
+    if discovery_percent > 0 and limit > 0:
         discovery_count = max(1, math.ceil(limit * discovery_percent))
+    unscored = [candidate for candidate in candidates if candidate.interest_score == 0]
     discovery = sorted(
-        candidates,
+        unscored or candidates,
         key=lambda item: (-_freshness(item), item.article.source_id, item.article.canonical_url),
     )[:discovery_count]
     discovery_ids = {candidate.article.article_id for candidate in discovery}
@@ -177,7 +197,67 @@ def _rank_section(section: SectionRequest) -> tuple[list[SectionCandidate], bool
         ordered = _interest_order(eligible, section.max_articles, section.discovery_percent)
     else:
         ordered = _coverage_order(eligible)
-    return _apply_plurality(ordered, section.max_articles)
+    ordered.sort(key=lambda candidate: not candidate.essential)
+    essentials = [candidate for candidate in ordered if candidate.essential]
+    remaining = [candidate for candidate in ordered if not candidate.essential]
+    cluster_counts: dict[str, int] = {}
+    diversified: list[SectionCandidate] = []
+    while remaining:
+        index = min(
+            range(len(remaining)),
+            key=lambda position: cluster_counts.get(
+                remaining[position].article.cluster_id
+                or f"unclustered:{remaining[position].article.article_id}",
+                0,
+            ),
+        )
+        candidate = remaining.pop(index)
+        cluster = candidate.article.cluster_id or f"unclustered:{candidate.article.article_id}"
+        cluster_counts[cluster] = cluster_counts.get(cluster, 0) + 1
+        diversified.append(candidate)
+    ordered = essentials + diversified
+    return _apply_plurality(
+        ordered,
+        section.max_articles,
+        section.minimum_sources,
+        section.single_source_cap,
+    )
+
+
+def _normalized_minima(
+    sections: list[SectionRequest], publication_maximum: int
+) -> tuple[dict[str, int], bool]:
+    requested = {
+        section.section_id: min(section.min_articles, section.max_articles) for section in sections
+    }
+    total = sum(requested.values())
+    if total <= publication_maximum:
+        return requested, False
+    if publication_maximum == 0:
+        return {section.section_id: 0 for section in sections}, True
+    shares = {
+        section.section_id: requested[section.section_id] * publication_maximum / total
+        for section in sections
+    }
+    allocated = {section_id: math.floor(share) for section_id, share in shares.items()}
+    remaining = publication_maximum - sum(allocated.values())
+    for section in sorted(
+        sections,
+        key=lambda item: (-(shares[item.section_id] - allocated[item.section_id]), item.order),
+    )[:remaining]:
+        allocated[section.section_id] += 1
+    return allocated, True
+
+
+def _ancestor_maxima(sections: list[SectionRequest]) -> dict[str, int]:
+    maxima: dict[str, int] = {}
+    for section in sections:
+        for budget in section.ancestor_budgets:
+            existing = maxima.get(budget.ancestor_id)
+            if existing is not None and existing != budget.max_articles:
+                raise ValueError("Ancestor Budget must use one maximum everywhere in its subtree")
+            maxima[budget.ancestor_id] = budget.max_articles
+    return maxima
 
 
 def select_publication(request: PublicationRequest) -> SelectionResult:
@@ -188,47 +268,87 @@ def select_publication(request: PublicationRequest) -> SelectionResult:
         if relaxed:
             warnings.append(f"SOURCE_PLURALITY_RELAXED:{section.section_id}")
 
-    positions = {section.section_id: 0 for section in request.sections}
+    ordered_sections = sorted(request.sections, key=lambda item: item.order)
+    positions = {section.section_id: 0 for section in ordered_sections}
     section_counts = {section.section_id: 0 for section in request.sections}
+    section_article_ids = {section.section_id: set[str]() for section in request.sections}
     selected: list[SelectedSlot] = []
     unique: list[str] = []
     unique_set: set[str] = set()
-    ordered_sections = sorted(request.sections, key=lambda item: item.order)
+    ancestor_maxima = _ancestor_maxima(ordered_sections)
+    ancestor_article_ids = {ancestor_id: set[str]() for ancestor_id in ancestor_maxima}
+
+    def can_add(section: SectionRequest, candidate: SectionCandidate) -> bool:
+        article_id = candidate.article.article_id
+        if article_id in section_article_ids[section.section_id]:
+            return False
+        is_new = article_id not in unique_set
+        if is_new and len(unique) >= request.max_articles:
+            return False
+        for budget in section.ancestor_budgets:
+            article_ids = ancestor_article_ids[budget.ancestor_id]
+            if article_id not in article_ids and len(article_ids) >= budget.max_articles:
+                return False
+        return True
+
+    def add_next(section: SectionRequest, *, essential_only: bool = False) -> bool:
+        if section_counts[section.section_id] >= section.max_articles:
+            return False
+        candidates = ranked[section.section_id]
+        position = positions[section.section_id]
+        while position < len(candidates):
+            candidate = candidates[position]
+            if essential_only and not candidate.essential:
+                return False
+            position += 1
+            positions[section.section_id] = position
+            if not can_add(section, candidate):
+                continue
+            selected.append(
+                SelectedSlot(
+                    section.section_id,
+                    section.title,
+                    section.order,
+                    section_counts[section.section_id] + 1,
+                    candidate.article,
+                    candidate.relevance,
+                    candidate.essential,
+                    candidate.interest_score,
+                )
+            )
+            section_counts[section.section_id] += 1
+            section_article_ids[section.section_id].add(candidate.article.article_id)
+            if candidate.article.article_id not in unique_set:
+                unique_set.add(candidate.article.article_id)
+                unique.append(candidate.article.article_id)
+            for budget in section.ancestor_budgets:
+                ancestor_article_ids[budget.ancestor_id].add(candidate.article.article_id)
+            return True
+        return False
+
+    made_progress = True
+    while made_progress:
+        made_progress = False
+        for section in ordered_sections:
+            made_progress = add_next(section, essential_only=True) or made_progress
+
+    minima, normalized = _normalized_minima(ordered_sections, request.max_articles)
+    if normalized:
+        warnings.append("SECTION_MINIMA_NORMALIZED")
+    made_progress = True
+    while made_progress:
+        made_progress = False
+        for section in ordered_sections:
+            if section_counts[section.section_id] < minima[section.section_id]:
+                made_progress = add_next(section) or made_progress
+
     weighted_turns = [section for section in ordered_sections for _ in range(section.weight)]
 
     made_progress = True
     while made_progress and weighted_turns:
         made_progress = False
         for section in weighted_turns:
-            if section_counts[section.section_id] >= section.max_articles:
-                continue
-            candidates = ranked[section.section_id]
-            position = positions[section.section_id]
-            while position < len(candidates):
-                candidate = candidates[position]
-                position += 1
-                positions[section.section_id] = position
-                is_new = candidate.article.article_id not in unique_set
-                if is_new and len(unique) >= request.max_articles:
-                    continue
-                selected.append(
-                    SelectedSlot(
-                        section.section_id,
-                        section.title,
-                        section.order,
-                        section_counts[section.section_id] + 1,
-                        candidate.article,
-                        candidate.relevance,
-                        candidate.essential,
-                        candidate.interest_score,
-                    )
-                )
-                section_counts[section.section_id] += 1
-                if is_new:
-                    unique_set.add(candidate.article.article_id)
-                    unique.append(candidate.article.article_id)
-                made_progress = True
-                break
+            made_progress = add_next(section) or made_progress
     meets_minimum = len(unique) >= request.min_articles
     return SelectionResult(
         tuple(selected),
