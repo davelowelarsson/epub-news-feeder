@@ -107,13 +107,24 @@ jobs:
             --diagnostics "${RUNNER_TEMP}/diagnostics" \
             --state-environment production
 
-      # Codes only, never titles or URLs: this log is world-readable on a public repository.
+      # Codes and Source ids, never titles or URLs: this log is world-readable on a public
+      # repository, and a Source id is a key in a configuration file that is public anyway.
+      # Without the id, a Source that a hosted runner cannot reach - a publisher that treats
+      # datacentre addresses differently from a home connection - is undiagnosable.
       - name: Report diagnostic codes
         if: always()
         run: |
           set -euo pipefail
-          if [ -d "${RUNNER_TEMP}/diagnostics" ]; then
-            grep -ho '"code":"[A-Z_]*"' "${RUNNER_TEMP}"/diagnostics/*.jsonl | sort | uniq -c
-          else
+          if [ ! -d "${RUNNER_TEMP}/diagnostics" ]; then
             echo "No diagnostics were written."
+            exit 0
           fi
+          grep -ho '"code":"[A-Z_]*"' "${RUNNER_TEMP}"/diagnostics/*.jsonl | sort | uniq -c
+          echo "--- Sources that did not deliver cleanly ---"
+          # Filter to whole SOURCE_* lines first. Extracting fields across all lines would
+          # pair a code with the wrong id, because ARTICLE_SELECTED carries a source_id too.
+          grep -h '"code":"SOURCE_' "${RUNNER_TEMP}"/diagnostics/*.jsonl \
+            | grep -v '"code":"SOURCE_OK"' \
+            | grep -oE '"code":"[A-Z_]*"|"source_id":"[a-z0-9_]*"' \
+            | paste - - \
+            || echo "every Source delivered cleanly"
