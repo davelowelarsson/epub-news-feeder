@@ -811,9 +811,15 @@ publications:
   # carrying what the weekday Editions had no room for.
   #
   # `reads_history_from: [daily]` is what makes that a description rather than a hope. Every
-  # Article the daily delivered is suppressed here, so the Saturday Edition cannot reprint the
-  # week it is supposed to complete, and the Story Clusters the daily kept returning to lead the
-  # ordering - the week's continuing threads first, then everything that never got a slot.
+  # Article and every Brief the daily delivered is suppressed here, so the Saturday Edition cannot
+  # reprint the week it is supposed to complete, and the Story Clusters the daily kept returning
+  # to rank above Source weight inside each Section's own ordering - the week's continuing threads
+  # first, then everything that never got a slot.
+  #
+  # Recurrence ranks below a declared interest and never reorders the Essential Coverage Slice.
+  # Neither policy below declares positive rules or essential coverage today, so in practice
+  # recurrence is the leading discriminator in all five Sections - worth knowing when reading the
+  # first few Saturdays, because adding interest rules later will quietly demote it.
   #
   # The reference is one-directional by design: the weekly knows the daily, and the daily stays
   # unaware the weekly exists. Nothing about the weekday Editions changes because this block is

@@ -187,11 +187,20 @@ def test_cluster_recurrence_counts_distinct_days_rather_than_articles(tmp_path: 
     with StateStore(tmp_path / "state.sqlite3", environment="test") as state:
 
         def cluster_of(slug: str, signals: list[str], days: list[int]) -> str:
-            """Cluster `len(days)` real Articles on shared signals, delivering one per day."""
+            """Cluster one Article per entry in *days* and actually deliver each on that day.
+
+            Deliveries rather than `record_cluster_delivery`, because recurrence is read from
+            `deliveries` - the record every finalized Delivery writes on every path - and not
+            from the display-oriented `cluster_coverage`. Note that nothing here records cluster
+            coverage at all, and recurrence still works: that is the fix for a dateless Source,
+            whose Articles never reach `cluster_coverage` because the publication-date guard
+            skips them.
+            """
 
             article_ids: list[str] = []
-            for index, _ in enumerate(days):
+            for index, day in enumerate(days):
                 url = f"https://publisher.example/{slug}-{index}"
+                when = MONDAY + timedelta(days=day)
                 observed = state.observe_article(
                     source_id="source",
                     publisher_id="publisher",
@@ -200,23 +209,23 @@ def test_cluster_recurrence_counts_distinct_days_rather_than_articles(tmp_path: 
                     title=f"{slug} {index}",
                     author=None,
                     normalized_body=f"complete article body about {slug} {index} " * 40,
-                    observed_at=MONDAY,
+                    observed_at=when,
                 )
                 article_ids.append(observed.article_id)
-                state.match_story_cluster(observed.article_id, signals=signals, observed_at=MONDAY)
+                state.match_story_cluster(observed.article_id, signals=signals, observed_at=when)
+                run_id = f"run-{slug}-{index}"
+                state.begin_run(run_id, "daily", f"edition-{run_id}", when)
+                state.reserve_articles(
+                    run_id,
+                    "daily",
+                    [observed],
+                    when + timedelta(hours=1),
+                    article_count=1,
+                    publisher_link_count=0,
+                )
+                state.finalize_delivery(run_id, "daily", when, f"digest-{run_id}")
             cluster_id = state.story_cluster(article_ids[0])
             assert cluster_id is not None, f"{slug} did not cluster on shared signals"
-            for article_id, day in zip(article_ids, days, strict=True):
-                state.record_cluster_delivery(
-                    publication_id="daily",
-                    cluster_id=cluster_id,
-                    article_id=article_id,
-                    title=slug,
-                    publisher_id="publisher",
-                    canonical_url=f"https://publisher.example/{slug}-{article_id}",
-                    publisher_published_at=MONDAY,
-                    delivered_at=MONDAY + timedelta(days=day),
-                )
             return cluster_id
 
         # Three Articles, one morning: a busy day, which recurred once.
@@ -225,11 +234,96 @@ def test_cluster_recurrence_counts_distinct_days_rather_than_articles(tmp_path: 
         thread = cluster_of("thread", ["wildfire", "evacuation", "drought"], [0, 1, 2])
 
         assert state.cluster_recurrence(("daily",)) == {busy: 1, thread: 3}
-        # The window is what keeps coverage that is never pruned from outranking the week.
+        # The window is what keeps deliveries that are never pruned from outranking the week.
         assert state.cluster_recurrence(("daily",), since=MONDAY + timedelta(days=2)) == {thread: 1}
         # Nothing was asked about, so nothing is answered - the fail-open path.
         assert state.cluster_recurrence(()) == {}
         assert state.cluster_recurrence(("household",)) == {}
+
+
+def test_recurrence_counts_a_revisited_article_on_each_day_it_was_redelivered(
+    tmp_path: Path,
+) -> None:
+    """A running story is often one Article the Publication re-delivers as it is updated.
+
+    `cluster_coverage` cannot express that - its key is (publication, cluster, article) and its
+    writer is `INSERT OR IGNORE`, so the row keeps the date of the first delivery forever and the
+    story scores one day however many times it came back. `deliveries` keys on the revision, so
+    each re-delivery contributes its own date. This is the case that made the display table the
+    wrong source for an ordering signal.
+    """
+
+    signals = ["wildfire", "evacuation", "valley"]
+    url = "https://publisher.example/running-story"
+    with StateStore(tmp_path / "state.sqlite3", environment="test") as state:
+
+        def deliver(observation: object, *, when: datetime, tag: str) -> None:
+            run_id = f"run-{tag}"
+            state.begin_run(run_id, "daily", f"edition-{run_id}", when)
+            state.reserve_articles(
+                run_id,
+                "daily",
+                [observation],  # type: ignore[list-item]
+                when + timedelta(hours=1),
+                article_count=1,
+                publisher_link_count=0,
+            )
+            state.finalize_delivery(run_id, "daily", when, f"digest-{run_id}")
+
+        # A Cluster needs two Articles to form, so the running story gets a peer from another
+        # publisher on the same morning. The peer adds no distinct day of its own.
+        running = state.observe_article(
+            source_id="source",
+            publisher_id="publisher",
+            canonical_url=url,
+            guid="running-story",
+            title="Wildfire",
+            author=None,
+            normalized_body="the wildfire reached the valley overnight and crews withdrew " * 30,
+            observed_at=MONDAY,
+        )
+        state.match_story_cluster(running.article_id, signals=signals, observed_at=MONDAY)
+        peer = state.observe_article(
+            source_id="source",
+            publisher_id="other-publisher",
+            canonical_url="https://other.example/wildfire",
+            guid="peer",
+            title="Wildfire, from the ridge",
+            author=None,
+            normalized_body="a separate report on the valley wildfire and the evacuation " * 30,
+            observed_at=MONDAY,
+        )
+        cluster_id = state.match_story_cluster(peer.article_id, signals=signals, observed_at=MONDAY)
+        assert cluster_id is not None, "two Articles sharing three signals must cluster"
+        deliver(running, when=MONDAY, tag="running-0")
+        deliver(peer, when=MONDAY, tag="peer-0")
+
+        # The same Article comes back on Tuesday and Wednesday as the story is rewritten.
+        for day, body in enumerate(
+            [
+                "the wildfire jumped the ridge and two more villages were evacuated " * 30,
+                "the wildfire is now contained and the evacuation order was lifted " * 30,
+            ],
+            start=1,
+        ):
+            when = MONDAY + timedelta(days=day)
+            revision = state.observe_article(
+                source_id="source",
+                publisher_id="publisher",
+                canonical_url=url,
+                guid="running-story",
+                title="Wildfire",
+                author=None,
+                normalized_body=body,
+                observed_at=when,
+                publication_id="daily",
+            )
+            assert revision.eligible, f"day {day} is a materially changed revision"
+            assert revision.article_id == running.article_id, "must stay the same Article identity"
+            deliver(revision, when=when, tag=f"running-{day}")
+
+        # Three mornings, one Article identity. cluster_coverage would have said 1.
+        assert state.cluster_recurrence(("daily",)) == {cluster_id: 3}
 
 
 def _candidate(article_id: str, *, cluster_id: str, recurrence: int) -> SectionCandidate:
@@ -325,3 +419,102 @@ def test_essential_coverage_still_outranks_the_weeks_most_recurrent_story() -> N
     )
 
     assert [slot.article.article_id for slot in result.slots] == ["essential", "recurrent"]
+
+
+def _weighted(
+    article_id: str, *, cluster_id: str, recurrence: int, weight: int, essential: bool = False
+) -> SectionCandidate:
+    return SectionCandidate(
+        Candidate(
+            article_id,
+            f"source-{article_id}",
+            f"Article {article_id}",
+            f"https://publisher.example/{article_id}",
+            MONDAY,
+            source_weight=weight,
+            cluster_id=cluster_id,
+        ),
+        essential=essential,
+        recurrence=recurrence,
+    )
+
+
+def test_recurrence_promotes_into_an_interest_section_rather_than_only_reordering_it() -> None:
+    """The interest policy truncates to `max_articles` while it orders, so recurrence has to be
+    inside that ordering.
+
+    Applied afterwards it could only shuffle the Articles interest had already chosen, which made
+    it a no-op in every interest Section - four of the weekly's five. The `personlig` policy
+    declares no positive or negative rules, so every interest_score is 0 and the survivors were
+    picked on Source weight alone: a thread the daily returned to on five mornings lost its slot
+    to a heavier Source and never appeared at all.
+    """
+
+    thread = _weighted("thread", cluster_id="thread", recurrence=5, weight=1)
+    heavy_one = _weighted("heavy-one", cluster_id="quiet-a", recurrence=0, weight=9)
+    heavy_two = _weighted("heavy-two", cluster_id="quiet-b", recurrence=0, weight=9)
+
+    result = select_publication(
+        PublicationRequest(
+            max_articles=2,
+            min_articles=1,
+            sections=(
+                SectionRequest(
+                    "section-one",
+                    "Section one",
+                    0,
+                    Policy.INTEREST,
+                    max_articles=2,
+                    # No discovery slice, so the two slots are decided purely by the ordering.
+                    discovery_percent=0.0,
+                    minimum_sources=1,
+                    single_source_cap=1.0,
+                    candidates=(heavy_one, heavy_two, thread),
+                ),
+            ),
+        )
+    )
+    selected = [slot.article.article_id for slot in result.slots]
+
+    assert "thread" in selected, "the week's continuing thread must reach the Section at all"
+    assert selected[0] == "thread", "and it must lead it"
+    assert len(selected) == 2
+
+
+def test_recurrence_does_not_reorder_the_essential_coverage_slice() -> None:
+    """Essentials skip cluster diversification, so recurrence must not sort them.
+
+    `_rank_section` emits `essentials + diversified`, and only `diversified` is round-robined by
+    Story Cluster. Sorting the essential block by recurrence therefore has no counterweight: the
+    three essentials from one hammered cluster would open the Section back to back, ahead of the
+    heaviest, freshest essential from another Source. The policy orders essentials; recurrence
+    does not get a say.
+    """
+
+    heavy = _weighted("heavy", cluster_id="quiet", recurrence=0, weight=9, essential=True)
+    light_recurrent = _weighted(
+        "light-recurrent", cluster_id="thread", recurrence=7, weight=1, essential=True
+    )
+
+    result = select_publication(
+        PublicationRequest(
+            max_articles=2,
+            min_articles=1,
+            sections=(
+                SectionRequest(
+                    "section-one",
+                    "Section one",
+                    0,
+                    Policy.COVERAGE,
+                    max_articles=2,
+                    minimum_sources=1,
+                    single_source_cap=1.0,
+                    candidates=(light_recurrent, heavy),
+                ),
+            ),
+        )
+    )
+
+    # `_coverage_order` sorts essentials by -source_weight first, and recurrence is absent from
+    # that key, so the heavier Source leads however much of the week the other one occupied.
+    assert [slot.article.article_id for slot in result.slots] == ["heavy", "light-recurrent"]

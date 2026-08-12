@@ -85,10 +85,17 @@ twice the Budget, and — this is the whole of what makes it a weekly rather tha
 
 Suppression is otherwise per-Publication, deliberately, so a Saturday Edition built from the same
 feeds would carry precisely the reading the weekdays had already delivered. That reference is the
-one sanctioned way through the boundary: every Article the daily delivered is suppressed, and the
-Story Clusters it kept returning to lead the ordering, so Saturday completes the week rather than
-reprinting it. The reference is one-directional — the daily is unaware the weekly exists, and no
-weekday Edition changes because the weekly is configured.
+one sanctioned way through the boundary: every Article *and every Brief* the daily delivered is
+suppressed, and the Story Clusters it kept returning to rank ahead of Source weight in each
+Section's ordering, so Saturday completes the week rather than reprinting it. The reference is
+one-directional — the daily is unaware the weekly exists, and no weekday Edition changes because
+the weekly is configured.
+
+Recurrence is read from `deliveries`, not from `cluster_coverage`. Coverage exists to render a
+Story Hub and is incomplete in three ways that do not matter for display and matter entirely for
+ordering: it keeps an Article's first delivery date forever, the spool-resume path never writes
+it, and Articles from Sources whose feeds carry no publication date are skipped. It ranks below a
+reader's declared interest and never reorders the Essential Coverage Slice.
 
 One limit worth knowing: a Saturday Run acquires from the same feeds as any other, so it carries
 only what is still in them. Monday's near-miss has usually fallen off by Saturday, and re-fetching

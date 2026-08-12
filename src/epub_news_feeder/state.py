@@ -1020,6 +1020,18 @@ class StateStore:
         Distinct days rather than Article count, because recurrence is the signal being
         measured: a story four publishers covered on one morning recurred once, while a story
         one publisher returned to on four mornings is the week's continuing thread.
+
+        Read from ``deliveries`` joined to the global ``story_articles``, deliberately, and not
+        from ``cluster_coverage``. Coverage exists to render a Story Hub and is incomplete in
+        three ways that do not matter for display and matter entirely for ordering: its
+        ``INSERT OR IGNORE`` pins ``delivered_at`` to an Article's first delivery, so a story
+        the Publication returned to contributes one dated row rather than several; the
+        spool-resume path finalizes a Delivery without writing coverage at all; and Articles
+        from Sources whose feeds carry no publication date are skipped outright.
+
+        ``deliveries`` has none of those properties. Every finalized Delivery writes to it on
+        every path, its key includes the revision so a re-delivered Article contributes its own
+        row and its own date, and it is indifferent to whether a publisher dated anything.
         """
 
         identifiers = tuple(dict.fromkeys(publication_ids))
@@ -1029,14 +1041,17 @@ class StateStore:
         parameters: list[str] = list(identifiers)
         window = ""
         if since is not None:
-            window = " AND delivered_at >= ?"
+            window = " AND deliveries.delivered_at >= ?"
             parameters.append(since.isoformat())
         rows = self.connection.execute(
             f"""
-            SELECT cluster_id, COUNT(DISTINCT substr(delivered_at, 1, 10)) AS days
-            FROM cluster_coverage
-            WHERE publication_id IN ({placeholders}){window}
-            GROUP BY cluster_id
+            SELECT story_articles.cluster_id AS cluster_id,
+                   COUNT(DISTINCT substr(deliveries.delivered_at, 1, 10)) AS days
+            FROM deliveries
+            JOIN story_articles ON story_articles.article_id = deliveries.article_id
+            WHERE deliveries.publication_id IN ({placeholders})
+              AND story_articles.cluster_id IS NOT NULL{window}
+            GROUP BY story_articles.cluster_id
             """,
             parameters,
         ).fetchall()

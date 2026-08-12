@@ -529,6 +529,16 @@ publications:
       - id: current
         title: Current reporting
         sources: [briefs]
+  - id: recap
+    title: Recap Edition
+    language: en
+    reads_history_from: [daily]
+    budget: {{max_articles: 6, min_articles: 0}}
+    max_briefs: 6
+    sections:
+      - id: current
+        title: Current reporting
+        sources: [briefs]
 """.lstrip(),
         encoding="utf-8",
     )
@@ -611,6 +621,28 @@ publications:
                 if name.endswith(".xhtml")
             )
         assert "Harbour spill under investigation" in xhtml
+
+        # "recap" declares reads_history_from: [daily], and a Brief identity is derived from the
+        # canonical URL, so both Briefs the daily delivered are suppressed here even though
+        # "recap" has never delivered anything. Deduplicating a Publication's Articles while its
+        # Brief roll reprinted the week would have deduplicated the cheaper half of the Edition.
+        BriefSuppressionFixtureHandler.phase = "day-two"
+        recap = run(
+            publication="recap",
+            run_id="20260811T060000Z-RECAPAAA",
+            at="2026-08-11T06:00:00Z",
+        )
+        assert recap.returncode == 0, recap.stderr
+        assert "briefs=0" in recap.stdout, recap.stdout
+        with ZipFile(next(output.glob("*RECAPAAA*.epub"))) as archive:
+            xhtml = " ".join(
+                archive.read(name).decode()
+                for name in archive.namelist()
+                if name.endswith(".xhtml")
+            )
+        assert "Harbour spill under investigation" not in xhtml
+        assert "Harbour spill investigation continues" not in xhtml
+        assert "New coastal report emerges" not in xhtml
     finally:
         server.shutdown()
         thread.join()
@@ -623,7 +655,8 @@ publications:
             ).fetchall()
         )
         # "daily" delivered the spill report on day one and the new report on day two;
-        # "weekend" independently delivered the spill report once.
+        # "weekend" independently delivered the spill report once, because it names no history.
+        # "recap" reads the daily's, so it delivered nothing and recorded nothing.
         assert counts == {"daily": 2, "weekend": 1}
         assert connection.execute("SELECT COUNT(*) FROM articles").fetchone() == (0,)
 

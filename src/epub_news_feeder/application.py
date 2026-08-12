@@ -463,9 +463,14 @@ def _run(
     finally:
         client.close()
 
-    # A Brief already delivered to this Publication is suppressed at candidacy, before it ever
-    # reaches selection: a reworded headline on the same report is not new.
-    delivered_brief_ids = state.delivered_brief_ids(publication.id)
+    # A Brief already delivered is suppressed at candidacy, before it ever reaches selection: a
+    # reworded headline on the same report is not new. Every Publication this one reads is asked
+    # too, not only this one - `brief_id` is derived from the canonical URL, so it is the same
+    # identity in every Publication, and a weekly whose Articles were deduplicated while its
+    # Brief roll reprinted the week would have deduplicated the cheaper half of the Edition.
+    delivered_brief_ids: set[str] = set()
+    for history_id in (publication.id, *publication.reads_history_from):
+        delivered_brief_ids |= state.delivered_brief_ids(history_id)
     briefs = {
         brief_id: record
         for brief_id, record in briefs.items()
@@ -553,11 +558,20 @@ def _run(
             cluster_articles.setdefault(cluster_id, []).append(article_id)
     hubs_by_section: dict[str, list[StoryHubInput]] = {}
     for cluster_id, article_ids in cluster_articles.items():
-        prior = [
-            coverage
-            for coverage in state.prior_cluster_coverage(publication.id, cluster_id, limit=10)
-            if coverage.article_id not in article_ids
-        ][:3]
+        # Every Publication whose history this one reads, not only this one. A weekly promotes a
+        # thread precisely because the daily kept returning to it, so asking only itself returns
+        # nothing - it has never delivered into that Cluster - and the `< 2 and not prior` guard
+        # below would then drop the Story Hub from the one Article that most needs the timeline.
+        seen_prior: set[str] = set()
+        prior = []
+        for history_id in (publication.id, *publication.reads_history_from):
+            for coverage in state.prior_cluster_coverage(history_id, cluster_id, limit=10):
+                if coverage.article_id in article_ids or coverage.article_id in seen_prior:
+                    continue
+                seen_prior.add(coverage.article_id)
+                prior.append(coverage)
+        prior.sort(key=lambda coverage: (coverage.delivered_at, coverage.article_id), reverse=True)
+        prior = prior[:3]
         if len(article_ids) < 2 and not prior:
             continue
         host_section = placements[article_ids[0]].primary_section_id
