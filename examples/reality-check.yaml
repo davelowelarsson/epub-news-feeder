@@ -806,3 +806,115 @@ publications:
         budget:
           max_articles: 2
         sources: [svt_damallsvenskan, svt_fotboll, wwf, natgeokids]
+
+  # Saturday. The same Sources and the same five Sections as the daily, at twice the Budget,
+  # carrying what the weekday Editions had no room for.
+  #
+  # `reads_history_from: [daily]` is what makes that a description rather than a hope. Every
+  # Article and every Brief the daily delivered is suppressed here, so the Saturday Edition cannot
+  # reprint the week it is supposed to complete, and the Story Clusters the daily kept returning
+  # to rank above Source weight inside each Section's own ordering - the week's continuing threads
+  # first, then everything that never got a slot.
+  #
+  # Recurrence ranks below a declared interest and never reorders the Essential Coverage Slice.
+  # Neither policy below declares positive rules or essential coverage today, so in practice
+  # recurrence is the leading discriminator in all five Sections - worth knowing when reading the
+  # first few Saturdays, because adding interest rules later will quietly demote it.
+  #
+  # The reference is one-directional by design: the weekly knows the daily, and the daily stays
+  # unaware the weekly exists. Nothing about the weekday Editions changes because this block is
+  # here, which is the property that made an opt-in reference preferable to global suppression.
+  #
+  # Note the ceiling this cannot exceed today: a Saturday Run acquires from the same feeds as any
+  # other, so it can only carry what is still in them. Monday's near-miss has usually fallen off
+  # by Saturday, and re-fetching one by its stored canonical_url needs an acquisition route that
+  # does not exist yet. Wednesday through Friday is the honest reach of this Edition for now.
+  - id: weekly
+    title: Veckoutgavan
+    language: sv
+    reads_history_from: [daily]
+    # Twice the daily's Briefs, for six days of them rather than one.
+    max_briefs: 12
+    budget:
+      max_articles: 30
+      min_articles: 1
+    # Policies are per-Publication, so these are deliberately the daily's, duplicated rather
+    # than shared. A weekly that quietly inherited an edit to the daily's mute rules would be
+    # the same coupling `reads_history_from` was kept narrow to avoid.
+    policies:
+      aktuellt:
+        type: coverage
+        minimum_sources: 2
+      personlig:
+        type: interest
+        minimum_sources: 1
+        single_source_cap: 1.0
+        mute_rules:
+          - rule:
+              field: title
+              match: phrase
+              value: horoskop
+          - rule:
+              field: title
+              match: phrase
+              value: OpenSourceMalware Show
+    editorial:
+      enabled: true
+      remote_processing: true
+      provider: openai
+      model_pair:
+        editorial_model: gpt-5.4-2026-03-05
+        verifier_model: gpt-5.4-mini-2026-03-17
+        editorial_prompt_version: article-summary-v1
+        verifier_prompt_version: evidence-check-v1
+        schema_version: 1
+      capabilities: [article_summary]
+      # Scaled with the Budget, not with hope: remote eligibility still reaches exactly one
+      # Source, so almost nothing here is ever summarised and the envelope is a ceiling rather
+      # than a forecast.
+      cost_envelope:
+        max_calls: 24
+        max_tokens: 24000
+    sections:
+      - id: aktuellt
+        title: Aktuellt
+        policy: aktuellt
+        budget:
+          max_articles: 8
+        sources: [svt_inrikes, svt_utrikes, ekot]
+      - id: anna
+        title: Anna
+        policy: personlig
+        budget:
+          max_articles: 6
+        sources: [runnersworld, svt_kultur, attention, forskning_skola, specialnest, elle]
+      - id: david
+        title: David
+        policy: personlig
+        budget:
+          max_articles: 6
+        sources:
+          - david
+          - ars
+          - svt_vetenskap
+          - nasa
+          - kubernetes
+          - krebs
+          - hackaday
+          - prusa
+          - bleepingcomputer
+          - cybersecuritynews
+          - opensourcemalware
+          - githubblog
+      - id: alice
+        title: Alice
+        policy: personlig
+        budget:
+          max_articles: 6
+        sources: [danstidningen, snexplores]
+      - id: linnea
+        title: Linnea
+        policy: personlig
+        budget:
+          max_articles: 4
+        sources: [svt_damallsvenskan, svt_fotboll, wwf, natgeokids]

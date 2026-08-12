@@ -29,6 +29,10 @@ class SectionCandidate:
     interest_score: int = 0
     essential: bool = False
     muted: bool = False
+    # On how many distinct days a referenced Publication delivered into this Article's Story
+    # Cluster. Zero for every Publication that reads no other's history, which is why it can
+    # enter the ordering unconditionally without changing any existing Edition.
+    recurrence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +153,11 @@ def _apply_plurality(
 
 
 def _coverage_order(candidates: list[SectionCandidate]) -> list[SectionCandidate]:
+    # The Essential Coverage Slice is ordered by the policy alone, recurrence deliberately
+    # excluded. Essentials bypass the cluster diversification below - `essentials + diversified`
+    # - so letting recurrence sort them would emit one story from three publishers back to back
+    # at the head of the Section with nothing left to break it up. Essential means the Edition
+    # owes the reader this, which is not a claim recurrence gets to reorder.
     essential = sorted(
         (candidate for candidate in candidates if candidate.essential),
         key=lambda item: (-item.article.source_weight, -_freshness(item), item.article.source_id),
@@ -157,8 +166,11 @@ def _coverage_order(candidates: list[SectionCandidate]) -> list[SectionCandidate
     by_source: dict[str, list[SectionCandidate]] = {}
     for candidate in remaining:
         by_source.setdefault(candidate.article.source_id, []).append(candidate)
+    # Within a Source, the week's continuing thread comes before the merely fresher item.
     for source_candidates in by_source.values():
-        source_candidates.sort(key=lambda item: (-_freshness(item), item.article.canonical_url))
+        source_candidates.sort(
+            key=lambda item: (-item.recurrence, -_freshness(item), item.article.canonical_url)
+        )
     counts: dict[str, int] = {}
     for candidate in essential:
         source = candidate.article.source_id
@@ -166,10 +178,14 @@ def _coverage_order(candidates: list[SectionCandidate]) -> list[SectionCandidate
     ordered = list(essential)
     while any(by_source.values()):
         available = [source for source, values in by_source.items() if values]
+        # Plurality still decides which Source is due; recurrence only breaks the tie between
+        # Sources that are equally due, ahead of freshness. Putting it before the count would
+        # let one Source's continuing story defeat the plurality the Section exists to have.
         source = min(
             available,
             key=lambda value: (
                 counts.get(value, 0) / max(1, by_source[value][0].article.source_weight),
+                -by_source[value][0].recurrence,
                 -_freshness(by_source[value][0]),
                 value,
             ),
@@ -193,6 +209,15 @@ def _interest_order(
         key=lambda item: (-_freshness(item), item.article.source_id, item.article.canonical_url),
     )[:discovery_count]
     discovery_ids = {candidate.article.article_id for candidate in discovery}
+    # Recurrence ranks below the reader's declared interest and above Source weight. Below,
+    # because an interest Section is where somebody said what they want and the week's most
+    # covered story does not overrule that; above, because weight is a proxy the reader never
+    # stated. Where a policy declares no rules - as `personlig` does not - every interest_score
+    # is 0 and recurrence becomes the leading discriminator, which is the intent.
+    #
+    # It must be here rather than applied afterwards: this sort is followed immediately by a
+    # truncation to `limit`, so a promotion layered on the result could only reorder Articles
+    # already chosen and could never pull a recurring thread into the Section.
     influenced = sorted(
         (
             candidate
@@ -201,6 +226,7 @@ def _interest_order(
         ),
         key=lambda item: (
             -item.interest_score,
+            -item.recurrence,
             -item.article.source_weight,
             -_freshness(item),
             item.article.source_id,
@@ -216,6 +242,13 @@ def _rank_section(section: SectionRequest) -> tuple[list[SectionCandidate], bool
         ordered = _interest_order(eligible, section.max_articles, section.discovery_percent)
     else:
         ordered = _coverage_order(eligible)
+    # A stable partition, so each group keeps the order its policy chose - including the
+    # recurrence ranking, which both policies applied above rather than here. Recurrence used to
+    # be a promotion at this line, which was wrong twice over: the interest path had already
+    # truncated to `max_articles`, so it could only reorder Articles rather than promote one into
+    # the Section, and it re-sorted the essential block, which never reaches the diversification
+    # below. Cluster diversification then keeps a recurrent story leading without letting it
+    # monopolise: the first pick is the most recurrent, the next is from another cluster.
     ordered.sort(key=lambda candidate: not candidate.essential)
     essentials = [candidate for candidate in ordered if candidate.essential]
     remaining = [candidate for candidate in ordered if not candidate.essential]

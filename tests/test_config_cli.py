@@ -17,6 +17,8 @@ RUN_ID = re.compile(r"\b\d{8}T\d{6}Z-[A-Z2-7]{8}\b")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 REALITY_CHECK_CONFIG = REPOSITORY_ROOT / "examples" / "reality-check.yaml"
 SCHEDULED_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "daily-edition.yml"
+WEEKLY_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "weekly-edition.yml"
+SCHEDULED_WORKFLOWS = (SCHEDULED_WORKFLOW, WEEKLY_WORKFLOW)
 
 # The rights basis SVT's configuration is upgraded to by this ticket: a published Content-Signal
 # permission for AI retrieval, rather than bare operator attestation. See issue #57 / #51 / #44.
@@ -469,10 +471,10 @@ def test_reality_check_svt_basis_upgrade_changes_no_gate_or_eligibility_value(
     assert upgraded_dump == previous_dump
 
 
-def _scheduled_generate_command() -> list[str]:
-    """The generate invocation the scheduled workflow actually runs, as a token list."""
+def _scheduled_generate_command(workflow_path: Path = SCHEDULED_WORKFLOW) -> list[str]:
+    """The generate invocation a scheduled workflow actually runs, as a token list."""
 
-    workflow = yaml.safe_load(SCHEDULED_WORKFLOW.read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
     script: str = next(
         step["run"]
         for step in workflow["jobs"]["edition"]["steps"]
@@ -482,16 +484,22 @@ def _scheduled_generate_command() -> list[str]:
 
 
 @pytest.mark.security
-def test_scheduled_workflow_names_a_publication_that_exists_and_can_run_unattended() -> None:
-    """The one run nobody watches must not drift away from the configuration it names.
+@pytest.mark.parametrize("workflow_path", SCHEDULED_WORKFLOWS, ids=lambda path: path.stem)
+def test_scheduled_workflow_names_a_publication_that_exists_and_can_run_unattended(
+    workflow_path: Path,
+) -> None:
+    """No run nobody watches may drift away from the configuration it names.
 
-    Renaming the Publication or moving the configuration file would surface only as a 04:00
+    Renaming the Publication or moving the configuration file would surface only as a dawn
     failure. So would enabling the local editorial route: a GitHub-hosted runner has no
     Ollama, so a scheduled Publication that asks for it degrades silently to no summaries
     every morning. Both fail here instead.
+
+    Parametrised over every scheduled Edition rather than written once for the daily, so that
+    adding a third does not quietly leave it unguarded.
     """
 
-    command = _scheduled_generate_command()
+    command = _scheduled_generate_command(workflow_path)
     config_path = REPOSITORY_ROOT / command[command.index("--config") + 1]
     publication_id = command[command.index("--publication") + 1]
 
@@ -507,6 +515,78 @@ def test_scheduled_workflow_names_a_publication_that_exists_and_can_run_unattend
     # State persistence is what keeps a daily run from re-delivering yesterday's reading. A
     # scheduled run without it is worse than no scheduled run at all.
     assert "--state-environment" in command
+
+
+@pytest.mark.parametrize("workflow_path", SCHEDULED_WORKFLOWS, ids=lambda path: path.stem)
+def test_scheduled_workflow_avoids_the_queue_that_delayed_delivery(workflow_path: Path) -> None:
+    """Delivery has to beat 07:00 Stockholm, and the schedule is the only reason it ever did not.
+
+    Scheduled at "0 4" the daily spent 67 to 96 minutes in GitHub's queue and delivered at 07:11,
+    07:29 and 07:41, against a job finishing in under five minutes. GitHub documents the start of
+    every hour as its own worst case. So: never the top of the hour, and early enough that the
+    worst delay actually observed still lands before the deadline - 05:00 UTC, which is 07:00 in
+    Stockholm through the summer, the tighter half of the DST year.
+    """
+
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    # `on` is parsed as the boolean True by YAML 1.1, which is why this is not workflow["on"].
+    schedules = workflow[True]["schedule"]
+    assert schedules, f"{workflow_path.name} defines no schedule"
+
+    # 96.4 minutes is the worst queue this repository has actually been dealt; 97 rounds it up.
+    # The job's own runtime counts too - the deadline is delivery, not the start of the attempt.
+    worst_observed_queue_minutes = 97
+    observed_job_minutes = 5
+    deadline_minutes = 5 * 60
+
+    for entry in schedules:
+        minute, hour = (int(field) for field in entry["cron"].split()[:2])
+        assert minute != 0, "the top of the hour is GitHub's documented worst case"
+        start_minutes = hour * 60 + minute
+        delivered_by = start_minutes + worst_observed_queue_minutes + observed_job_minutes
+        assert delivered_by <= deadline_minutes, (
+            f"{entry['cron']!r} would deliver {delivered_by - deadline_minutes} minutes after "
+            f"05:00 UTC if it met the {worst_observed_queue_minutes} minute queue already "
+            f"observed, missing 07:00 Stockholm"
+        )
+
+
+def test_the_weekly_completes_the_week_instead_of_reprinting_it() -> None:
+    """The weekly's whole identity is a configuration reference, so assert it rather than trust it.
+
+    Without `reads_history_from` the Saturday Edition is a sixth daily built from the same feeds:
+    per-Publication suppression means it would carry precisely the reading the weekdays already
+    delivered. The reference must also stay one-directional, or the daily starts suppressing
+    against Saturday and the weekday Editions change for a reason nobody asked for.
+    """
+
+    configuration = load_config(REALITY_CHECK_CONFIG)
+    publications = {publication.id: publication for publication in configuration.publications}
+    weekly = publications["weekly"]
+    daily = publications["daily"]
+
+    assert weekly.reads_history_from == ["daily"]
+    assert daily.reads_history_from == [], "the daily must not know the weekly exists"
+
+    # A weekly at the daily's Budget would report the week in fifteen Articles it is forbidden
+    # from carrying. Whatever the numbers become, the weekly's has to be the larger.
+    assert weekly.budget is not None and daily.budget is not None
+    weekly_max, daily_max = weekly.budget.max_articles, daily.budget.max_articles
+    assert weekly_max is not None and daily_max is not None
+    assert weekly_max > daily_max
+    assert weekly.max_briefs > daily.max_briefs
+
+    # Same Sources, per the decision this Publication was built to. A weekly quietly reading
+    # different feeds would be a different Edition wearing this one's name.
+    def sources(publication: object) -> set[str]:
+        collected: set[str] = set()
+        sections = getattr(publication, "sections", [])
+        for section in sections:
+            collected.update(section.sources)
+            collected.update(sources(section))
+        return collected
+
+    assert sources(weekly) == sources(daily)
 
 
 REMOTE_EDITORIAL_CONFIG = """
