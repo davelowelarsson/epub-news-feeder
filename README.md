@@ -68,8 +68,12 @@ Set `editorial.enabled: false` for the fully deterministic no-LLM path.
 
 ## The scheduled Edition
 
-`.github/workflows/daily-edition.yml` builds one Edition every day at 04:00 UTC — 06:00 in
-Stockholm through the summer, 05:00 through the winter, since GitHub cron does not observe DST.
+`.github/workflows/daily-edition.yml` builds one Edition every day at 03:17 UTC — 05:17 in
+Stockholm through the summer, 04:17 through the winter, since GitHub cron does not observe DST.
+The requirement is 07:00 Stockholm, so that is a deliberately early start: a scheduled run is a
+request rather than a promise, and GitHub queues it for as long as it likes. Scheduling on the
+hour cost 67 to 96 minutes of queue on three consecutive weekdays, against a job that finishes
+in under five. Hence the odd minute and the wide margin — see the comment in the workflow.
 It runs the `daily` Publication of `examples/reality-check.yaml`. A hosted runner has no Ollama,
 so its summaries come from the remote editorial route — which reaches exactly one Source, the one
 whose rightsholder granted it.

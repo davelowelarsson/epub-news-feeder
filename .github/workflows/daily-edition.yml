@@ -6,12 +6,23 @@ name: Daily Edition
 # Weekdays only. Saturday carries the weekly Edition, which is a separate Publication and a
 # separate workflow; Sunday has none.
 #
-# GitHub cron is UTC and does not observe DST: 04:00 UTC is 06:00 in Stockholm through the
-# summer and 05:00 through the winter. Either way the Edition is on the device before the
-# reader wakes, which is the requirement; an hour of drift is not worth a second schedule.
+# GitHub cron is UTC and does not observe DST: 03:17 UTC is 05:17 in Stockholm through the
+# summer and 04:17 through the winter. Earlier than necessary in both cases, deliberately.
+#
+# The minute matters more than the hour. A schedule is a request, not a promise: GitHub
+# queues scheduled runs and documents the start of every hour as its own worst case, so the
+# previous "0 4" spent 67 to 96 minutes waiting on three consecutive weekdays and delivered
+# at 07:11, 07:29 and 07:41 Stockholm. The job itself takes under five minutes; all of that
+# was queue. Under sufficient load GitHub drops queued runs outright rather than delaying
+# them, so an unlucky minute costs the whole Edition, not just its punctuality.
+#
+# Hence :17 - no round number, no top of the hour - and hence the early hour. The Edition
+# has to be on the device by 07:00 Stockholm, which is 05:00 UTC through the summer, the
+# tighter half of the year. Starting at 03:17 leaves 98 minutes of slack, which covers the
+# worst delay this workflow has actually been dealt with the job's own runtime to spare.
 on:
   schedule:
-    - cron: "0 4 * * 1-5"
+    - cron: "17 3 * * 1-5"
   workflow_dispatch:
 
 permissions:
