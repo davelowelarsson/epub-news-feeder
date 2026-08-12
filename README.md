@@ -66,9 +66,9 @@ uv run epub-news-feeder ollama-check --model gemma4:e4b-mlx
 
 Set `editorial.enabled: false` for the fully deterministic no-LLM path.
 
-## The scheduled Edition
+## The scheduled Editions
 
-`.github/workflows/daily-edition.yml` builds one Edition every day at 03:17 UTC — 05:17 in
+`.github/workflows/daily-edition.yml` builds one Edition every weekday at 03:17 UTC — 05:17 in
 Stockholm through the summer, 04:17 through the winter, since GitHub cron does not observe DST.
 The requirement is 07:00 Stockholm, so that is a deliberately early start: a scheduled run is a
 request rather than a promise, and GitHub queues it for as long as it likes. Scheduling on the
@@ -78,10 +78,26 @@ It runs the `daily` Publication of `examples/reality-check.yaml`. A hosted runne
 so its summaries come from the remote editorial route — which reaches exactly one Source, the one
 whose rightsholder granted it.
 
+`.github/workflows/weekly-edition.yml` carries Saturday, at 03:11 UTC and by the same arithmetic.
+Sunday has none. It runs the `weekly` Publication: the same Sources and Sections as the daily at
+twice the Budget, and — this is the whole of what makes it a weekly rather than a sixth daily —
+`reads_history_from: [daily]`.
+
+Suppression is otherwise per-Publication, deliberately, so a Saturday Edition built from the same
+feeds would carry precisely the reading the weekdays had already delivered. That reference is the
+one sanctioned way through the boundary: every Article the daily delivered is suppressed, and the
+Story Clusters it kept returning to lead the ordering, so Saturday completes the week rather than
+reprinting it. The reference is one-directional — the daily is unaware the weekly exists, and no
+weekday Edition changes because the weekly is configured.
+
+One limit worth knowing: a Saturday Run acquires from the same feeds as any other, so it carries
+only what is still in them. Monday's near-miss has usually fallen off by Saturday, and re-fetching
+one by its stored `canonical_url` needs an acquisition route that does not exist yet.
+
 A hosted runner also starts with an empty disk, so the State Store is restored from Google Drive
-before the run and saved back after delivery. Without it every morning would re-deliver the
-same reading. Runs queue rather than overlap (`concurrency: edition`, never cancelled): a
-cancelled run can deliver an Edition whose state was never saved.
+before each run and saved back after delivery. Without it every morning would re-deliver the
+same reading. Runs queue rather than overlap — both workflows share `concurrency: edition`, never
+cancelled: a cancelled run can deliver an Edition whose state was never saved.
 
 Six repository secrets, named identically to the local `.env` keys — no mapping layer:
 

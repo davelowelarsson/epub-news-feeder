@@ -74,6 +74,13 @@ from epub_news_feeder.state import brief_id as durable_brief_id
 from epub_news_feeder.state_sync import StateSyncError, restore_state, save_state
 from epub_news_feeder.validation import EpubValidationError, validate_epub
 
+# How far back a referenced Publication's Story Clusters still count as recurring. Seven days
+# because the Publication this exists for is weekly: a thread the daily returned to across the
+# week is the thing a Saturday Edition should lead with, while one it dropped in March is not
+# recurring, it is over. Cluster coverage is never pruned, so without a window the archive would
+# eventually outrank the week.
+_RECURRENCE_WINDOW = timedelta(days=7)
+
 
 class GenerationError(Exception):
     def __init__(self, code: str, safe_message: str) -> None:
@@ -465,8 +472,47 @@ def _run(
         if brief_id not in delivered_brief_ids
     }
 
+    # The same suppression across Publications, for a Publication that names one. Deliberately
+    # coarser than this Publication's own revision-aware history: there, a materially revised
+    # Article may legitimately come back. Here the question is not whether the text moved but
+    # whether the reader already read the story, and a Saturday Edition reprinting Wednesday's
+    # report with three sentences changed has failed at being a Saturday Edition.
+    #
+    # An empty or absent referenced history suppresses nothing and the Edition goes out anyway.
+    # Nothing was delivered there, so nothing is owed suppression - correct rather than degraded,
+    # and withholding Saturday because the daily is younger than a week would punish a fresh
+    # install. Either way it reports `omitted`, so a Saturday Edition that quietly stopped
+    # deduplicating is visible in the log rather than only in the reading.
+    recurrence: dict[str, int] = {}
+    if publication.reads_history_from:
+        read_elsewhere: set[str] = set()
+        for referenced_id in publication.reads_history_from:
+            delivered_there = state.delivered_article_ids((referenced_id,))
+            read_elsewhere |= delivered_there
+            diagnostics.emit(
+                "HISTORY_SUPPRESSED",
+                phase="selection",
+                publication_id=referenced_id,
+                omitted=sum(1 for article_id in records if article_id in delivered_there),
+            )
+        for candidate_ids in source_records.values():
+            candidate_ids[:] = [
+                article_id for article_id in candidate_ids if article_id not in read_elsewhere
+            ]
+        recurrence = state.cluster_recurrence(
+            publication.reads_history_from, since=generated_at - _RECURRENCE_WINDOW
+        )
+        diagnostics.emit("HISTORY_RECURRENCE", phase="selection", clusters=len(recurrence))
+
     request = _selection_request(
-        publication, leaves, configuration, records, source_records, briefs, generated_at
+        publication,
+        leaves,
+        configuration,
+        records,
+        source_records,
+        briefs,
+        generated_at,
+        recurrence,
     )
     selection = select_publication(request)
     for warning in selection.warnings:
@@ -944,6 +990,7 @@ def _selection_request(
     source_records: dict[str, list[str]],
     briefs: dict[str, _BriefRecord],
     generated_at: datetime,
+    recurrence: dict[str, int] | None = None,
 ) -> PublicationRequest:
     pub_min, pub_max = _publication_limits(publication)
     requests = _section_requests(
@@ -954,6 +1001,7 @@ def _selection_request(
         source_records,
         generated_at,
         pub_max,
+        recurrence or {},
     )
     return PublicationRequest(
         pub_max,
@@ -1027,6 +1075,7 @@ def _section_requests(
     source_records: dict[str, list[str]],
     generated_at: datetime,
     pub_max: int,
+    recurrence: dict[str, int],
 ) -> list[SectionRequest]:
     requests: list[SectionRequest] = []
     for order, leaf in enumerate(leaves):
@@ -1078,6 +1127,12 @@ def _section_requests(
                                 )
                             )
                             for mute in policy.mute_rules
+                        ),
+                        # Unclustered Articles score zero rather than being excluded: a story
+                        # nothing else covered is not thereby less worth reading, it simply
+                        # carries no recurrence signal to be led by.
+                        recurrence=(
+                            recurrence.get(record.cluster_id, 0) if record.cluster_id else 0
                         ),
                     )
                 )

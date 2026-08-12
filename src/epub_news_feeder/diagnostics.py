@@ -14,6 +14,7 @@ _ALLOWED_FIELDS = {
     "articles",
     "briefs",
     "calls",
+    "clusters",
     "digest",
     "duration_ms",
     "evidence_id",

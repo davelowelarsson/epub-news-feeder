@@ -1,0 +1,151 @@
+name: Weekly Edition
+
+# Saturday's Edition, and the other thing that runs with nobody watching. Mechanically identical
+# to daily-edition.yml - restore the State Store, build one Edition, deliver it, save the State
+# Store back - and differing only in the Publication it names and the day it names it on.
+#
+# What makes it a weekly rather than a sixth daily is configuration, not this file: the `weekly`
+# Publication declares `reads_history_from: [daily]`, so every Article the weekdays delivered is
+# suppressed and the Story Clusters they kept returning to lead the ordering. See the block
+# comment in examples/reality-check.yaml.
+#
+# Saturday only. Sunday has none, and the daily covers 1-5.
+#
+# GitHub cron is UTC and does not observe DST: 03:11 UTC is 05:11 in Stockholm through the summer
+# and 04:11 through the winter. The reasoning is the daily's, and it is worth not rediscovering:
+# a schedule is a request rather than a promise, GitHub queues scheduled runs, and it documents
+# the start of every hour as its own worst case - the daily spent 67 to 96 minutes in that queue
+# while it was scheduled on the hour, against a job that finishes in under five minutes. Under
+# sufficient load GitHub drops queued runs rather than delaying them, so an unlucky minute costs
+# the whole Edition and not merely its punctuality.
+#
+# Hence an odd minute, and hence the early hour: 07:00 Stockholm is 05:00 UTC through the summer,
+# the tighter half of the DST year, so 03:11 leaves 104 minutes before the deadline - the observed
+# 97 minute queue plus the job's five, with time to spare. A different minute from the daily's :17
+# deliberately: the two never share a day, but two workflows asking for the same instant would
+# compete for no reason, and this file may not always be Saturday-only.
+#
+# test_scheduled_workflow_avoids_the_queue_that_delayed_delivery enforces this arithmetic for
+# every scheduled Edition, so a later minute fails the gate rather than a Saturday morning. It
+# rejected this file's first cron, which was six minutes too late.
+on:
+  schedule:
+    - cron: "11 3 * * 6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deliberately the same group as daily-edition.yml, not a group of its own. The State Store is a
+# single mutable archive shared by every Publication, so two overlapping runs would silently lose
+# one run's deliveries whichever workflows they belong to. Saturday and the weekdays should never
+# contend - but a re-run, a workflow_dispatch or a delayed Friday queue could overlap them, and
+# the shared group is what makes non-overlap a fact rather than an assumption. Never cancel one:
+# a cancelled run can leave a delivered Edition whose state was never saved.
+concurrency:
+  group: edition
+  cancel-in-progress: false
+
+env:
+  EPUBCHECK_VERSION: "5.3.0"
+  # SHA-256 of the extracted epubcheck.jar, matching README.md and
+  # src/epub_news_feeder/validation.py. Verified before every use; a
+  # mismatch fails the job rather than being swallowed.
+  EPUBCHECK_JAR_SHA256: "f7f96617c929371821609b88c8484d6dc9f24fe916499863c46094c5fb778a65"
+
+jobs:
+  edition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+
+      - name: Set up Java (for EPUBCheck)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Cache EPUBCheck
+        id: cache-epubcheck
+        uses: actions/cache@v6
+        with:
+          path: .local/tools/epubcheck-${{ env.EPUBCHECK_VERSION }}
+          key: epubcheck-${{ env.EPUBCHECK_VERSION }}
+
+      - name: Download EPUBCheck
+        if: steps.cache-epubcheck.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          curl -sSL -o epubcheck.zip \
+            "https://github.com/w3c/epubcheck/releases/download/v${EPUBCHECK_VERSION}/epubcheck-${EPUBCHECK_VERSION}.zip"
+          mkdir -p .local/tools
+          unzip -q epubcheck.zip -d .local/tools
+          rm epubcheck.zip
+
+      - name: Verify EPUBCheck digest
+        run: |
+          set -euo pipefail
+          jar=".local/tools/epubcheck-${EPUBCHECK_VERSION}/epubcheck.jar"
+          if [ ! -f "$jar" ]; then
+            echo "::error::EPUBCheck jar not found at $jar"
+            exit 1
+          fi
+          actual="$(sha256sum "$jar" | cut -d' ' -f1)"
+          if [ "$actual" != "$EPUBCHECK_JAR_SHA256" ]; then
+            echo "::error::EPUBCheck jar digest mismatch: expected $EPUBCHECK_JAR_SHA256, got $actual"
+            exit 1
+          fi
+          echo "EPUBCHECK_JAR=${GITHUB_WORKSPACE}/${jar}" >> "$GITHUB_ENV"
+
+      - name: Generate and deliver the Edition
+        env:
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+          GOOGLE_OAUTH_REFRESH_TOKEN: ${{ secrets.GOOGLE_OAUTH_REFRESH_TOKEN }}
+          # Read by the CLI as the Edition Delivery Target and the State Store folder.
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_DRIVE_FOLDER_DB: ${{ secrets.GOOGLE_DRIVE_FOLDER_DB }}
+          # Present for the remote editorial provider that does not exist yet. Nothing reads
+          # it today; the scheduled Edition is deterministic and makes no LLM call at all.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          uv run epub-news-feeder generate \
+            --config examples/reality-check.yaml \
+            --publication weekly \
+            --state "${RUNNER_TEMP}/state/state.sqlite3" \
+            --output "${RUNNER_TEMP}/editions" \
+            --diagnostics "${RUNNER_TEMP}/diagnostics" \
+            --state-environment production
+
+      # Codes and Source ids, never titles or URLs: this log is world-readable on a public
+      # repository, and a Source id is a key in a configuration file that is public anyway.
+      # Without the id, a Source that a hosted runner cannot reach - a publisher that treats
+      # datacentre addresses differently from a home connection - is undiagnosable.
+      - name: Report diagnostic codes
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ ! -d "${RUNNER_TEMP}/diagnostics" ]; then
+            echo "No diagnostics were written."
+            exit 0
+          fi
+          grep -ho '"code":"[A-Z_]*"' "${RUNNER_TEMP}"/diagnostics/*.jsonl | sort | uniq -c
+          echo "--- Sources that did not deliver cleanly ---"
+          # Filter to whole SOURCE_* lines first. Extracting fields across all lines would
+          # pair a code with the wrong id, because ARTICLE_SELECTED carries a source_id too.
+          grep -h '"code":"SOURCE_' "${RUNNER_TEMP}"/diagnostics/*.jsonl \
+            | grep -v '"code":"SOURCE_OK"' \
+            | grep -oE '"code":"[A-Z_]*"|"source_id":"[a-z0-9_]*"' \
+            | paste - - \
+            || echo "every Source delivered cleanly"

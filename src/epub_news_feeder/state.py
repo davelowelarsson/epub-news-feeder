@@ -992,6 +992,56 @@ class StateStore:
             for row in rows
         ]
 
+    def delivered_article_ids(self, publication_ids: Iterable[str]) -> frozenset[str]:
+        """Every Article any of *publication_ids* has delivered, at any revision.
+
+        Deliberately coarser than ``_revision_eligibility``, which lets a materially revised
+        Article come back to the same Publication. Across Publications the question is not
+        whether the text moved but whether the reader already read the story, and a Saturday
+        Edition that reprints Wednesday's news with three sentences changed has failed at
+        being a Saturday Edition.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return frozenset()
+        placeholders = ",".join("?" * len(identifiers))
+        rows = self.connection.execute(
+            f"SELECT DISTINCT article_id FROM deliveries WHERE publication_id IN ({placeholders})",
+            identifiers,
+        ).fetchall()
+        return frozenset(str(row["article_id"]) for row in rows)
+
+    def cluster_recurrence(
+        self, publication_ids: Iterable[str], *, since: datetime | None = None
+    ) -> dict[str, int]:
+        """Per Story Cluster, on how many distinct days those Publications delivered into it.
+
+        Distinct days rather than Article count, because recurrence is the signal being
+        measured: a story four publishers covered on one morning recurred once, while a story
+        one publisher returned to on four mornings is the week's continuing thread.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" * len(identifiers))
+        parameters: list[str] = list(identifiers)
+        window = ""
+        if since is not None:
+            window = " AND delivered_at >= ?"
+            parameters.append(since.isoformat())
+        rows = self.connection.execute(
+            f"""
+            SELECT cluster_id, COUNT(DISTINCT substr(delivered_at, 1, 10)) AS days
+            FROM cluster_coverage
+            WHERE publication_id IN ({placeholders}){window}
+            GROUP BY cluster_id
+            """,
+            parameters,
+        ).fetchall()
+        return {str(row["cluster_id"]): int(row["days"]) for row in rows}
+
     def begin_run(
         self,
         run_id: str,

@@ -29,6 +29,10 @@ class SectionCandidate:
     interest_score: int = 0
     essential: bool = False
     muted: bool = False
+    # On how many distinct days a referenced Publication delivered into this Article's Story
+    # Cluster. Zero for every Publication that reads no other's history, which is why it can
+    # enter the ordering unconditionally without changing any existing Edition.
+    recurrence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +220,11 @@ def _rank_section(section: SectionRequest) -> tuple[list[SectionCandidate], bool
         ordered = _interest_order(eligible, section.max_articles, section.discovery_percent)
     else:
         ordered = _coverage_order(eligible)
-    ordered.sort(key=lambda candidate: not candidate.essential)
+    # Essentials first, then the week's continuing threads. Both are stable promotions layered
+    # over the policy ordering, so equal-recurrence candidates keep the order the policy chose.
+    # Cluster diversification below then keeps a recurrent story leading without letting it
+    # monopolise the Section: the first pick is the most recurrent, the next is another cluster.
+    ordered.sort(key=lambda candidate: (not candidate.essential, -candidate.recurrence))
     essentials = [candidate for candidate in ordered if candidate.essential]
     remaining = [candidate for candidate in ordered if not candidate.essential]
     cluster_counts: dict[str, int] = {}

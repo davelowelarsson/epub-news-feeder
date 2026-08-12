@@ -187,6 +187,12 @@ class Publication(StrictModel):
     # Briefs are capped entirely outside the Article Budget: a Brief never consumes an
     # Article Slot, so it has no business inside a structure scoped to Article content.
     max_briefs: NonNegativeInt = 6
+    # Named Publications whose delivery history this one may read. Suppression is
+    # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in,
+    # explicit and one-directional: the weekly may know what the daily delivered, while the
+    # daily stays unaware the weekly exists. A Publication that names nothing here behaves
+    # exactly as it did before this field existed.
+    reads_history_from: list[NonEmptyString] = Field(default_factory=list)
     editorial: EditorialConfig | None = None
     sections: list[Section]
 
@@ -226,7 +232,50 @@ class Configuration(StrictModel):
             section_ids: set[str] = set()
             self._validate_sections(publication.sections, section_ids, source_ids, policy_ids)
 
+        # A second pass, because a history reference may name a Publication declared later in
+        # the file. Order in a configuration file is presentation, not dependency.
+        for publication in self.publications:
+            referenced_ids: set[str] = set()
+            for referenced in publication.reads_history_from:
+                if referenced == publication.id:
+                    raise ValueError("publication reads its own delivery history")
+                if referenced not in publication_ids:
+                    raise ValueError("publication reads an unknown publication's history")
+                if referenced in referenced_ids:
+                    raise ValueError("duplicate publication history reference")
+                referenced_ids.add(referenced)
+        self._reject_history_cycles()
+
         return self
+
+    def _reject_history_cycles(self) -> None:
+        """History references are one-directional, so a cycle is a configuration error.
+
+        Two Publications each suppressing against the other has no defensible reading: whichever
+        ran first would silently decide what the other could carry. Rejecting it here is cheaper
+        than explaining the resulting Edition.
+        """
+
+        references = {
+            publication.id: tuple(publication.reads_history_from)
+            for publication in self.publications
+        }
+        visiting: set[str] = set()
+        settled: set[str] = set()
+
+        def visit(publication_id: str) -> None:
+            if publication_id in settled:
+                return
+            if publication_id in visiting:
+                raise ValueError("publication history references form a cycle")
+            visiting.add(publication_id)
+            for referenced in references.get(publication_id, ()):
+                visit(referenced)
+            visiting.discard(publication_id)
+            settled.add(publication_id)
+
+        for publication_id in references:
+            visit(publication_id)
 
     @classmethod
     def _validate_sections(
