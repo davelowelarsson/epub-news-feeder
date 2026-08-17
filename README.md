@@ -115,6 +115,26 @@ Six repository secrets, named identically to the local `.env` keys — no mappin
 | `GOOGLE_DRIVE_FOLDER_DB` | The State Store archive, outside the synced tree |
 | `OPENAI_API_KEY` | The remote editorial route |
 
+The refresh token is the one credential with an expiry worth knowing about. Google issues a
+seven-day token to any OAuth client whose consent screen is still in *Testing*, and it does so
+silently: five weekday Editions and a Saturday went out normally before the eighth day arrived and
+`invalid_grant` took the whole morning with it. The consent screen is therefore published rather
+than in testing — `drive.file` is a non-sensitive scope, so publishing needs no verification
+review — and the token now lasts until it is revoked or six months go unused. Renew it with
+`uv run epub-news-feeder authorize-drive`, then update both `.env` and the repository secret.
+
+Drive failures are reported by what they ask of you. `DRIVE_AUTH_FAILED` means the credential was
+rejected and names the command that renews it; `STATE_RESTORE_FAILED` means the archive itself
+could not be verified, which is a different investigation entirely. Reading one as the other costs
+an hour, which is why they are no longer the same code.
+
+Requests retry only what retrying can fix: connection failures and Google's own "try again"
+statuses, four attempts, one second doubling to eight. A 4xx is a settled answer and is raised on
+the first attempt. The one call that is never replayed after leaving the machine is a create-new
+upload — a timeout there may mean Google accepted it, and a second attempt would put a second
+Edition in the reader's folder. Overwriting the State Store archive in place is replayed freely,
+because it lands on the same bytes either way.
+
 Delivery Copies are named `<date>-<publication>-<run>.epub`, date first, because a reader that
 truncates a long filename truncates it from the right.
 

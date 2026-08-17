@@ -31,7 +31,12 @@ from epub_news_feeder.drive_oauth import (
 )
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
-from epub_news_feeder.state_sync import StateSyncError, restore_state, save_state
+from epub_news_feeder.state_sync import (
+    StateSyncAuthError,
+    StateSyncError,
+    restore_state,
+    save_state,
+)
 
 _RUN_ID = re.compile(r"^\d{8}T\d{6}Z-[A-Z2-7]{8}$")
 
@@ -239,6 +244,9 @@ def _state_pull(state_path: Path, folder_id: str, environment: str) -> int:
         outcome = restore_state(
             client=client, folder_id=folder_id, state_path=state_path, environment=environment
         )
+    except StateSyncAuthError as error:
+        print(f"code=DRIVE_AUTH_FAILED message={error}", file=sys.stderr)
+        return 3
     except StateSyncError as error:
         print(f"code=STATE_RESTORE_FAILED message={error}", file=sys.stderr)
         return 3
@@ -262,6 +270,9 @@ def _state_push(state_path: Path, folder_id: str, environment: str) -> int:
         digest = save_state(
             client=client, folder_id=folder_id, state_path=state_path, environment=environment
         )
+    except StateSyncAuthError as error:
+        print(f"code=DRIVE_AUTH_FAILED message={error}", file=sys.stderr)
+        return 3
     except StateSyncError as error:
         print(f"code=STATE_SAVE_FAILED message={error}", file=sys.stderr)
         return 3

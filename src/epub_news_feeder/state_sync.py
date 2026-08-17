@@ -25,15 +25,28 @@ from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder.diagnostics import Diagnostics
-from epub_news_feeder.drive import DriveClient, DriveError
+from epub_news_feeder.drive import DriveAuthError, DriveClient, DriveError
 
 _ARCHIVE_CONTENT_TYPE = "application/gzip"
 _DATABASE_ARCNAME = "state.sqlite3"
 _KEY_ARCNAME = "state.sqlite3.key"
 
+# What an operator does about it, in the one place the operator will read: the failure message.
+_RENEW_INSTRUCTION = (
+    "Google rejected the Drive refresh token; renew it with `epub-news-feeder authorize-drive`"
+)
+
 
 class StateSyncError(Exception):
     """Safe State Sync failure; never carries a credential value or fingerprint key bytes."""
+
+
+class StateSyncAuthError(StateSyncError):
+    """The credential itself was rejected, rather than the archive being unverifiable.
+
+    A subclass, so every existing fail-closed ``except StateSyncError`` keeps behaving exactly
+    as it did; callers that want to say something more useful can catch this first.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +97,15 @@ def unpack_state_archive(archive_bytes: bytes, *, state_path: Path) -> None:
             _extract_member(archive, members[_KEY_ARCNAME], key_path)
     except tarfile.TarError as error:
         raise StateSyncError("State archive could not be read") from error
-    os.chmod(state_path, 0o600)
-    os.chmod(key_path, 0o600)
+    except OSError as error:
+        # A verified archive that cannot be written to disk is still a restore failure, and has
+        # to be reported as one; leaking an OSError here reads as an unexplained crash instead.
+        raise StateSyncError("State archive could not be written to disk") from error
+    try:
+        os.chmod(state_path, 0o600)
+        os.chmod(key_path, 0o600)
+    except OSError as error:
+        raise StateSyncError("Restored State Store permissions could not be set") from error
 
 
 def _extract_member(archive: tarfile.TarFile, member: tarfile.TarInfo, destination: Path) -> None:
@@ -117,6 +137,8 @@ def restore_state(
     filename = state_archive_filename(environment)
     try:
         existing = client.find_file(folder_id=folder_id, filename=filename)
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("Could not determine whether a State archive exists") from error
     if existing is None:
@@ -125,6 +147,8 @@ def restore_state(
         return StateRestoreOutcome(restored=False)
     try:
         archive_bytes = client.download(file_id=existing.file_id)
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("State archive download failed") from error
     digest = sha256(archive_bytes).hexdigest()
@@ -151,10 +175,19 @@ def save_state(
     (Drive keeps its own revision history as a safety net) rather than treated as immutable.
     """
 
-    _checkpoint_wal(state_path, connection)
-    filename = state_archive_filename(environment)
-    archive_bytes = pack_state_archive(state_path)
-    digest = sha256(archive_bytes).hexdigest()
+    # Inside the translation, not before it. By the time this runs the Edition is delivered and
+    # finalized, so a checkpoint or packing failure has to reach the caller as a State Sync
+    # failure — which is retryable — rather than as a bare sqlite3 or OS error, which the
+    # generation path would treat as an unexplained crash and abandon the delivered Run.
+    try:
+        _checkpoint_wal(state_path, connection)
+        filename = state_archive_filename(environment)
+        archive_bytes = pack_state_archive(state_path)
+        digest = sha256(archive_bytes).hexdigest()
+    except StateSyncError:
+        raise
+    except (sqlite3.Error, OSError, tarfile.TarError) as error:
+        raise StateSyncError("State Store could not be checkpointed and packed") from error
     try:
         existing = client.find_file(folder_id=folder_id, filename=filename)
         if existing is not None:
@@ -168,6 +201,8 @@ def save_state(
                 content=archive_bytes,
                 content_type=_ARCHIVE_CONTENT_TYPE,
             )
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("State archive save failed") from error
     if diagnostics is not None:
