@@ -5,6 +5,7 @@ import sqlite3
 import tarfile
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -517,3 +518,116 @@ def test_state_sync_rejected_credentials_remain_an_ordinary_state_sync_failure()
     """Existing fail-closed callers catch ``StateSyncError``; the narrower type refines it."""
 
     assert issubclass(StateSyncAuthError, StateSyncError)
+
+
+def test_state_sync_restore_translates_a_rejection_at_download_too(tmp_path: Path) -> None:
+    """The lookup is not the only call that can meet a dead token; the download can too."""
+
+    class _RejectedAtDownload(FakeDriveClient):
+        def download(self, *, file_id: str) -> bytes:
+            raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+    client = _RejectedAtDownload()
+    state_path = _make_real_state_files(tmp_path)
+    save_state(client=client, folder_id="folder-1", state_path=state_path, environment="production")
+
+    with pytest.raises(StateSyncAuthError, match="refresh token"):
+        restore_state(
+            client=client,
+            folder_id="folder-1",
+            state_path=tmp_path / "restored" / "state.sqlite3",
+            environment="production",
+        )
+
+
+def test_state_sync_save_translates_a_rejection_at_upload_and_at_update(tmp_path: Path) -> None:
+    class _RejectedAtWrite(FakeDriveClient):
+        def upload(
+            self,
+            *,
+            folder_id: str,
+            filename: str,
+            content: bytes,
+            content_type: str = "application/epub+zip",
+        ) -> str:
+            raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+        def update(self, *, file_id: str, content: bytes, content_type: str) -> str:
+            raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+    state_path = _make_real_state_files(tmp_path)
+    upload_client = _RejectedAtWrite()
+
+    with pytest.raises(StateSyncAuthError, match="refresh token"):
+        save_state(
+            client=upload_client,
+            folder_id="folder-1",
+            state_path=state_path,
+            environment="production",
+        )
+
+    update_client = _RejectedAtWrite()
+    update_client.files["state-production.tar.gz"] = ("drive-file-1", b"previous archive")
+
+    with pytest.raises(StateSyncAuthError, match="refresh token"):
+        save_state(
+            client=update_client,
+            folder_id="folder-1",
+            state_path=state_path,
+            environment="production",
+        )
+
+
+# --- a post-delivery save failure must stay retryable, never look like a crash ------
+
+
+def test_state_sync_save_reports_a_checkpoint_failure_as_a_state_sync_failure(
+    tmp_path: Path,
+) -> None:
+    """By now the Edition is delivered. A bare sqlite3.Error here would abandon a delivered Run.
+
+    ``_save_state`` translates only ``StateSyncError`` into a retryable outcome, so anything
+    escaping ``save_state`` untranslated reaches the generation path's catch-all instead.
+    """
+
+    state_path = _make_real_state_files(tmp_path)
+
+    class _BrokenConnection:
+        def execute(self, statement: str) -> object:
+            raise sqlite3.OperationalError("disk I/O error")
+
+    with pytest.raises(StateSyncError) as excinfo:
+        save_state(
+            client=FakeDriveClient(),
+            folder_id="folder-1",
+            state_path=state_path,
+            environment="production",
+            connection=cast(sqlite3.Connection, _BrokenConnection()),
+        )
+
+    assert not isinstance(excinfo.value, StateSyncAuthError)
+    assert "checkpointed and packed" in str(excinfo.value)
+
+
+def test_state_sync_restore_reports_an_unwritable_destination_as_a_restore_failure(
+    tmp_path: Path,
+) -> None:
+    """A verified archive that cannot be written is still a restore failure, not a crash."""
+
+    client = FakeDriveClient()
+    state_path = _make_real_state_files(tmp_path)
+    save_state(client=client, folder_id="folder-1", state_path=state_path, environment="production")
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    try:
+        with pytest.raises(StateSyncError, match=r"could not be written|permissions"):
+            restore_state(
+                client=client,
+                folder_id="folder-1",
+                state_path=blocked / "nested" / "state.sqlite3",
+                environment="production",
+            )
+    finally:
+        blocked.chmod(0o700)

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -31,16 +30,52 @@ DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 _TOKEN_URI = "https://oauth2.googleapis.com/token"
 _DRIVE_API = "https://www.googleapis.com"
 
-# Google's documented "come back later" answers. Everything else in the 4xx range is a settled
-# answer that a second identical request will only earn again.
+# Google's documented "come back later" answers. Everything else outside the 4xx exceptions
+# below is a settled answer that a second identical request will only earn again.
 _TRANSIENT_STATUS = frozenset({408, 429, 500, 502, 503, 504})
+
+# Drive reports rate limiting as 403 with a reason, not as 429, and documents backoff as the
+# response. 403 alone is not retryable — it is also how a permission failure arrives — so the
+# reason has to be read before a 403 is treated as temporary.
+_TRANSIENT_DRIVE_REASONS = frozenset(
+    {
+        "rateLimitExceeded",
+        "userRateLimitExceeded",
+        "sharingRateLimitExceeded",
+        "backendError",
+        "internalError",
+    }
+)
+
+# A credential Google has refused. 400 is what an expired or revoked refresh token earns from the
+# token endpoint; 401 is what a rejected access token earns from Drive. Every other settled status
+# is some other problem and must not be reported as one the operator fixes by re-authorizing.
+_REJECTED_CREDENTIAL_STATUS = frozenset({400, 401})
 
 # Failures raised before any byte reached Google, so replaying them cannot duplicate a write.
 _CONNECT_PHASE_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
 
-# Google's OAuth error identifiers are a small fixed vocabulary (``invalid_grant`` and friends).
-# Matching against this shape is what guarantees a rejection message can never echo a credential.
-_OAUTH_REASON = re.compile(r"[a-z_]{1,40}")
+# The complete set of OAuth 2 error identifiers, from RFC 6749 §5.2 plus the two Google adds.
+# An allowlist rather than a shape test: a pattern like ``[a-z_]+`` would happily copy through
+# any lowercase word a response put in the ``error`` field, and this value reaches a
+# world-readable Actions log.
+_OAUTH_ERROR_IDENTIFIERS = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+        "access_denied",
+        "admin_policy_enforced",
+        "disabled_client",
+    }
+)
+
+# Beyond this, an operator-supplied Retry-After is ignored: honouring a ten-minute hint would
+# spend the Edition's whole delivery margin waiting.
+_MAXIMUM_RETRY_AFTER_SECONDS = 30.0
 
 
 class DriveError(Exception):
@@ -59,22 +94,48 @@ class DriveConfigurationError(Exception):
 class RetryPolicy:
     """How hard one Drive request tries before giving up.
 
-    Deliberately bounded. The Edition has to be on the device by 07:00 Stockholm, and a Drive
-    outage that outlasts a few seconds is not something a scheduled run can usefully wait out —
-    failing loudly leaves the whole workflow's remaining slack for a rerun, which sitting in a
-    backoff loop does not.
+    Deliberately bounded, in two independent ways. ``attempts`` limits how many times a request
+    is sent; ``deadline_seconds`` limits how long one operation may keep trying regardless, so a
+    run's worst case cannot be computed as attempts times a request timeout. Without the second
+    bound, four attempts against a 60-second timeout is four minutes per operation and most of
+    an hour across a run — past the workflow's own 30-minute ceiling, which would kill the job
+    mid-save rather than raise something a rerun can reconcile.
+
+    The Edition has to be on the device by 07:00 Stockholm. A Drive outage that outlasts half a
+    minute is not something a scheduled run can usefully wait out: failing loudly leaves the
+    workflow's remaining slack for a rerun, which sitting in a backoff loop does not.
     """
 
     attempts: int = 4
     initial_backoff_seconds: float = 1.0
     multiplier: float = 2.0
     maximum_backoff_seconds: float = 8.0
+    deadline_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if self.attempts < 1:
+            raise ValueError("RetryPolicy.attempts must be at least 1")
+        if self.initial_backoff_seconds < 0 or self.maximum_backoff_seconds < 0:
+            raise ValueError("RetryPolicy backoff seconds must not be negative")
+        if self.multiplier < 1:
+            raise ValueError("RetryPolicy.multiplier must be at least 1")
+        if self.deadline_seconds < 0:
+            raise ValueError("RetryPolicy.deadline_seconds must not be negative")
 
     def backoff_seconds(self, attempt: int) -> float:
         """Seconds to wait after *attempt* (1-based) before trying again."""
 
         growth = self.initial_backoff_seconds * self.multiplier ** (attempt - 1)
         return min(growth, self.maximum_backoff_seconds)
+
+    def worst_case_seconds(self, *, request_timeout_seconds: float) -> float:
+        """The most one operation can take: the deadline, plus the attempt already in flight.
+
+        A request is only started while the deadline has not passed, so the last one can begin
+        just under it and still run its full timeout.
+        """
+
+        return self.deadline_seconds + request_timeout_seconds
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,21 +211,23 @@ class HttpDriveClient:
         transport: httpx.BaseTransport | None = None,
         retry: RetryPolicy | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._credentials = credentials
         self._timeout = timeout
         self._transport = transport
         self._retry = retry or RetryPolicy()
         self._sleep = sleep
+        self._clock = clock
+        self._cached_token: tuple[str, float] | None = None
 
     def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
-        token = self._access_token()
         query = (
             f"'{_escape(folder_id)}' in parents and name = '{_escape(filename)}' "
             "and trashed = false"
         )
-        response = self._send(
-            lambda client: client.get(
+        response = self._authorized(
+            lambda client, token: client.get(
                 "/drive/v3/files",
                 params={"q": query, "fields": "files(id,properties)", "spaces": "drive"},
                 headers=_bearer(token),
@@ -194,7 +257,6 @@ class HttpDriveClient:
         content: bytes,
         content_type: str = "application/epub+zip",
     ) -> str:
-        token = self._access_token()
         metadata = {
             "name": filename,
             "parents": [folder_id],
@@ -205,8 +267,8 @@ class HttpDriveClient:
         # A create-new upload is the one call that is not replayable: a request that left the
         # machine may have been accepted, and replaying it would put a second Delivery Copy in
         # the reader's folder. Only a failure to connect at all is retried.
-        response = self._send(
-            lambda client: client.post(
+        response = self._authorized(
+            lambda client, token: client.post(
                 "/upload/drive/v3/files",
                 params={"uploadType": "multipart", "fields": "id"},
                 headers={**_bearer(token), "Content-Type": content_type_header},
@@ -224,13 +286,12 @@ class HttpDriveClient:
     def update(self, *, file_id: str, content: bytes, content_type: str) -> str:
         """Overwrite an existing file's content in place, using Drive's own revision history."""
 
-        token = self._access_token()
         metadata = {"properties": {"sha256": sha256(content).hexdigest()}}
         body, content_type_header = _multipart_body(metadata, content, content_type)
         # Replayable, unlike an upload: this overwrites one known file with the same bytes, so a
         # repeated request lands on the same content rather than creating a second file.
-        response = self._send(
-            lambda client: client.patch(
+        response = self._authorized(
+            lambda client, token: client.patch(
                 f"/upload/drive/v3/files/{file_id}",
                 params={"uploadType": "multipart", "fields": "id"},
                 headers={**_bearer(token), "Content-Type": content_type_header},
@@ -246,9 +307,8 @@ class HttpDriveClient:
         return returned_id
 
     def download(self, *, file_id: str) -> bytes:
-        token = self._access_token()
-        response = self._send(
-            lambda client: client.get(
+        response = self._authorized(
+            lambda client, token: client.get(
                 f"/drive/v3/files/{file_id}",
                 params={"alt": "media"},
                 headers=_bearer(token),
@@ -258,7 +318,40 @@ class HttpDriveClient:
         )
         return response.content
 
-    def _access_token(self) -> str:
+    def _authorized(
+        self,
+        build: Callable[[httpx.Client, str], httpx.Response],
+        *,
+        failure: str,
+        replayable: bool,
+    ) -> httpx.Response:
+        """Send a Drive request with an access token, renewing it once if Drive refuses it.
+
+        The token is cached for its stated lifetime, so one run performs one exchange rather
+        than one per operation. That cache is the reason a 401 is worth a second look: a token
+        held across a run can expire mid-run, and the fix is a fresh token, not a fresh request.
+        A 401 that survives a genuinely new token is a rejected credential and says so.
+        """
+
+        for renewed in (False, True):
+            token = self._access_token(renew=renewed)
+            try:
+                return self._send(
+                    # B023: the lambda is called inside this iteration, never stored.
+                    lambda client: build(client, token),  # noqa: B023
+                    failure=failure,
+                    replayable=replayable,
+                )
+            except DriveAuthError:
+                if renewed:
+                    raise
+        raise AssertionError("The renewal loop returns or raises on its second pass")
+
+    def _access_token(self, *, renew: bool = False) -> str:
+        cached = self._cached_token
+        if not renew and cached is not None and self._clock() < cached[1]:
+            return cached[0]
+        requested_at = self._clock()
         response = self._send(
             lambda client: client.post(
                 _TOKEN_URI,
@@ -271,12 +364,13 @@ class HttpDriveClient:
             ),
             failure="Drive token exchange failed",
             replayable=True,
-            rejected=_credentials_rejected,
+            credential_endpoint=True,
         )
         payload = _decode(response, failure="Drive token exchange failed")
         token = payload.get("access_token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token:
             raise DriveError("Drive token exchange returned no access token")
+        self._cached_token = (token, requested_at + _token_lifetime_seconds(payload))
         return token
 
     def _send(
@@ -285,37 +379,47 @@ class HttpDriveClient:
         *,
         failure: str,
         replayable: bool,
-        rejected: Callable[[httpx.Response], DriveError] | None = None,
+        credential_endpoint: bool = False,
     ) -> httpx.Response:
-        """Send one request, retrying only what a retry can actually fix.
+        """Send one request, retrying only what a retry can actually fix, within a deadline.
 
-        A settled answer — any status outside ``_TRANSIENT_STATUS`` — is raised on the first
-        attempt. When *replayable* is false, only a failure to reach Google at all is retried,
-        because a request that was sent may have been acted on.
+        A settled answer is raised on the first attempt. When *replayable* is false, only a
+        failure to reach Google at all is retried, because a request that was sent may have been
+        acted on. Retrying also stops once the policy's deadline has passed, so this cannot spend
+        attempts times the request timeout.
         """
 
+        started = self._clock()
         for attempt in range(1, self._retry.attempts + 1):
-            last = attempt == self._retry.attempts
+            retry_after: float | None = None
             try:
                 with self._client() as client:
                     response = build(client)
                     response.raise_for_status()
                     return response
             except httpx.HTTPStatusError as error:
-                settled = error.response.status_code not in _TRANSIENT_STATUS
-                if settled and rejected is not None:
-                    raise rejected(error.response) from error
-                if settled or last or not replayable:
+                if _is_rejected_credential(error.response, credential_endpoint):
+                    raise _credentials_rejected(error.response) from error
+                if not _is_transient(error.response.status_code, error.response):
                     raise DriveError(failure) from error
+                if not replayable:
+                    raise DriveError(failure) from error
+                retry_after = _retry_after_seconds(error.response)
+                fatal: Exception = error
             except _CONNECT_PHASE_ERRORS as error:
-                if last:
-                    raise DriveError(failure) from error
+                fatal = error
             except httpx.TransportError as error:
-                if last or not replayable:
+                if not replayable:
                     raise DriveError(failure) from error
+                fatal = error
             except httpx.HTTPError as error:
                 raise DriveError(failure) from error
-            self._sleep(self._retry.backoff_seconds(attempt))
+            delay = retry_after if retry_after is not None else self._retry.backoff_seconds(attempt)
+            if attempt == self._retry.attempts:
+                raise DriveError(failure) from fatal
+            if self._clock() - started + delay > self._retry.deadline_seconds:
+                raise DriveError(failure) from fatal
+            self._sleep(delay)
         raise AssertionError("The retry loop returns or raises on its final attempt")
 
     def _client(self) -> httpx.Client:
@@ -332,12 +436,97 @@ def _decode(response: httpx.Response, *, failure: str) -> Mapping[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _is_rejected_credential(response: httpx.Response, credential_endpoint: bool) -> bool:
+    """Whether this settled response means the credential itself was refused.
+
+    Only 400 and 401 qualify, and 400 only from the token endpoint — a 400 from Drive is a
+    malformed request, not a dead token. A 404 or a 413 from a proxy in front of either must not
+    be reported as something re-authorizing fixes.
+    """
+
+    status = response.status_code
+    if status in _TRANSIENT_STATUS:
+        return False
+    if status == 401:
+        return True
+    return status == 400 and credential_endpoint
+
+
+def _is_transient(status: int, response: httpx.Response) -> bool:
+    """Whether waiting could plausibly change the answer.
+
+    Drive reports rate limiting as 403 with a reason rather than as 429, so a 403 is temporary
+    only when it says so. Every other 403 — a permission failure, a storage quota — is settled.
+    """
+
+    if status in _TRANSIENT_STATUS:
+        return True
+    if status != 403:
+        return False
+    return _drive_error_reason(response) in _TRANSIENT_DRIVE_REASONS
+
+
+def _drive_error_reason(response: httpx.Response) -> str | None:
+    """Read ``error.errors[0].reason`` from a Drive error body, tolerating any other shape."""
+
+    with suppress(json.JSONDecodeError, ValueError, AttributeError, IndexError, TypeError):
+        payload = response.json()
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return None
+        errors = error.get("errors")
+        if not isinstance(errors, list) or not errors:
+            return None
+        first = errors[0]
+        if not isinstance(first, dict):
+            return None
+        reason = first.get("reason")
+        return reason if isinstance(reason, str) else None
+    return None
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """Honour a numeric ``Retry-After`` when Drive sends one, capped so it cannot eat the margin.
+
+    Only the delta-seconds form is read. An HTTP-date form would need a clock comparison to be
+    meaningful and Google does not send one here; ignoring it falls back to ordinary backoff.
+    """
+
+    header = response.headers.get("retry-after")
+    if header is None:
+        return None
+    try:
+        seconds = float(header.strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, _MAXIMUM_RETRY_AFTER_SECONDS)
+
+
+def _token_lifetime_seconds(payload: Mapping[str, object]) -> float:
+    """How long a fresh access token may be cached, shortened so it cannot expire mid-request.
+
+    A missing or unusable ``expires_in`` falls back to nothing cached, which restores the older
+    behaviour of exchanging per operation rather than trusting an unknown lifetime.
+    """
+
+    candidate = payload.get("expires_in")
+    if isinstance(candidate, bool) or not isinstance(candidate, int | float):
+        return 0.0
+    return max(0.0, float(candidate) - 120.0)
+
+
 def _credentials_rejected(response: httpx.Response) -> DriveError:
     """Name Google's own OAuth error identifier, which is a fixed word, never a credential.
 
     ``invalid_grant`` is what an expired or revoked refresh token looks like, and it is the one
     word that turns an opaque failure into an instruction: re-run ``authorize-drive``. The
-    accompanying ``error_description`` is deliberately not read — Google quotes the token in it.
+    identifier is checked against the closed OAuth 2 set rather than a shape, so no value a
+    response invents can reach the log. The accompanying ``error_description`` is deliberately
+    never read — Google quotes the refresh token inside it.
     """
 
     reason: str | None = None
@@ -345,7 +534,7 @@ def _credentials_rejected(response: httpx.Response) -> DriveError:
         payload = response.json()
         if isinstance(payload, dict):
             candidate = payload.get("error")
-            if isinstance(candidate, str) and _OAUTH_REASON.fullmatch(candidate):
+            if isinstance(candidate, str) and candidate in _OAUTH_ERROR_IDENTIFIERS:
                 reason = candidate
     detail = reason or f"HTTP {response.status_code}"
     return DriveAuthError(f"Google rejected the Drive credentials ({detail})")
