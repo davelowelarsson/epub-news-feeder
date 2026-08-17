@@ -25,15 +25,28 @@ from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder.diagnostics import Diagnostics
-from epub_news_feeder.drive import DriveClient, DriveError
+from epub_news_feeder.drive import DriveAuthError, DriveClient, DriveError
 
 _ARCHIVE_CONTENT_TYPE = "application/gzip"
 _DATABASE_ARCNAME = "state.sqlite3"
 _KEY_ARCNAME = "state.sqlite3.key"
 
+# What an operator does about it, in the one place the operator will read: the failure message.
+_RENEW_INSTRUCTION = (
+    "Google rejected the Drive refresh token; renew it with `epub-news-feeder authorize-drive`"
+)
+
 
 class StateSyncError(Exception):
     """Safe State Sync failure; never carries a credential value or fingerprint key bytes."""
+
+
+class StateSyncAuthError(StateSyncError):
+    """The credential itself was rejected, rather than the archive being unverifiable.
+
+    A subclass, so every existing fail-closed ``except StateSyncError`` keeps behaving exactly
+    as it did; callers that want to say something more useful can catch this first.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +130,8 @@ def restore_state(
     filename = state_archive_filename(environment)
     try:
         existing = client.find_file(folder_id=folder_id, filename=filename)
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("Could not determine whether a State archive exists") from error
     if existing is None:
@@ -125,6 +140,8 @@ def restore_state(
         return StateRestoreOutcome(restored=False)
     try:
         archive_bytes = client.download(file_id=existing.file_id)
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("State archive download failed") from error
     digest = sha256(archive_bytes).hexdigest()
@@ -168,6 +185,8 @@ def save_state(
                 content=archive_bytes,
                 content_type=_ARCHIVE_CONTENT_TYPE,
             )
+    except DriveAuthError as error:
+        raise StateSyncAuthError(_RENEW_INSTRUCTION) from error
     except DriveError as error:
         raise StateSyncError("State archive save failed") from error
     if diagnostics is not None:

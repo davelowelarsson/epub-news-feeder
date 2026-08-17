@@ -20,7 +20,7 @@ from epub_news_feeder.acquisition import (
 )
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
-from epub_news_feeder.drive import DriveClient, DriveError, deliver_drive
+from epub_news_feeder.drive import DriveAuthError, DriveClient, DriveError, deliver_drive
 from epub_news_feeder.editorial import (
     ArticleEvidence,
     StructuredProvider,
@@ -71,7 +71,12 @@ from epub_news_feeder.state import (
     StateStore,
 )
 from epub_news_feeder.state import brief_id as durable_brief_id
-from epub_news_feeder.state_sync import StateSyncError, restore_state, save_state
+from epub_news_feeder.state_sync import (
+    StateSyncAuthError,
+    StateSyncError,
+    restore_state,
+    save_state,
+)
 from epub_news_feeder.validation import EpubValidationError, validate_epub
 
 # How far back a referenced Publication's Story Clusters still count as recurring. Seven days
@@ -225,6 +230,10 @@ def _restore_state(
     A verified archive, or a legitimate first run (a clean absence), both proceed. Anything
     else — a download failure, a digest mismatch, or an ambiguous existence check — aborts:
     proceeding with an empty store would silently re-deliver everything already delivered.
+
+    A rejected credential aborts too, but under its own code. The two failures need entirely
+    different responses — one is renewed, the other investigated — and a single code for both
+    sends the operator looking at Drive when the answer is an expired refresh token.
     """
 
     try:
@@ -235,6 +244,10 @@ def _restore_state(
             environment=state_sync_target.environment,
             diagnostics=diagnostics,
         )
+    except StateSyncAuthError as error:
+        with suppress(OSError):
+            diagnostics.emit("DRIVE_AUTH_FAILED", phase="state", outcome="failed")
+        raise GenerationError("DRIVE_AUTH_FAILED", str(error)) from error
     except StateSyncError as error:
         with suppress(OSError):
             diagnostics.emit("STATE_RESTORE_FAILED", phase="state", outcome="failed")
@@ -262,6 +275,10 @@ def _save_state(
             connection=state.connection,
             diagnostics=diagnostics,
         )
+    except StateSyncAuthError as error:
+        # Retryable, not abandoned: the Edition is already delivered and finalized. The code
+        # still names the credential, because that is what the next attempt needs fixed first.
+        raise RetryableGenerationError("DRIVE_AUTH_FAILED", str(error)) from error
     except StateSyncError as error:
         raise RetryableGenerationError(
             "STATE_SAVE_PENDING", "Scheduled State Store save to Drive remains pending"
@@ -286,6 +303,12 @@ def _deliver_to_drive(
             folder_id=drive_target.folder_id,
             filename=result.receipt.path.name,
         )
+    except DriveAuthError as error:
+        raise RetryableGenerationError(
+            "DRIVE_AUTH_FAILED",
+            "Google rejected the Drive refresh token; renew it with "
+            "`epub-news-feeder authorize-drive`",
+        ) from error
     except (DriveError, OSError, ValueError) as error:
         raise RetryableGenerationError(
             "DRIVE_DELIVERY_PENDING", "Validated Drive Delivery remains pending"

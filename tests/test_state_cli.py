@@ -15,7 +15,7 @@ import pytest
 
 from epub_news_feeder import cli
 from epub_news_feeder.cli import main
-from epub_news_feeder.drive import DriveError, DriveFile
+from epub_news_feeder.drive import DriveAuthError, DriveError, DriveFile
 
 
 class FakeDriveClient:
@@ -200,6 +200,29 @@ def test_state_pull_fails_closed_on_a_digest_mismatch_without_leaking_anything(
     assert "code=STATE_RESTORE_FAILED" in captured.err
     assert "the-refresh-token-value" not in captured.err
     assert not state_path.exists()
+
+
+def test_state_pull_names_a_rejected_refresh_token_rather_than_an_unverifiable_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_oauth_env(monkeypatch)
+
+    class _RejectedCredentialsClient(FakeDriveClient):
+        def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
+            raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+    client = _RejectedCredentialsClient()
+    monkeypatch.setattr(cli, "HttpDriveClient", lambda *, credentials: client)
+
+    exit_code = main(
+        ["state-pull", "--state", str(tmp_path / "state.sqlite3"), "--state-folder", "folder-db"]
+    )
+
+    assert exit_code == 3
+    captured = capsys.readouterr()
+    assert "code=DRIVE_AUTH_FAILED" in captured.err
+    assert "authorize-drive" in captured.err
+    assert "the-refresh-token-value" not in captured.err
 
 
 @pytest.mark.security

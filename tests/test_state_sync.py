@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from epub_news_feeder.drive import DriveError, DriveFile
+from epub_news_feeder.drive import DriveAuthError, DriveError, DriveFile
 from epub_news_feeder.state_sync import (
+    StateSyncAuthError,
     StateSyncError,
     pack_state_archive,
     restore_state,
@@ -474,3 +475,45 @@ def test_state_sync_never_writes_the_fingerprint_key_bytes_to_diagnostics(tmp_pa
         path.read_text(encoding="utf-8") for path in diagnostics_dir.glob("*.jsonl")
     )
     assert key_bytes.hex() not in diagnostics_text
+
+
+# --- rejected credentials are told apart from every other Drive failure ------------
+
+
+class _RejectedCredentialsClient(FakeDriveClient):
+    """Every call fails the way an expired or revoked refresh token fails."""
+
+    def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
+        raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+
+def test_state_sync_restore_reports_rejected_credentials_as_their_own_failure(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(StateSyncAuthError, match="refresh token"):
+        restore_state(
+            client=_RejectedCredentialsClient(),
+            folder_id="folder-1",
+            state_path=tmp_path / "state.sqlite3",
+            environment="production",
+        )
+
+
+def test_state_sync_save_reports_rejected_credentials_as_their_own_failure(
+    tmp_path: Path,
+) -> None:
+    state_path = _make_real_state_files(tmp_path)
+
+    with pytest.raises(StateSyncAuthError, match="refresh token"):
+        save_state(
+            client=_RejectedCredentialsClient(),
+            folder_id="folder-1",
+            state_path=state_path,
+            environment="production",
+        )
+
+
+def test_state_sync_rejected_credentials_remain_an_ordinary_state_sync_failure() -> None:
+    """Existing fail-closed callers catch ``StateSyncError``; the narrower type refines it."""
+
+    assert issubclass(StateSyncAuthError, StateSyncError)

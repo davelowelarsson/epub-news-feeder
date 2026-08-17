@@ -26,7 +26,7 @@ from epub_news_feeder.application import (
     generate_edition,
 )
 from epub_news_feeder.config import load_config
-from epub_news_feeder.drive import DriveError, DriveFile
+from epub_news_feeder.drive import DriveAuthError, DriveError, DriveFile
 from epub_news_feeder.models import Configuration
 
 
@@ -425,3 +425,84 @@ def test_state_sync_restore_failure_never_leaks_drive_tokens_in_error_or_diagnos
     )
     assert "the-refresh-token-value" not in diagnostics_text
     assert "the-access-token-value" not in diagnostics_text
+
+
+# --- a rejected refresh token says so, rather than reading as an unverifiable archive
+
+
+class _RejectedCredentialsClient(FakeDriveClient):
+    """Every call fails the way an expired or revoked refresh token fails."""
+
+    def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
+        raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+
+def test_rejected_drive_credentials_abort_the_run_naming_the_credential_not_the_archive(
+    tmp_path: Path, _fixture_configuration: tuple[Configuration, ThreadingHTTPServer]
+) -> None:
+    configuration, _server = _fixture_configuration
+    state_path = tmp_path / "state.sqlite3"
+    diagnostics_directory = tmp_path / "diagnostics"
+
+    with pytest.raises(GenerationError) as excinfo:
+        generate_edition(
+            configuration,
+            state_path=state_path,
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=diagnostics_directory,
+            run_id="20260809T060000Z-REJECTEDA",
+            generated_at=datetime(2026, 8, 9, 6, tzinfo=UTC),
+            state_sync_target=StateSyncTarget(
+                client=_RejectedCredentialsClient(), folder_id="state-folder", environment="ci"
+            ),
+        )
+
+    assert excinfo.value.code == "DRIVE_AUTH_FAILED"
+    assert "refresh token" in excinfo.value.safe_message
+    assert "authorize-drive" in excinfo.value.safe_message
+    diagnostics_text = "".join(
+        path.read_text(encoding="utf-8") for path in diagnostics_directory.glob("*.jsonl")
+    )
+    assert '"code":"DRIVE_AUTH_FAILED"' in diagnostics_text
+    assert '"code":"STATE_RESTORE_FAILED"' not in diagnostics_text
+    # Still fail-closed: nothing was delivered from an empty State Store.
+    assert not state_path.exists()
+
+
+def test_rejected_drive_credentials_at_save_time_do_not_abandon_the_finalized_run(
+    tmp_path: Path, _fixture_configuration: tuple[Configuration, ThreadingHTTPServer]
+) -> None:
+    configuration, _server = _fixture_configuration
+    state_path = tmp_path / "state.sqlite3"
+    output_directory = tmp_path / "editions"
+
+    class _RejectedOnSaveClient(FakeDriveClient):
+        """Restore succeeds (a clean first run); the credential dies before the save."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.restored = False
+
+        def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
+            if not self.restored:
+                self.restored = True
+                return None
+            raise DriveAuthError("Google rejected the Drive credentials (invalid_grant)")
+
+    with pytest.raises(RetryableGenerationError) as excinfo:
+        generate_edition(
+            configuration,
+            state_path=state_path,
+            output_directory=output_directory,
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260809T060000Z-REJECTEDB",
+            generated_at=datetime(2026, 8, 9, 6, tzinfo=UTC),
+            state_sync_target=StateSyncTarget(
+                client=_RejectedOnSaveClient(), folder_id="state-folder", environment="ci"
+            ),
+        )
+
+    assert excinfo.value.code == "DRIVE_AUTH_FAILED"
+    with sqlite3.connect(state_path) as connection:
+        assert connection.execute("SELECT status FROM runs").fetchone() == ("delivered",)
+    assert len(list(output_directory.glob("*.epub"))) == 1
