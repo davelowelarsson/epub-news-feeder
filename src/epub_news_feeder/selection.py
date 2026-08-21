@@ -233,7 +233,13 @@ def _interest_order(
             item.article.canonical_url,
         ),
     )
-    return influenced[: max(0, limit - len(discovery))] + discovery
+    # The whole ordering is returned, not the first `limit` of it. Truncating here starved
+    # the plurality cap downstream: with only the flooding source's candidates surviving,
+    # the cap could shrink the Section or relax back into the flood, but never substitute
+    # another source's candidate — it had already been cut. Discovery picks keep their
+    # place inside the would-be window; everything else queues behind them.
+    head_length = max(0, limit - len(discovery))
+    return influenced[:head_length] + discovery + influenced[head_length:]
 
 
 def _rank_section(section: SectionRequest) -> tuple[list[SectionCandidate], bool]:
