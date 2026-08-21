@@ -59,6 +59,11 @@ class PolicyPreset(StrictModel):
     single_source_cap: Fraction = 0.6
     discovery_slice: Fraction = 0.2
     full_body_matching: bool = False
+    # The oldest publisher date a candidate may carry, counted back from generation time.
+    # None means a Section starved of fresh reporting may reach arbitrarily far into the
+    # feed — observed live as a July exhibition notice delivered in mid-August. An Article
+    # whose publisher declared no date is treated as fresh rather than excluded.
+    max_age_days: PositiveInt | None = None
 
 
 class RightsPolicy(StrictModel):
@@ -188,10 +193,11 @@ class Publication(StrictModel):
     # Article Slot, so it has no business inside a structure scoped to Article content.
     max_briefs: NonNegativeInt = 6
     # Named Publications whose delivery history this one may read. Suppression is
-    # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in,
-    # explicit and one-directional: the weekly may know what the daily delivered, while the
-    # daily stays unaware the weekly exists. A Publication that names nothing here behaves
-    # exactly as it did before this field existed.
+    # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in
+    # and explicit. Mutual references are legitimate — one reader reading both a daily and a
+    # weekly must never see the same Article twice, and because two Publications never run in
+    # the same instant, whichever delivered first settles precedence deterministically. A
+    # Publication that names nothing here behaves exactly as it did before this field existed.
     reads_history_from: list[NonEmptyString] = Field(default_factory=list)
     editorial: EditorialConfig | None = None
     sections: list[Section]
@@ -244,38 +250,8 @@ class Configuration(StrictModel):
                 if referenced in referenced_ids:
                     raise ValueError("duplicate publication history reference")
                 referenced_ids.add(referenced)
-        self._reject_history_cycles()
 
         return self
-
-    def _reject_history_cycles(self) -> None:
-        """History references are one-directional, so a cycle is a configuration error.
-
-        Two Publications each suppressing against the other has no defensible reading: whichever
-        ran first would silently decide what the other could carry. Rejecting it here is cheaper
-        than explaining the resulting Edition.
-        """
-
-        references = {
-            publication.id: tuple(publication.reads_history_from)
-            for publication in self.publications
-        }
-        visiting: set[str] = set()
-        settled: set[str] = set()
-
-        def visit(publication_id: str) -> None:
-            if publication_id in settled:
-                return
-            if publication_id in visiting:
-                raise ValueError("publication history references form a cycle")
-            visiting.add(publication_id)
-            for referenced in references.get(publication_id, ()):
-                visit(referenced)
-            visiting.discard(publication_id)
-            settled.add(publication_id)
-
-        for publication_id in references:
-            visit(publication_id)
 
     @classmethod
     def _validate_sections(

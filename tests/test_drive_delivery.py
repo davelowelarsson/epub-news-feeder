@@ -23,6 +23,8 @@ class FakeDriveClient:
         self.fail = fail
         self.files: dict[str, tuple[str, bytes]] = {}
         self.upload_calls = 0
+        self.list_calls = 0
+        self.moves: list[tuple[str, str, str]] = []
 
     def find_file(self, *, folder_id: str, filename: str) -> DriveFile | None:
         del folder_id
@@ -67,12 +69,14 @@ class FakeDriveClient:
         raise KeyError(file_id)
 
     def list_folder(self, *, folder_id: str) -> tuple[DriveFolderEntry, ...]:
+        self.list_calls += 1
         return tuple(
             DriveFolderEntry(file_id=existing_id, name=filename)
             for filename, (existing_id, _content) in self.files.items()
         )
 
     def move(self, *, file_id: str, from_folder_id: str, to_folder_id: str) -> str:
+        self.moves.append((file_id, from_folder_id, to_folder_id))
         return file_id
 
 
@@ -227,6 +231,88 @@ def test_drive_delivery_failure_is_retryable_and_local_delivery_is_not_abandoned
 
     assert recovered_client.upload_calls == 1
     assert result.receipt.path == delivered_files[0]
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_expired_editions_are_archived_after_a_successful_delivery(
+    tmp_path: Path, _fixture_configuration: tuple[Configuration, ThreadingHTTPServer]
+) -> None:
+    configuration, _server = _fixture_configuration
+    drive_client = FakeDriveClient()
+    drive_client.files["2026-07-20-morning-ABCDEFGH.epub"] = (drive_file_id := "old-edition", b"")
+    drive_client.files["2026-08-08-morning-IJKLMNOP.epub"] = ("fresh-edition", b"")
+    drive_client.files["state-production.tar.gz"] = ("state-tarball", b"")
+
+    generate_edition(
+        configuration,
+        state_path=tmp_path / "state.sqlite3",
+        output_directory=tmp_path / "editions",
+        diagnostics_directory=tmp_path / "diagnostics",
+        run_id="20260809T070000Z-FFFFFFFF",
+        generated_at=datetime(2026, 8, 9, 7, tzinfo=UTC),
+        drive_target=DriveTarget(
+            client=drive_client, folder_id="folder-1", archive_folder_id="archive-1"
+        ),
+    )
+
+    assert drive_client.moves == [(drive_file_id, "folder-1", "archive-1")]
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_no_archive_folder_means_no_housekeeping(
+    tmp_path: Path, _fixture_configuration: tuple[Configuration, ThreadingHTTPServer]
+) -> None:
+    configuration, _server = _fixture_configuration
+    drive_client = FakeDriveClient()
+    drive_client.files["2026-07-20-morning-ABCDEFGH.epub"] = ("old-edition", b"")
+
+    generate_edition(
+        configuration,
+        state_path=tmp_path / "state.sqlite3",
+        output_directory=tmp_path / "editions",
+        diagnostics_directory=tmp_path / "diagnostics",
+        run_id="20260809T070000Z-GGGGGGGG",
+        generated_at=datetime(2026, 8, 9, 7, tzinfo=UTC),
+        drive_target=DriveTarget(client=drive_client, folder_id="folder-1"),
+    )
+
+    assert drive_client.list_calls == 0
+    assert drive_client.moves == []
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_failed_archive_pass_never_fails_a_delivered_run(
+    tmp_path: Path, _fixture_configuration: tuple[Configuration, ThreadingHTTPServer]
+) -> None:
+    """Housekeeping runs after delivery; the Edition is on the device either way."""
+
+    configuration, _server = _fixture_configuration
+    diagnostics_directory = tmp_path / "diagnostics"
+
+    class FailingListClient(FakeDriveClient):
+        def list_folder(self, *, folder_id: str) -> tuple[DriveFolderEntry, ...]:
+            raise DriveError("Drive folder listing failed")
+
+    result = generate_edition(
+        configuration,
+        state_path=tmp_path / "state.sqlite3",
+        output_directory=tmp_path / "editions",
+        diagnostics_directory=diagnostics_directory,
+        run_id="20260809T070000Z-HHHHHHHH",
+        generated_at=datetime(2026, 8, 9, 7, tzinfo=UTC),
+        drive_target=DriveTarget(
+            client=FailingListClient(), folder_id="folder-1", archive_folder_id="archive-1"
+        ),
+    )
+
+    assert result.article_count >= 1
+    diagnostics_text = "".join(
+        path.read_text(encoding="utf-8") for path in diagnostics_directory.glob("*.jsonl")
+    )
+    assert "DRIVE_ARCHIVE_FAILED" in diagnostics_text
 
 
 @pytest.mark.security

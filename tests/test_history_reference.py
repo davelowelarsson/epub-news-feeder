@@ -91,36 +91,33 @@ def test_every_publication_reads_nobody_by_default() -> None:
             "duplicate publication history reference",
             id="duplicate-reference",
         ),
-        pytest.param(
-            [
-                _publication("weekly", reads_history_from=["daily"]),
-                _publication("daily", reads_history_from=["weekly"]),
-            ],
-            "form a cycle",
-            id="two-publication-cycle",
-        ),
-        pytest.param(
-            [
-                _publication("weekly", reads_history_from=["daily"]),
-                _publication("daily", reads_history_from=["monthly"]),
-                _publication("monthly", reads_history_from=["weekly"]),
-            ],
-            "form a cycle",
-            id="three-publication-cycle",
-        ),
     ],
 )
 def test_incoherent_history_references_are_rejected(
     publications: list[dict[str, object]], message: str
 ) -> None:
-    """A cycle has no defensible reading: whichever ran first would decide what the other carried.
-
-    Rejecting these at load is cheaper than explaining the resulting Edition, and a scheduled
-    Publication's configuration error must surface in the gate rather than at dawn.
-    """
+    """A scheduled Publication's configuration error must surface in the gate, not at dawn."""
 
     with pytest.raises(ValidationError, match=message):
         _configuration(publications)
+
+
+def test_mutual_history_references_are_a_shared_reader_not_a_cycle() -> None:
+    """Observed live: the weekly suppressed the daily's week, then the following weekdays
+    reprinted the weekly. One reader reads both Publications, so each must know what the
+    other delivered — the run order settles precedence deterministically because the two
+    never run on the same day."""
+
+    configuration = _configuration(
+        [
+            _publication("weekly", reads_history_from=["daily"]),
+            _publication("daily", reads_history_from=["weekly"]),
+        ]
+    )
+    assert {item.id: item.reads_history_from for item in configuration.publications} == {
+        "weekly": ["daily"],
+        "daily": ["weekly"],
+    }
 
 
 def _deliver(state: StateStore, *, publication_id: str, url: str, when: datetime) -> str:

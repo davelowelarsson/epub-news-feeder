@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 _ALLOWED_FIELDS = {
+    "archived",
     "article_id",
     "articles",
     "briefs",

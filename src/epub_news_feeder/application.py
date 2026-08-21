@@ -20,7 +20,13 @@ from epub_news_feeder.acquisition import (
 )
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
-from epub_news_feeder.drive import DriveAuthError, DriveClient, DriveError, deliver_drive
+from epub_news_feeder.drive import (
+    DriveAuthError,
+    DriveClient,
+    DriveError,
+    archive_due_editions,
+    deliver_drive,
+)
 from epub_news_feeder.editorial import (
     ArticleEvidence,
     StructuredProvider,
@@ -69,6 +75,7 @@ from epub_news_feeder.state import (
     ArticleObservation,
     PendingBrief,
     StateStore,
+    normalize_text,
 )
 from epub_news_feeder.state import brief_id as durable_brief_id
 from epub_news_feeder.state_sync import (
@@ -85,6 +92,30 @@ from epub_news_feeder.validation import EpubValidationError, validate_epub
 # recurring, it is over. Cluster coverage is never pruned, so without a window the archive would
 # eventually outrank the week.
 _RECURRENCE_WINDOW = timedelta(days=7)
+
+# How long a Delivery Copy stays in the Drive delivery folder before housekeeping moves it
+# to the archive folder. Seven days keeps roughly one week visible on the device — five
+# dailies and a weekly — which is what the folder is for; everything older is history and
+# belongs in the archive, retrievable but not in the way.
+_DELIVERY_RETENTION_DAYS = 7
+
+# Publication Notes are reader-facing end matter, so they speak the Publication Language —
+# an English apology inside a Swedish Edition reads as a defect, not a notice.
+_NOTE_TEMPLATES: dict[str, dict[str, str]] = {
+    "en": {
+        "evidence_missing": "{title} was omitted because eligibility evidence is missing.",
+        "unavailable": "Some reporting from {title} was unavailable for this Edition.",
+    },
+    "sv": {
+        "evidence_missing": "{title} utelämnades eftersom rättighetsunderlag saknas.",
+        "unavailable": "Viss rapportering från {title} var inte tillgänglig i den här utgåvan.",
+    },
+}
+
+
+def _note(language: str, key: str, *, title: str) -> str:
+    table = _NOTE_TEMPLATES.get(language.split("-", 1)[0].casefold(), _NOTE_TEMPLATES["en"])
+    return table[key].format(title=title)
 
 
 class GenerationError(Exception):
@@ -104,6 +135,9 @@ class DriveTarget:
 
     client: DriveClient
     folder_id: str
+    # Where expired Delivery Copies are moved after a successful delivery. None disables
+    # housekeeping entirely, which is what every caller did before the folder existed.
+    archive_folder_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +236,7 @@ def generate_edition(
             )
             if drive_target is not None:
                 _deliver_to_drive(result, drive_target, diagnostics)
+                _archive_delivered_editions(drive_target, generated_at, diagnostics)
             if state_sync_target is not None:
                 _save_state(state, state_sync_target, diagnostics)
             return result
@@ -317,6 +352,36 @@ def _deliver_to_drive(
         diagnostics.emit("DRIVE_DELIVERED", phase="delivery", digest=receipt.sha256)
 
 
+def _archive_delivered_editions(
+    drive_target: DriveTarget, generated_at: datetime, diagnostics: Diagnostics
+) -> None:
+    """Move expired Delivery Copies into the archive folder, fail-soft.
+
+    Housekeeping runs only after the Edition is delivered, and a housekeeping failure must
+    never fail the run that just succeeded: the Edition is on the device either way, and a
+    crowded folder is a smaller problem than a red morning run. The failure stays visible
+    as a diagnostic rather than an exit code, and the next morning's run tries again.
+    """
+
+    if drive_target.archive_folder_id is None:
+        return
+    try:
+        archived = archive_due_editions(
+            client=drive_target.client,
+            delivery_folder_id=drive_target.folder_id,
+            archive_folder_id=drive_target.archive_folder_id,
+            generated_at_date=generated_at.astimezone(UTC).date(),
+            retention_days=_DELIVERY_RETENTION_DAYS,
+        )
+    except DriveError:
+        with suppress(OSError):
+            diagnostics.emit("DRIVE_ARCHIVE_FAILED", phase="delivery", outcome="pending")
+        return
+    if archived:
+        with suppress(OSError):
+            diagnostics.emit("DRIVE_ARCHIVED", phase="delivery", archived=len(archived))
+
+
 def _run(
     configuration: Configuration,
     publication: Publication,
@@ -357,7 +422,9 @@ def _run(
                     source_id, attempted_at=generated_at, succeeded=False, classification=code
                 )
                 diagnostics.emit(code, phase="acquisition", source_id=source_id)
-                notes.append(f"{source.title} was omitted because eligibility evidence is missing.")
+                notes.append(
+                    _note(publication.language, "evidence_missing", title=source.title)
+                )
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
@@ -407,9 +474,7 @@ def _run(
             )
             if outcome.code != "SOURCE_OK":
                 degraded_source_ids.add(source_id)
-                notes.append(
-                    f"Some reporting from {source.title} was unavailable for this Edition."
-                )
+                notes.append(_note(publication.language, "unavailable", title=source.title))
             for acquired in outcome.articles:
                 if acquired.body is None:
                     # A body-free item only ever reaches here from a metadata_only Source, so a
@@ -485,6 +550,8 @@ def _run(
                 source_records[source_id].append(observation.article_id)
     finally:
         client.close()
+
+    _suppress_title_twins(records, source_records, diagnostics)
 
     # A Brief already delivered is suppressed at candidacy, before it ever reaches selection: a
     # reworded headline on the same report is not new. Every Publication this one reads is asked
@@ -973,6 +1040,53 @@ def _resume_spooled_delivery(
     )
 
 
+def _suppress_title_twins(
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    diagnostics: Diagnostics,
+) -> None:
+    """One publisher carrying one headline at two URLs is one story, not two Articles.
+
+    Observed live: a publisher re-published the same piece at a second URL under another
+    byline, and both filled Article Slots in one Section of one Edition. Identity is per
+    canonical URL, and the two bodies differed too much for near-duplicate merging, so this
+    run's candidate pool is the last place left to notice. The fullest body wins; freshness
+    and then identity break the remaining ties, so the survivor is deterministic. Scoped to
+    one publisher deliberately — two publishers sharing a headline is Story Cluster
+    territory, not an identity question.
+    """
+
+    by_story: dict[tuple[str, str], list[str]] = {}
+    for article_id, record in records.items():
+        story = (record.publisher_id, normalize_text(record.article.title).casefold())
+        by_story.setdefault(story, []).append(article_id)
+    for twins in by_story.values():
+        if len(twins) < 2:
+            continue
+        kept = max(
+            twins,
+            key=lambda article_id: (
+                len(records[article_id].article.body.split()),
+                records[article_id].published_at,
+                article_id,
+            ),
+        )
+        for article_id in twins:
+            if article_id == kept:
+                continue
+            record = records.pop(article_id)
+            for candidate_ids in source_records.values():
+                candidate_ids[:] = [
+                    candidate_id for candidate_id in candidate_ids if candidate_id != article_id
+                ]
+            diagnostics.emit(
+                "ARTICLE_TITLE_TWIN_SUPPRESSED",
+                phase="selection",
+                article_id=article_id,
+                source_id=record.source_id,
+            )
+
+
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
     if publication_id is None:
         if not configuration.publications:
@@ -1130,6 +1244,8 @@ def _section_requests(
         for source_id in leaf.section.sources:
             for article_id in source_records[source_id]:
                 record = records[article_id]
+                if _outside_age_window(record, policy, generated_at):
+                    continue
                 source = configuration.sources[source_id]
                 candidate = Candidate(
                     article_id,
@@ -1190,6 +1306,22 @@ def _section_requests(
             )
         )
     return requests
+
+
+def _outside_age_window(
+    record: _ArticleRecord, policy: PolicyPreset, generated_at: datetime
+) -> bool:
+    """Whether a candidate's publisher date falls outside the policy's age window.
+
+    Observed live: a Section starved of fresh reporting reached a month into the feed and
+    delivered a notice for an exhibition that had already closed. A Partial Edition is more
+    honest than a stale one. An undated Article is treated as fresh — absence of a date is
+    the publisher's omission, not evidence of age.
+    """
+
+    if policy.max_age_days is None or record.publisher_published_at is None:
+        return False
+    return record.publisher_published_at < generated_at - timedelta(days=policy.max_age_days)
 
 
 def _score(rules: list[MatchRule], record: _MatchableRecord, full_body_matching: bool) -> int:

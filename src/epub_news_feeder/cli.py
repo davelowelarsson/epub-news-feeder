@@ -62,6 +62,13 @@ def _parser() -> argparse.ArgumentParser:
         "--drive-folder", help="Also deliver to this Google Drive folder ID (opt-in)."
     )
     generate.add_argument(
+        "--archive-folder",
+        help=(
+            "Move Editions past retention from the delivery folder to this Drive folder ID "
+            "after a successful delivery (opt-in); defaults to GOOGLE_DRIVE_FOLDER_ARCHIVE."
+        ),
+    )
+    generate.add_argument(
         "--state-folder",
         help=(
             "Restore/save the State Store from/to this Google Drive folder ID (opt-in); "
@@ -158,6 +165,7 @@ def _generate(arguments: argparse.Namespace) -> int:
         return 2
     diagnostics = arguments.diagnostics or arguments.state.parent / "diagnostics"
     drive_folder = arguments.drive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    archive_folder = arguments.archive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ARCHIVE")
     state_folder = arguments.state_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_DB")
     drive_target = None
     state_sync_target = None
@@ -169,7 +177,9 @@ def _generate(arguments: argparse.Namespace) -> int:
             return 2
         client = HttpDriveClient(credentials=credentials)
         if drive_folder:
-            drive_target = DriveTarget(client=client, folder_id=drive_folder)
+            drive_target = DriveTarget(
+                client=client, folder_id=drive_folder, archive_folder_id=archive_folder
+            )
         if state_folder:
             state_sync_target = StateSyncTarget(
                 client=client, folder_id=state_folder, environment=arguments.state_environment
