@@ -14,9 +14,13 @@ from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from types import TracebackType
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 _TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
+
+# How long a Near Miss stays recoverable. Two weeks comfortably covers the weekly's
+# seven-day read window while keeping the table a window rather than an archive.
+_NEAR_MISS_RETENTION = timedelta(days=14)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +85,17 @@ class PendingDelivery:
     delivery_digest: str
     prepared_at: datetime
     briefs: tuple[PendingBrief, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceHealth:
+    """One Source's ``source_health`` row, as read by a report rather than the writer path."""
+
+    source_id: str
+    last_attempt: datetime
+    last_success: datetime | None
+    consecutive_failures: int
+    response_classification: str
 
 
 def normalize_url(url: str) -> str:
@@ -442,6 +457,18 @@ class StateStore:
                 "ALTER TABLE pending_deliveries ADD COLUMN briefs TEXT NOT NULL DEFAULT '[]'"
             )
         self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)")
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS near_misses (
+                publication_id TEXT NOT NULL,
+                article_id TEXT NOT NULL REFERENCES articles(article_id),
+                source_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY(publication_id, article_id)
+            );
+            INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);
+            """
+        )
 
     def observe_article(
         self,
@@ -699,7 +726,14 @@ class StateStore:
         if delivered is None:
             return True, False
         previous_hashes = self._load_token_hashes(str(delivered["token_hashes"]))
-        threshold = max(50, (int(delivered["word_count"]) * 15 + 99) // 100)
+        # A body that lost half its words since delivery is an extraction artifact — a
+        # paywall teaser or a chrome-only scrape — not publisher news. Re-delivering it
+        # would replace a full article the reader already has with a stub labelled
+        # "updated", so a shrunken observation is never material however large its diff.
+        delivered_word_count = int(delivered["word_count"])
+        if len(current_hashes) * 2 < delivered_word_count:
+            return False, False
+        threshold = max(50, (delivered_word_count * 15 + 99) // 100)
         materially_changed = _changed_words(previous_hashes, current_hashes) >= threshold
         return materially_changed, materially_changed
 
@@ -1011,6 +1045,114 @@ class StateStore:
             identifiers,
         ).fetchall()
         return frozenset(str(row["article_id"]) for row in rows)
+
+    def recent_deliveries_by_title(
+        self, publication_ids: Iterable[str], *, since: datetime
+    ) -> dict[tuple[str, str], set[str]]:
+        """Delivered Article identities since *since*, keyed by publisher and normalized title.
+
+        Exists for republished-title suppression: a publisher re-issuing a delivered story at
+        a new URL creates a new identity, so identity-based history suppression cannot see it.
+        Titles come from ``articles``, which tracks the latest observed title — good enough,
+        because a republication carries the headline it wants recognized by.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" * len(identifiers))
+        rows = self.connection.execute(
+            f"""
+            SELECT DISTINCT a.article_id, a.publisher_id, a.title
+            FROM deliveries d
+            JOIN articles a ON a.article_id = d.article_id
+            WHERE d.publication_id IN ({placeholders}) AND d.delivered_at >= ?
+            """,
+            (*identifiers, since.isoformat()),
+        ).fetchall()
+        delivered: dict[tuple[str, str], set[str]] = {}
+        for row in rows:
+            story = (str(row["publisher_id"]), normalize_text(str(row["title"])).casefold())
+            delivered.setdefault(story, set()).add(str(row["article_id"]))
+        return delivered
+
+    def record_near_misses(
+        self,
+        publication_id: str,
+        article_ids_with_sources: Iterable[tuple[str, str]],
+        recorded_at: datetime,
+    ) -> None:
+        """Record this Run's Near Misses and prune every record past its recovery window.
+
+        A Near Miss is a body-free pointer — an Article identity and the Source that carried
+        it; the canonical URL already lives in ``articles`` and is joined on read. Re-recording
+        moves ``recorded_at`` forward, because a Run that considered the Article again renewed
+        its claim to recovery. Pruning rides along on every recording, opportunistically, so
+        the table stays a two-week recovery window and never becomes an archive: a Near Miss
+        nobody recovered inside the window was not worth a Saturday slot either.
+        """
+
+        with self._transaction():
+            for article_id, source_id in article_ids_with_sources:
+                self.connection.execute(
+                    """
+                    INSERT INTO near_misses(publication_id, article_id, source_id, recorded_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(publication_id, article_id) DO UPDATE SET
+                        source_id = excluded.source_id,
+                        recorded_at = excluded.recorded_at
+                    """,
+                    (publication_id, article_id, source_id, recorded_at.isoformat()),
+                )
+            self.connection.execute(
+                "DELETE FROM near_misses WHERE recorded_at < ?",
+                ((recorded_at - _NEAR_MISS_RETENTION).isoformat(),),
+            )
+
+    def near_misses(
+        self, publication_ids: Iterable[str], *, since: datetime
+    ) -> list[tuple[str, str, str, datetime]]:
+        """Near Misses of *publication_ids* since *since*: (article, source, url, recorded).
+
+        Distinct by Article — several referenced Publications missing the same story is one
+        recovery, not several fetches — keeping the most recently recorded row's Source,
+        with the lowest source_id breaking a same-instant tie so which evidence and origin
+        allowlist the recovery runs under never depends on row order. Newest recorded
+        first, so a bounded recovery budget spends itself on the fresh end of the window.
+        The recorded time rides along because it is the only date recovery can trust when
+        the recovered page declares none.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return []
+        placeholders = ",".join("?" * len(identifiers))
+        rows = self.connection.execute(
+            f"""
+            SELECT n.article_id, n.source_id, a.canonical_url, n.recorded_at
+            FROM near_misses n
+            JOIN articles a ON a.article_id = n.article_id
+            WHERE n.publication_id IN ({placeholders}) AND n.recorded_at >= ?
+            ORDER BY n.recorded_at DESC, n.source_id, n.article_id
+            """,
+            (*identifiers, since.isoformat()),
+        ).fetchall()
+        seen: set[str] = set()
+        misses: list[tuple[str, str, str, datetime]] = []
+        for row in rows:
+            article_id = str(row["article_id"])
+            if article_id in seen:
+                continue
+            seen.add(article_id)
+            misses.append(
+                (
+                    article_id,
+                    str(row["source_id"]),
+                    str(row["canonical_url"]),
+                    datetime.fromisoformat(str(row["recorded_at"])),
+                )
+            )
+        return misses
 
     def cluster_recurrence(
         self, publication_ids: Iterable[str], *, since: datetime | None = None
@@ -1456,3 +1598,52 @@ class StateStore:
             """,
             (source_id, attempted_at.isoformat(), last_success, failures, classification),
         )
+
+
+def read_source_health(path: Path) -> list[SourceHealth]:
+    """Every ``source_health`` row, for a report - never for the writer path.
+
+    Opens SQLite itself in ``mode=ro`` rather than through ``StateStore.__enter__``: a report
+    has no business taking the exclusive writer lock, generating the fingerprint key, or
+    creating any ``.key``/``.lock`` sidecar file, and must be safe to run concurrently with (or
+    entirely without) a writer. A missing State Store - the normal state of a fresh clone, or a
+    run that failed before ever writing one - returns an empty list rather than raising; a
+    report about nothing to report is not itself a failure.
+    """
+
+    if not path.exists():
+        return []
+    # SQLite URI filenames treat ``?`` and ``#`` as syntax: an unescaped path would open a
+    # different file and silently swallow ``mode=ro`` — the one flag keeping this a report.
+    connection = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT source_id, last_attempt, last_success, consecutive_failures,
+                       response_classification
+                FROM source_health
+                ORDER BY source_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # The file exists but the schema has not been migrated yet - equally nothing
+            # to report.
+            return []
+    finally:
+        connection.close()
+    return [
+        SourceHealth(
+            source_id=str(row["source_id"]),
+            last_attempt=datetime.fromisoformat(str(row["last_attempt"])),
+            last_success=(
+                None
+                if row["last_success"] is None
+                else datetime.fromisoformat(str(row["last_success"]))
+            ),
+            consecutive_failures=int(row["consecutive_failures"]),
+            response_classification=str(row["response_classification"]),
+        )
+        for row in rows
+    ]

@@ -211,13 +211,27 @@ def save_state(
 
 
 def _checkpoint_wal(state_path: Path, connection: sqlite3.Connection | None) -> None:
-    """Merge the WAL into the main database file so the archived copy is self-contained."""
+    """Merge the WAL into the main database file so the archived copy is self-contained.
+
+    SQLite reports an obstructed TRUNCATE checkpoint through its result row — busy=1 —
+    rather than an exception, and ``pack_state_archive`` packs only the main file. An
+    ignored busy result would archive a database missing committed frames, and a restore
+    of that archive would silently lose delivery history. A concurrent reader holding a
+    read snapshot (the Source health report is one) is exactly the obstruction, so the
+    incomplete checkpoint must raise and leave the save to the retryable path.
+    """
 
     if connection is not None:
-        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _require_complete_checkpoint(connection)
         return
     own_connection = sqlite3.connect(state_path, timeout=5, isolation_level=None)
     try:
-        own_connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        _require_complete_checkpoint(own_connection)
     finally:
         own_connection.close()
+
+
+def _require_complete_checkpoint(connection: sqlite3.Connection) -> None:
+    row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if row is not None and int(row[0]) != 0:
+        raise StateSyncError("State Store WAL checkpoint could not complete")

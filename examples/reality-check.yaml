@@ -713,25 +713,36 @@ publications:
   # the Edition with nobody reading the diff. Note that remote eligibility still reaches one
   # Source only, so almost nothing here is ever summarised.
   - id: daily
-    title: Morgonutgavan
+    title: Morgonutgåvan
     language: sv
+    # The daily reads the weekly for the same reason the weekly reads the daily: one reader
+    # reads both, and Monday reprinting what Saturday carried was observed live, three
+    # mornings in a row. The two never run on the same day, so whichever delivered first
+    # settles precedence deterministically.
+    reads_history_from: [weekly]
     max_briefs: 6
     budget:
       max_articles: 15
       min_articles: 1
     policies:
       # Source plurality is a current-affairs value: an Edition should not see the day
-      # through one publisher's eyes.
+      # through one publisher's eyes. One day of age, not more: SVT publishes a nightly
+      # "Nattens nyheter" roundup, and without the window yesterday's roundup was delivered
+      # alongside today's.
       aktuellt:
         type: coverage
         minimum_sources: 2
-      # A personal section owes nobody a second opinion. Requiring plurality here would
-      # report a shortfall every single morning, and a warning that always fires is a
-      # warning nobody reads.
+        max_age_days: 1
+      # A personal section owes nobody a second opinion, so plurality never warns here —
+      # but it does spread: 0.4 caps a three-slot section at one Article per source when
+      # other sources have candidates, and relaxes back to the flood when they do not.
+      # Two weeks of age, because a starved section once reached into July and delivered
+      # a notice for an exhibition that had already closed; partial beats stale.
       personlig:
         type: interest
         minimum_sources: 1
-        single_source_cap: 1.0
+        single_source_cap: 0.4
+        max_age_days: 14
         # Item types that are not reading. A horoscope arrives as three unlabelled
         # paragraphs once the publisher's image separators are stripped, and the show
         # transcripts are timestamped dialogue running to thousands of words. Both are
@@ -821,18 +832,26 @@ publications:
   # recurrence is the leading discriminator in all five Sections - worth knowing when reading the
   # first few Saturdays, because adding interest rules later will quietly demote it.
   #
-  # The reference is one-directional by design: the weekly knows the daily, and the daily stays
-  # unaware the weekly exists. Nothing about the weekday Editions changes because this block is
-  # here, which is the property that made an opt-in reference preferable to global suppression.
+  # The reference is mutual: the weekly knows the daily, and the daily knows the weekly. It
+  # began one-directional, and the first delivered week showed why that was wrong — Monday
+  # through Wednesday reprinted articles Saturday had already carried, because the daily had
+  # no idea they were delivered. One reader reads both, so each suppresses against the other.
   #
-  # Note the ceiling this cannot exceed today: a Saturday Run acquires from the same feeds as any
-  # other, so it can only carry what is still in them. Monday's near-miss has usually fallen off
-  # by Saturday, and re-fetching one by its stored canonical_url needs an acquisition route that
-  # does not exist yet. Wednesday through Friday is the honest reach of this Edition for now.
+  # `recovers_near_misses: true` is what lets Saturday reach back past the feeds' own memory.
+  # A Saturday Run acquires from the same live feeds as any other, so alone it could only carry
+  # what is still in them — and Monday's near-miss has usually fallen off by Saturday. Every
+  # Publication records its Near Misses (body-free pointers: an Article identity and its
+  # Source; the canonical URL is already in the State Store), and this one, because it reads
+  # the daily's history, may re-fetch them: the week's Near Misses, newest first, at most 20
+  # page fetches per Run, skipping anything already delivered or already in the feeds. The
+  # re-fetch runs through the same evidence, origin-allowlist, robots and SSRF checks as any
+  # acquisition, and only against `web`/`auto` Sources — a feed-only or metadata-only Source's
+  # evidence never contemplated page fetches, so its misses stay missed.
   - id: weekly
-    title: Veckoutgavan
+    title: Veckoutgåvan
     language: sv
     reads_history_from: [daily]
+    recovers_near_misses: true
     # Twice the daily's Briefs, for six days of them rather than one.
     max_briefs: 12
     budget:
@@ -840,15 +859,19 @@ publications:
       min_articles: 1
     # Policies are per-Publication, so these are deliberately the daily's, duplicated rather
     # than shared. A weekly that quietly inherited an edit to the daily's mute rules would be
-    # the same coupling `reads_history_from` was kept narrow to avoid.
+    # the same coupling `reads_history_from` was kept narrow to avoid. The age windows differ
+    # where the Editions differ: a Saturday Edition carries the week, so its news window is
+    # the week, not the night.
     policies:
       aktuellt:
         type: coverage
         minimum_sources: 2
+        max_age_days: 7
       personlig:
         type: interest
         minimum_sources: 1
-        single_source_cap: 1.0
+        single_source_cap: 0.4
+        max_age_days: 14
         mute_rules:
           - rule:
               field: title

@@ -115,6 +115,9 @@ jobs:
           # Read by the CLI as the Edition Delivery Target and the State Store folder.
           GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
           GOOGLE_DRIVE_FOLDER_DB: ${{ secrets.GOOGLE_DRIVE_FOLDER_DB }}
+          # Where Editions past retention are moved after delivery, keeping the Kobo folder
+          # to roughly one week. Housekeeping is fail-soft: an unset secret disables it.
+          GOOGLE_DRIVE_FOLDER_ARCHIVE: ${{ secrets.GOOGLE_DRIVE_FOLDER_ARCHIVE }}
           # Present for the remote editorial provider that does not exist yet. Nothing reads
           # it today; the scheduled Edition is deterministic and makes no LLM call at all.
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -149,3 +152,19 @@ jobs:
             | grep -oE '"code":"[A-Z_]*"|"source_id":"[a-z0-9_]*"' \
             | paste - - \
             || echo "every Source delivered cleanly"
+
+      # Same log-privacy convention as the step above: only Source ids and classification
+      # codes, because $GITHUB_STEP_SUMMARY is world-readable on a public repository. An early
+      # failure (before "generate" ever opens the State Store) leaves no database to read, and
+      # that is a normal outcome for this step, not a reason to fail it.
+      - name: Source health summary
+        if: always()
+        run: |
+          set -euo pipefail
+          state="${RUNNER_TEMP}/state/state.sqlite3"
+          if [ ! -f "$state" ]; then
+            echo "No State Store was available for a Source health summary." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          uv run epub-news-feeder source-health --state "$state" --format markdown \
+            >> "$GITHUB_STEP_SUMMARY"

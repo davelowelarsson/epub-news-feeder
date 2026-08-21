@@ -59,6 +59,11 @@ class PolicyPreset(StrictModel):
     single_source_cap: Fraction = 0.6
     discovery_slice: Fraction = 0.2
     full_body_matching: bool = False
+    # The oldest publisher date a candidate may carry, counted back from generation time.
+    # None means a Section starved of fresh reporting may reach arbitrarily far into the
+    # feed — observed live as a July exhibition notice delivered in mid-August. An Article
+    # whose publisher declared no date is treated as fresh rather than excluded.
+    max_age_days: PositiveInt | None = None
 
 
 class RightsPolicy(StrictModel):
@@ -95,6 +100,10 @@ class Source(StrictModel):
     feed_url: HttpUrl
     acquisition: Literal["auto", "feed", "web", "metadata_only"] = "auto"
     presentation: Literal["full_text", "briefing_roll"] | None = None
+    # A Source that genuinely publishes short or unpunctuated items — micro-posts, verse,
+    # one-line updates — may opt in to carrying them as published. Without this, items
+    # under the full-body minimum are rejected and teaser-shaped bodies become Briefs.
+    allow_short_as_published: bool = False
     weight: Weight = 5
     llm_processing: Literal["disabled", "local_only", "remote_allowed"] = "local_only"
     rights: RightsPolicy | None = None
@@ -188,13 +197,27 @@ class Publication(StrictModel):
     # Article Slot, so it has no business inside a structure scoped to Article content.
     max_briefs: NonNegativeInt = 6
     # Named Publications whose delivery history this one may read. Suppression is
-    # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in,
-    # explicit and one-directional: the weekly may know what the daily delivered, while the
-    # daily stays unaware the weekly exists. A Publication that names nothing here behaves
-    # exactly as it did before this field existed.
+    # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in
+    # and explicit. Mutual references are legitimate — one reader reading both a daily and a
+    # weekly must never see the same Article twice, and because two Publications never run in
+    # the same instant, whichever delivered first settles precedence deterministically. A
+    # Publication that names nothing here behaves exactly as it did before this field existed.
     reads_history_from: list[NonEmptyString] = Field(default_factory=list)
+    # Whether this Publication may recover the Near Misses of the Publications it reads.
+    # Recovery is a page re-fetch, so it stays opt-in: every Publication records Near Misses
+    # (they are body-free pointers), but only one that names a history should ever spend
+    # network requests recovering them.
+    recovers_near_misses: bool = False
     editorial: EditorialConfig | None = None
     sections: list[Section]
+
+    @model_validator(mode="after")
+    def recovery_requires_a_history(self) -> Publication:
+        # A Publication with nobody to recover from is a configuration error: Near Misses
+        # are read from the referenced Publications, never from the recovering one itself.
+        if self.recovers_near_misses and not self.reads_history_from:
+            raise ValueError("recovers_near_misses requires reads_history_from")
+        return self
 
 
 class Configuration(StrictModel):
@@ -244,38 +267,8 @@ class Configuration(StrictModel):
                 if referenced in referenced_ids:
                     raise ValueError("duplicate publication history reference")
                 referenced_ids.add(referenced)
-        self._reject_history_cycles()
 
         return self
-
-    def _reject_history_cycles(self) -> None:
-        """History references are one-directional, so a cycle is a configuration error.
-
-        Two Publications each suppressing against the other has no defensible reading: whichever
-        ran first would silently decide what the other could carry. Rejecting it here is cheaper
-        than explaining the resulting Edition.
-        """
-
-        references = {
-            publication.id: tuple(publication.reads_history_from)
-            for publication in self.publications
-        }
-        visiting: set[str] = set()
-        settled: set[str] = set()
-
-        def visit(publication_id: str) -> None:
-            if publication_id in settled:
-                return
-            if publication_id in visiting:
-                raise ValueError("publication history references form a cycle")
-            visiting.add(publication_id)
-            for referenced in references.get(publication_id, ()):
-                visit(referenced)
-            visiting.discard(publication_id)
-            settled.add(publication_id)
-
-        for publication_id in references:
-            visit(publication_id)
 
     @classmethod
     def _validate_sections(

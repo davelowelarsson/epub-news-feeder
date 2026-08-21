@@ -116,6 +116,10 @@ _Avoid_: Duplicate source
 A temporary claim that prevents an Article from entering another Edition while a validated Edition awaits delivery.
 _Avoid_: Published article, lock
 
+**Near Miss**:
+A body-free record of an eligible Article a Run considered but did not select, retained briefly so a referencing Publication can recover it.
+_Avoid_: Backlog, cache
+
 **Story Cluster**:
 A non-selectable grouping of distinct Articles covering the same concrete real-world development. Its continuity never makes an unchanged Article eligible again.
 _Avoid_: Merged article, topic

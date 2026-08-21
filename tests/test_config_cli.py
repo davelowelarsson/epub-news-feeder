@@ -45,6 +45,33 @@ publications:
 """.lstrip()
 
 
+def test_a_source_may_opt_in_to_short_as_published(tmp_path: Path) -> None:
+    """The teaser exemption has to be reachable from configuration: a Source that
+    genuinely publishes short or unpunctuated items opts in per Source, and the default
+    stays the demoting behavior."""
+
+    config_path = tmp_path / "short.yaml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            "    feed_url: https://example.com/feed.xml",
+            "    feed_url: https://example.com/feed.xml\n    allow_short_as_published: true",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_config(config_path)
+
+    assert configuration.sources["source-one"].allow_short_as_published is True
+    default_configuration = load_config(_write_minimal(tmp_path))
+    assert default_configuration.sources["source-one"].allow_short_as_published is False
+
+
+def _write_minimal(tmp_path: Path) -> Path:
+    config_path = tmp_path / "minimal.yaml"
+    config_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
+    return config_path
+
+
 def run_cli(
     *arguments: str, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -556,8 +583,9 @@ def test_the_weekly_completes_the_week_instead_of_reprinting_it() -> None:
 
     Without `reads_history_from` the Saturday Edition is a sixth daily built from the same feeds:
     per-Publication suppression means it would carry precisely the reading the weekdays already
-    delivered. The reference must also stay one-directional, or the daily starts suppressing
-    against Saturday and the weekday Editions change for a reason nobody asked for.
+    delivered. The reference is mutual: the first delivered week showed Monday through Wednesday
+    reprinting what Saturday had carried, because the daily had no idea it was delivered. One
+    reader reads both Editions, so each suppresses against the other.
     """
 
     configuration = load_config(REALITY_CHECK_CONFIG)
@@ -566,7 +594,7 @@ def test_the_weekly_completes_the_week_instead_of_reprinting_it() -> None:
     daily = publications["daily"]
 
     assert weekly.reads_history_from == ["daily"]
-    assert daily.reads_history_from == [], "the daily must not know the weekly exists"
+    assert daily.reads_history_from == ["weekly"], "one reader reads both Editions"
 
     # A weekly at the daily's Budget would report the week in fifteen Articles it is forbidden
     # from carrying. Whatever the numbers become, the weekly's has to be the larger.

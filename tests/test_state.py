@@ -673,6 +673,76 @@ def test_ticket_06_delivery_history_is_body_free_and_revision_aware(tmp_path: Pa
     assert b"replacement-42" not in database_bytes
 
 
+def test_a_body_that_shrank_by_half_is_not_a_material_update(tmp_path: Path) -> None:
+    """Observed live: a delivered 855-word article came back as a 129-word paywall teaser
+    plus site chrome, was counted as a big diff, and re-delivered labelled "Uppdaterad".
+    A body that lost half its words is an extraction artifact, not publisher news."""
+
+    state_path = tmp_path / "development.sqlite3"
+    delivered_at = datetime(2026, 8, 19, 4, tzinfo=UTC)
+    full_body = " ".join(f"reporting-{word}" for word in range(400))
+
+    with StateStore(state_path, environment="development") as state:
+        observed = state.observe_article(
+            source_id="fixture-source",
+            publisher_id="fixture-publisher",
+            canonical_url="https://publisher.example/news/school-start",
+            guid="school-1",
+            title="Skolstarten",
+            author="Reporter",
+            normalized_body=full_body,
+            observed_at=delivered_at,
+        )
+        state.begin_run(
+            run_id="20260819T040000Z-AAAAAAAA",
+            publication_id="daily",
+            edition_id="daily@2026-08-19T04:00:00Z",
+            started_at=delivered_at,
+        )
+        state.reserve_articles(
+            run_id="20260819T040000Z-AAAAAAAA",
+            publication_id="daily",
+            observations=[observed],
+            expires_at=delivered_at + timedelta(hours=24),
+        )
+        state.finalize_delivery(
+            run_id="20260819T040000Z-AAAAAAAA",
+            publication_id="daily",
+            delivered_at=delivered_at,
+            delivery_digest="abc123",
+        )
+
+        teaser = state.observe_article(
+            source_id="fixture-source",
+            publisher_id="fixture-publisher",
+            canonical_url="https://publisher.example/news/school-start",
+            guid="school-1",
+            title="Skolstarten",
+            author="Reporter",
+            normalized_body=" ".join(f"teaser-{word}" for word in range(120)),
+            observed_at=delivered_at + timedelta(days=2),
+            publication_id="daily",
+        )
+        assert teaser.article_id == observed.article_id
+        assert not teaser.eligible
+        assert not teaser.materially_changed
+
+        # A genuine rewrite of comparable length still comes back.
+        rewritten = state.observe_article(
+            source_id="fixture-source",
+            publisher_id="fixture-publisher",
+            canonical_url="https://publisher.example/news/school-start",
+            guid="school-1",
+            title="Skolstarten",
+            author="Reporter",
+            normalized_body=" ".join(f"rewritten-{word}" for word in range(380)),
+            observed_at=delivered_at + timedelta(days=3),
+            publication_id="daily",
+        )
+        assert rewritten.eligible
+        assert rewritten.materially_changed
+
+
 @pytest.mark.acceptance
 def test_ticket_06_abandoning_delivery_releases_reservations(tmp_path: Path) -> None:
     now = datetime(2026, 8, 9, 6, tzinfo=UTC)

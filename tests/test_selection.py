@@ -214,6 +214,66 @@ def test_ticket_07_plurality_values_are_configurable_per_section() -> None:
     assert result.warnings == ()
 
 
+def test_interest_source_cap_substitutes_other_sources_instead_of_relaxing() -> None:
+    """Observed live: one Section ran three-for-three from a single flooding source two
+    mornings in one week. The interest ordering truncated to the slot count before the
+    plurality cap ran, so the cap could only relax back into the flood — it could never
+    pull another source's candidate in, because that candidate was already cut."""
+
+    section = SectionRequest(
+        section_id="david",
+        title="David",
+        order=0,
+        policy=Policy.INTEREST,
+        max_articles=3,
+        discovery_percent=0.0,
+        minimum_sources=1,
+        single_source_cap=0.4,
+        candidates=(
+            candidate("flood-1", "csn", hours_old=0),
+            candidate("flood-2", "csn", hours_old=1),
+            candidate("flood-3", "csn", hours_old=2),
+            candidate("ars-1", "ars", hours_old=6),
+            candidate("hackaday-1", "hackaday", hours_old=9),
+        ),
+    )
+
+    result = select_publication(
+        PublicationRequest(max_articles=3, min_articles=1, sections=(section,))
+    )
+
+    assert {slot.article.source_id for slot in result.for_section("david")} == {
+        "csn",
+        "ars",
+        "hackaday",
+    }
+
+
+def test_interest_source_cap_still_relaxes_when_only_one_source_has_candidates() -> None:
+    section = SectionRequest(
+        section_id="david",
+        title="David",
+        order=0,
+        policy=Policy.INTEREST,
+        max_articles=3,
+        discovery_percent=0.0,
+        minimum_sources=1,
+        single_source_cap=0.4,
+        candidates=(
+            candidate("flood-1", "csn", hours_old=0),
+            candidate("flood-2", "csn", hours_old=1),
+            candidate("flood-3", "csn", hours_old=2),
+        ),
+    )
+
+    result = select_publication(
+        PublicationRequest(max_articles=3, min_articles=1, sections=(section,))
+    )
+
+    assert len(result.for_section("david")) == 3
+    assert "SOURCE_PLURALITY_RELAXED:david" in result.warnings
+
+
 @pytest.mark.acceptance
 @pytest.mark.property
 def test_ticket_09_one_canonical_placement_has_reciprocal_section_pointers() -> None:

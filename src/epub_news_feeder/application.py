@@ -13,6 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder.acquisition import (
+    AcquiredArticle,
     AcquisitionMode,
     EligibilityEvidence,
     SourceClient,
@@ -20,7 +21,13 @@ from epub_news_feeder.acquisition import (
 )
 from epub_news_feeder.delivery import DeliveryReceipt, deliver_local
 from epub_news_feeder.diagnostics import Diagnostics
-from epub_news_feeder.drive import DriveAuthError, DriveClient, DriveError, deliver_drive
+from epub_news_feeder.drive import (
+    DriveAuthError,
+    DriveClient,
+    DriveError,
+    archive_due_editions,
+    deliver_drive,
+)
 from epub_news_feeder.editorial import (
     ArticleEvidence,
     StructuredProvider,
@@ -51,6 +58,7 @@ from epub_news_feeder.models import (
     PolicyPreset,
     Publication,
     Section,
+    Source,
 )
 from epub_news_feeder.ollama import OllamaStructuredProvider
 from epub_news_feeder.openai_responses import OpenAIResponsesProvider
@@ -69,6 +77,7 @@ from epub_news_feeder.state import (
     ArticleObservation,
     PendingBrief,
     StateStore,
+    normalize_text,
 )
 from epub_news_feeder.state import brief_id as durable_brief_id
 from epub_news_feeder.state_sync import (
@@ -85,6 +94,40 @@ from epub_news_feeder.validation import EpubValidationError, validate_epub
 # recurring, it is over. Cluster coverage is never pruned, so without a window the archive would
 # eventually outrank the week.
 _RECURRENCE_WINDOW = timedelta(days=7)
+
+# The most page fetches one Run may spend recovering Near Misses. Twenty bounds a Saturday
+# morning's extra load on publishers to less than the feed pass itself, and the newest-first
+# order means the budget is spent on the freshest end of the week deterministically.
+_NEAR_MISS_RECOVERY_LIMIT = 20
+
+# How far back a recovering Publication reads Near Misses. Seven days, matching the
+# recurrence window: the weekly recovers its week, and a Near Miss older than the week
+# was already outside every Section's age window when it was recorded.
+_NEAR_MISS_RECOVERY_WINDOW = timedelta(days=7)
+
+# How long a Delivery Copy stays in the Drive delivery folder before housekeeping moves it
+# to the archive folder. Seven days keeps roughly one week visible on the device — five
+# dailies and a weekly — which is what the folder is for; everything older is history and
+# belongs in the archive, retrievable but not in the way.
+_DELIVERY_RETENTION_DAYS = 7
+
+# Publication Notes are reader-facing end matter, so they speak the Publication Language —
+# an English apology inside a Swedish Edition reads as a defect, not a notice.
+_NOTE_TEMPLATES: dict[str, dict[str, str]] = {
+    "en": {
+        "evidence_missing": "{title} was omitted because eligibility evidence is missing.",
+        "unavailable": "Some reporting from {title} was unavailable for this Edition.",
+    },
+    "sv": {
+        "evidence_missing": "{title} utelämnades eftersom rättighetsunderlag saknas.",
+        "unavailable": "Viss rapportering från {title} var inte tillgänglig i den här utgåvan.",
+    },
+}
+
+
+def _note(language: str, key: str, *, title: str) -> str:
+    table = _NOTE_TEMPLATES.get(language.split("-", 1)[0].casefold(), _NOTE_TEMPLATES["en"])
+    return table[key].format(title=title)
 
 
 class GenerationError(Exception):
@@ -104,6 +147,9 @@ class DriveTarget:
 
     client: DriveClient
     folder_id: str
+    # Where expired Delivery Copies are moved after a successful delivery. None disables
+    # housekeeping entirely, which is what every caller did before the folder existed.
+    archive_folder_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +248,7 @@ def generate_edition(
             )
             if drive_target is not None:
                 _deliver_to_drive(result, drive_target, diagnostics)
+                _archive_delivered_editions(drive_target, generated_at, diagnostics)
             if state_sync_target is not None:
                 _save_state(state, state_sync_target, diagnostics)
             return result
@@ -317,6 +364,36 @@ def _deliver_to_drive(
         diagnostics.emit("DRIVE_DELIVERED", phase="delivery", digest=receipt.sha256)
 
 
+def _archive_delivered_editions(
+    drive_target: DriveTarget, generated_at: datetime, diagnostics: Diagnostics
+) -> None:
+    """Move expired Delivery Copies into the archive folder, fail-soft.
+
+    Housekeeping runs only after the Edition is delivered, and a housekeeping failure must
+    never fail the run that just succeeded: the Edition is on the device either way, and a
+    crowded folder is a smaller problem than a red morning run. The failure stays visible
+    as a diagnostic rather than an exit code, and the next morning's run tries again.
+    """
+
+    if drive_target.archive_folder_id is None:
+        return
+    try:
+        archived = archive_due_editions(
+            client=drive_target.client,
+            delivery_folder_id=drive_target.folder_id,
+            archive_folder_id=drive_target.archive_folder_id,
+            generated_at_date=generated_at.astimezone(UTC).date(),
+            retention_days=_DELIVERY_RETENTION_DAYS,
+        )
+    except DriveError:
+        with suppress(OSError):
+            diagnostics.emit("DRIVE_ARCHIVE_FAILED", phase="delivery", outcome="pending")
+        return
+    if archived:
+        with suppress(OSError):
+            diagnostics.emit("DRIVE_ARCHIVED", phase="delivery", archived=len(archived))
+
+
 def _run(
     configuration: Configuration,
     publication: Publication,
@@ -357,39 +434,11 @@ def _run(
                     source_id, attempted_at=generated_at, succeeded=False, classification=code
                 )
                 diagnostics.emit(code, phase="acquisition", source_id=source_id)
-                notes.append(f"{source.title} was omitted because eligibility evidence is missing.")
+                notes.append(_note(publication.language, "evidence_missing", title=source.title))
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
-            outcome = client.acquire(
-                SourceRequest(
-                    source_id=source_id,
-                    publisher_id=source.publisher_id or source_id,
-                    title=source.title,
-                    feed_url=str(source.feed_url),
-                    mode=AcquisitionMode(source.acquisition),
-                    llm_processing=source.llm_processing,
-                    default_article_language=source.default_article_language,
-                    allowed_publisher_origins=tuple(
-                        str(origin) for origin in source.allowed_publisher_origins
-                    ),
-                    evidence=EligibilityEvidence(
-                        evidence_id=evidence.evidence_id,
-                        reviewed_at=datetime.combine(
-                            evidence.evidence_reviewed_at, time.min, tzinfo=UTC
-                        ),
-                        expires_at=datetime.combine(
-                            evidence.review_expires_at, time.max, tzinfo=UTC
-                        ),
-                        feed_acquisition=evidence.feed_acquisition,
-                        page_acquisition=evidence.page_acquisition,
-                        retention=evidence.retention,
-                        private_distribution=evidence.private_distribution,
-                        local_llm=evidence.local_llm,
-                        remote_llm=evidence.remote_llm,
-                    ),
-                )
-            )
+            outcome = client.acquire(_source_request(source_id, source))
             succeeded = outcome.code in {"SOURCE_OK", "SOURCE_PARTIAL"}
             state.record_source_health(
                 source_id,
@@ -407,15 +456,17 @@ def _run(
             )
             if outcome.code != "SOURCE_OK":
                 degraded_source_ids.add(source_id)
-                notes.append(
-                    f"Some reporting from {source.title} was unavailable for this Edition."
-                )
+                notes.append(_note(publication.language, "unavailable", title=source.title))
             for acquired in outcome.articles:
                 if acquired.body is None:
-                    # A body-free item only ever reaches here from a metadata_only Source, so a
-                    # Brief stays a rights outcome and never becomes a failure outcome. Identity
-                    # is the durable, body-free brief_id: it is also the in-run element id, so
-                    # there is one identity rather than two.
+                    # A body-free item reaches here two ways: a metadata_only Source that never
+                    # asked for a body, or a teaser acquisition demoted after the full body route
+                    # resolved to a paywalled stub. Either way a Brief stays a rights outcome and
+                    # never becomes a failure outcome - a headline and its publisher route is
+                    # strictly less than the full-text retention the Source's evidence already
+                    # allows, so demoting to a Brief never exceeds what that evidence permits.
+                    # Identity is the durable, body-free brief_id: it is also the in-run element
+                    # id, so there is one identity rather than two.
                     brief_id = durable_brief_id(acquired.canonical_url)
                     briefs[brief_id] = _BriefRecord(
                         brief=BriefInput(
@@ -449,42 +500,35 @@ def _run(
                 )
                 if not observation.eligible:
                     continue
-                article_record = _ArticleRecord(
-                    article=ArticleInput(
-                        identifier=observation.article_id,
-                        title=acquired.title,
-                        body=acquired.body,
-                        blocks=tuple(
-                            BodyBlock(kind=block.kind, text=block.text) for block in acquired.blocks
-                        ),
-                        source_name=acquired.source_title,
-                        canonical_url=acquired.canonical_url,
-                        language=acquired.language,
-                        author=acquired.author,
-                        published_at=(
-                            acquired.published_at.astimezone(UTC).date().isoformat()
-                            if acquired.published_at is not None
-                            else None
-                        ),
-                        materially_updated=observation.materially_changed,
-                        copyright_notice=source.copyright_notice,
-                    ),
-                    observation=observation,
-                    categories=acquired.categories,
-                    published_at=acquired.published_at or generated_at,
-                    publisher_published_at=acquired.published_at,
-                    source_id=source_id,
-                    publisher_id=acquired.publisher_id,
-                    cluster_id=state.match_story_cluster(
-                        observation.article_id,
-                        signals=_story_signals(acquired.title, acquired.categories),
-                        observed_at=generated_at,
-                    ),
+                records.setdefault(
+                    observation.article_id,
+                    _article_record(state, source, source_id, acquired, observation, generated_at),
                 )
-                records.setdefault(observation.article_id, article_record)
                 source_records[source_id].append(observation.article_id)
+        if publication.recovers_near_misses:
+            _recover_near_misses(
+                configuration,
+                publication,
+                state,
+                client,
+                records,
+                source_records,
+                generated_at,
+                run_id,
+                diagnostics,
+            )
     finally:
         client.close()
+
+    _suppress_title_twins(records, source_records, diagnostics)
+    _suppress_recently_delivered_titles(
+        state,
+        records,
+        source_records,
+        (publication.id, *publication.reads_history_from),
+        generated_at,
+        diagnostics,
+    )
 
     # A Brief already delivered is suppressed at candidacy, before it ever reaches selection: a
     # reworded headline on the same report is not new. Every Publication this one reads is asked
@@ -549,6 +593,24 @@ def _run(
         raise GenerationError(
             "PUBLICATION_BELOW_MINIMUM", "Eligible articles did not meet the publication minimum"
         )
+    # Every Publication records its Near Misses — body-free pointers are cheap, and the daily
+    # cannot know on Monday whether a weekly will exist to want them on Saturday. Only a
+    # Publication that names a history ever reads them back. The pool is `source_records`,
+    # not `records`: history suppression removes another Publication's delivered Articles
+    # from the pool only, and recording those as this Publication's own misses would
+    # launder that delivery back into circulation through any third Publication reading
+    # only this one.
+    selected_ids = set(selection.unique_article_ids)
+    candidate_pool = {
+        article_id for candidate_ids in source_records.values() for article_id in candidate_ids
+    }
+    near_misses = sorted(
+        (article_id, records[article_id].source_id)
+        for article_id in candidate_pool
+        if article_id not in selected_ids
+    )
+    state.record_near_misses(publication.id, near_misses, recorded_at=generated_at)
+    diagnostics.emit("NEAR_MISSES_RECORDED", phase="selection", articles=len(near_misses))
     for article_id in selection.unique_article_ids:
         record = records[article_id]
         diagnostics.emit(
@@ -973,6 +1035,299 @@ def _resume_spooled_delivery(
     )
 
 
+# How close two same-title publications must be to count as one story rather than a
+# recurring column. Two days covers a republish-with-corrections; a weekly column reusing
+# its headline sits a week apart and stays two Articles.
+_TWIN_PROXIMITY = timedelta(days=2)
+
+# How long a delivered headline blocks a same-publisher re-publication under a new URL.
+# Three days, not longer: past that, a reused title is far more likely a recurring column
+# than the same story wearing a fresh address.
+_REPUBLISHED_TITLE_WINDOW = timedelta(days=3)
+
+
+def _suppress_title_twins(
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    diagnostics: Diagnostics,
+) -> None:
+    """One publisher carrying one headline at two nearby URLs is one story, not two Articles.
+
+    Observed live: a publisher re-published the same piece at a second URL under another
+    byline, and both filled Article Slots in one Section of one Edition. Identity is per
+    canonical URL, and the two bodies differed too much for near-duplicate merging, so this
+    run's candidate pool is the last place left to notice. The fullest body wins; freshness
+    and then identity break the remaining ties, so the survivor is deterministic.
+
+    Two scope limits, both deliberate: one publisher only, because two publishers sharing a
+    headline is Story Cluster territory rather than an identity question; and publication
+    dates within days of each other, because a recurring column reuses its headline every
+    week and each column is its own journalism.
+    """
+
+    by_story: dict[tuple[str, str], list[str]] = {}
+    for article_id, record in records.items():
+        story = (record.publisher_id, normalize_text(record.article.title).casefold())
+        by_story.setdefault(story, []).append(article_id)
+    for twins in by_story.values():
+        if len(twins) < 2:
+            continue
+        ordered = sorted(
+            twins, key=lambda article_id: (records[article_id].published_at, article_id)
+        )
+        clusters: list[list[str]] = [[ordered[0]]]
+        for article_id in ordered[1:]:
+            previous = records[clusters[-1][-1]].published_at
+            if records[article_id].published_at - previous <= _TWIN_PROXIMITY:
+                clusters[-1].append(article_id)
+            else:
+                clusters.append([article_id])
+        for cluster in clusters:
+            if len(cluster) < 2:
+                continue
+            kept = max(
+                cluster,
+                key=lambda article_id: (
+                    len(records[article_id].article.body.split()),
+                    records[article_id].published_at,
+                    article_id,
+                ),
+            )
+            for article_id in cluster:
+                if article_id == kept:
+                    continue
+                record = records.pop(article_id)
+                _remove_candidate(source_records, article_id)
+                diagnostics.emit(
+                    "ARTICLE_TITLE_TWIN_SUPPRESSED",
+                    phase="selection",
+                    article_id=article_id,
+                    source_id=record.source_id,
+                )
+
+
+def _suppress_recently_delivered_titles(
+    state: StateStore,
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    publication_ids: tuple[str, ...],
+    generated_at: datetime,
+    diagnostics: Diagnostics,
+) -> None:
+    """A story delivered days ago and re-published at a new URL is not new journalism.
+
+    The within-run twin suppression cannot see yesterday: the delivered URL is no longer a
+    candidate, so the republished URL arrives as a singleton and would sail through both
+    twin suppression and identity-based history suppression. A candidate whose publisher
+    and normalized title match a recent delivery under a *different* identity is that
+    delivery wearing a fresh address. The same identity is deliberately exempt — a material
+    revision of the delivered URL is the update path working as designed.
+    """
+
+    delivered = state.recent_deliveries_by_title(
+        publication_ids, since=generated_at - _REPUBLISHED_TITLE_WINDOW
+    )
+    if not delivered:
+        return
+    for article_id, record in list(records.items()):
+        story = (record.publisher_id, normalize_text(record.article.title).casefold())
+        delivered_ids = delivered.get(story)
+        if not delivered_ids or article_id in delivered_ids:
+            continue
+        del records[article_id]
+        _remove_candidate(source_records, article_id)
+        diagnostics.emit(
+            "ARTICLE_REPUBLISHED_TITLE_SUPPRESSED",
+            phase="selection",
+            article_id=article_id,
+            source_id=record.source_id,
+        )
+
+
+def _remove_candidate(source_records: dict[str, list[str]], article_id: str) -> None:
+    for candidate_ids in source_records.values():
+        candidate_ids[:] = [
+            candidate_id for candidate_id in candidate_ids if candidate_id != article_id
+        ]
+
+
+def _source_request(source_id: str, source: Source) -> SourceRequest:
+    """The one way a Source's configuration becomes an acquisition request.
+
+    Shared by the feed pass and Near Miss recovery, deliberately: two constructions would
+    eventually disagree about evidence or origins, and every acquisition safety check is
+    only as good as the request that carries it.
+    """
+
+    evidence = source.eligibility
+    if evidence is None:  # Callers gate on evidence before building a request.
+        raise ValueError(f"Source has no eligibility evidence: {source_id}")
+    return SourceRequest(
+        source_id=source_id,
+        publisher_id=source.publisher_id or source_id,
+        title=source.title,
+        feed_url=str(source.feed_url),
+        mode=AcquisitionMode(source.acquisition),
+        llm_processing=source.llm_processing,
+        default_article_language=source.default_article_language,
+        allowed_publisher_origins=tuple(str(origin) for origin in source.allowed_publisher_origins),
+        allow_short_as_published=source.allow_short_as_published,
+        evidence=EligibilityEvidence(
+            evidence_id=evidence.evidence_id,
+            reviewed_at=datetime.combine(evidence.evidence_reviewed_at, time.min, tzinfo=UTC),
+            expires_at=datetime.combine(evidence.review_expires_at, time.max, tzinfo=UTC),
+            feed_acquisition=evidence.feed_acquisition,
+            page_acquisition=evidence.page_acquisition,
+            retention=evidence.retention,
+            private_distribution=evidence.private_distribution,
+            local_llm=evidence.local_llm,
+            remote_llm=evidence.remote_llm,
+        ),
+    )
+
+
+def _article_record(
+    state: StateStore,
+    source: Source,
+    source_id: str,
+    acquired: AcquiredArticle,
+    observation: ArticleObservation,
+    generated_at: datetime,
+) -> _ArticleRecord:
+    """Turn one acquired, observed Article into the record every downstream rule reads.
+
+    Shared by the feed pass and Near Miss recovery so a recovered Article is an ordinary
+    candidate — same clustering, same twin and history suppression, same selection — with
+    no special treatment left to drift.
+    """
+
+    assert acquired.body is not None  # Callers only record body-carrying acquisitions.
+    return _ArticleRecord(
+        article=ArticleInput(
+            identifier=observation.article_id,
+            title=acquired.title,
+            body=acquired.body,
+            blocks=tuple(BodyBlock(kind=block.kind, text=block.text) for block in acquired.blocks),
+            source_name=acquired.source_title,
+            canonical_url=acquired.canonical_url,
+            language=acquired.language,
+            author=acquired.author,
+            published_at=(
+                acquired.published_at.astimezone(UTC).date().isoformat()
+                if acquired.published_at is not None
+                else None
+            ),
+            materially_updated=observation.materially_changed,
+            copyright_notice=source.copyright_notice,
+        ),
+        observation=observation,
+        categories=acquired.categories,
+        published_at=acquired.published_at or generated_at,
+        publisher_published_at=acquired.published_at,
+        source_id=source_id,
+        publisher_id=acquired.publisher_id,
+        cluster_id=state.match_story_cluster(
+            observation.article_id,
+            signals=_story_signals(acquired.title, acquired.categories),
+            observed_at=generated_at,
+        ),
+    )
+
+
+def _recover_near_misses(
+    configuration: Configuration,
+    publication: Publication,
+    state: StateStore,
+    client: SourceClient,
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    generated_at: datetime,
+    run_id: str,
+    diagnostics: Diagnostics,
+) -> None:
+    """Re-acquire the referenced Publications' Near Misses that fell off the live feeds.
+
+    A Saturday Run acquires from the same feeds as any daily Run, so alone it can only
+    carry what is still in them — and Monday's Near Miss usually is not. This route reads
+    the week's Near Misses (newest recorded first) and re-fetches each by its stored
+    canonical URL through ``SourceClient.acquire_article``, which enforces the same
+    evidence, origin, robots and SSRF rules as the feed route.
+
+    Bounded and skip-heavy by design: at most ``_NEAR_MISS_RECOVERY_LIMIT`` fetches per
+    Run, and no fetch at all for an Article this Run already acquired, one any involved
+    Publication already delivered, or a Source that has since left the configuration,
+    lost its evidence, left this Publication's Sections, or never permitted page fetches.
+    A recovered Article then flows through ``observe_article`` and becomes an ordinary
+    candidate, subject to every downstream rule with no special treatment.
+    """
+
+    candidates = state.near_misses(
+        publication.reads_history_from,
+        since=generated_at - _NEAR_MISS_RECOVERY_WINDOW,
+    )
+    delivered = state.delivered_article_ids((publication.id, *publication.reads_history_from))
+    fetches = 0
+    recovered = 0
+    for article_id, source_id, canonical_url, recorded_at in candidates:
+        if fetches >= _NEAR_MISS_RECOVERY_LIMIT:
+            break
+        if article_id in records or article_id in delivered:
+            continue
+        source = configuration.sources.get(source_id)
+        if source is None or source.rights is None or source.eligibility is None:
+            continue
+        if source_id not in source_records:
+            # A Source in the configuration but not in this Publication's Sections has
+            # nowhere to place a recovery, so the fetch would be spent on nothing.
+            continue
+        if source.acquisition not in {"web", "auto"}:
+            # Recovery is a page fetch; feed and metadata_only evidence never contemplated
+            # one, and `acquire_article` would refuse anyway — refusing here saves nothing
+            # from the fetch budget by accident.
+            continue
+        fetches += 1
+        try:
+            acquired = client.acquire_article(_source_request(source_id, source), canonical_url)
+        except Exception:
+            # A page can decay into anything in a week — an empty 200, invalid gzip, HTML
+            # the extractor cannot begin to parse. One decayed page costs its own recovery,
+            # never the whole delivered Edition.
+            continue
+        if acquired is None or acquired.body is None:
+            continue
+        recovered_body = acquired.body
+        if acquired.published_at is None:
+            # The page declared no publication time, and an undated Article would bypass
+            # every Section age window. The Near Miss's recording time is the honest upper
+            # bound: the Article existed no later than the morning that recorded it.
+            acquired = replace(acquired, published_at=recorded_at)
+        observation = state.observe_article(
+            source_id=source_id,
+            publisher_id=acquired.publisher_id,
+            canonical_url=acquired.canonical_url,
+            guid=acquired.guid,
+            title=acquired.title,
+            author=acquired.author,
+            normalized_body=recovered_body,
+            observed_at=generated_at,
+            publication_id=publication.id,
+            run_id=run_id,
+        )
+        if not observation.eligible or observation.article_id in records:
+            continue
+        records[observation.article_id] = _article_record(
+            state, source, source_id, acquired, observation, generated_at
+        )
+        source_records[source_id].append(observation.article_id)
+        recovered += 1
+    diagnostics.emit(
+        "NEAR_MISSES_RECOVERED",
+        phase="acquisition",
+        articles=recovered,
+        omitted=len(candidates) - recovered,
+    )
+
+
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
     if publication_id is None:
         if not configuration.publications:
@@ -1130,6 +1485,8 @@ def _section_requests(
         for source_id in leaf.section.sources:
             for article_id in source_records[source_id]:
                 record = records[article_id]
+                if _outside_age_window(record, policy, generated_at):
+                    continue
                 source = configuration.sources[source_id]
                 candidate = Candidate(
                     article_id,
@@ -1190,6 +1547,22 @@ def _section_requests(
             )
         )
     return requests
+
+
+def _outside_age_window(
+    record: _ArticleRecord, policy: PolicyPreset, generated_at: datetime
+) -> bool:
+    """Whether a candidate's publisher date falls outside the policy's age window.
+
+    Observed live: a Section starved of fresh reporting reached a month into the feed and
+    delivered a notice for an exhibition that had already closed. A Partial Edition is more
+    honest than a stale one. An undated Article is treated as fresh — absence of a date is
+    the publisher's omission, not evidence of age.
+    """
+
+    if policy.max_age_days is None or record.publisher_published_at is None:
+        return False
+    return record.publisher_published_at < generated_at - timedelta(days=policy.max_age_days)
 
 
 def _score(rules: list[MatchRule], record: _MatchableRecord, full_body_matching: bool) -> int:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sqlite3
 import sys
 import webbrowser
 from collections.abc import Sequence
@@ -31,6 +32,7 @@ from epub_news_feeder.drive_oauth import (
 )
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
+from epub_news_feeder.state import SourceHealth, read_source_health
 from epub_news_feeder.state_sync import (
     StateSyncAuthError,
     StateSyncError,
@@ -60,6 +62,13 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("--epubcheck-jar", type=Path)
     generate.add_argument(
         "--drive-folder", help="Also deliver to this Google Drive folder ID (opt-in)."
+    )
+    generate.add_argument(
+        "--archive-folder",
+        help=(
+            "Move Editions past retention from the delivery folder to this Drive folder ID "
+            "after a successful delivery (opt-in); defaults to GOOGLE_DRIVE_FOLDER_ARCHIVE."
+        ),
     )
     generate.add_argument(
         "--state-folder",
@@ -107,6 +116,13 @@ def _parser() -> argparse.ArgumentParser:
     state_push.add_argument("--state", required=True, type=Path)
     state_push.add_argument("--state-folder", required=True)
     state_push.add_argument("--state-environment", default="local")
+
+    source_health = commands.add_parser(
+        "source-health",
+        help="Report per-Source health from the State Store (read-only; never a gate).",
+    )
+    source_health.add_argument("--state", required=True, type=Path)
+    source_health.add_argument("--format", choices=["text", "markdown"], default="text")
     return parser
 
 
@@ -158,6 +174,7 @@ def _generate(arguments: argparse.Namespace) -> int:
         return 2
     diagnostics = arguments.diagnostics or arguments.state.parent / "diagnostics"
     drive_folder = arguments.drive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    archive_folder = arguments.archive_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_ARCHIVE")
     state_folder = arguments.state_folder or os.environ.get("GOOGLE_DRIVE_FOLDER_DB")
     drive_target = None
     state_sync_target = None
@@ -169,7 +186,9 @@ def _generate(arguments: argparse.Namespace) -> int:
             return 2
         client = HttpDriveClient(credentials=credentials)
         if drive_folder:
-            drive_target = DriveTarget(client=client, folder_id=drive_folder)
+            drive_target = DriveTarget(
+                client=client, folder_id=drive_folder, archive_folder_id=archive_folder
+            )
         if state_folder:
             state_sync_target = StateSyncTarget(
                 client=client, folder_id=state_folder, environment=arguments.state_environment
@@ -280,6 +299,77 @@ def _state_push(state_path: Path, folder_id: str, environment: str) -> int:
     return 0
 
 
+def _source_health_row(record: SourceHealth) -> tuple[str, str, int, str]:
+    last_success = (
+        "never" if record.last_success is None else record.last_success.date().isoformat()
+    )
+    return (
+        record.source_id,
+        record.response_classification,
+        record.consecutive_failures,
+        last_success,
+    )
+
+
+def _source_health_text(records: Sequence[SourceHealth]) -> str:
+    lines = [
+        f"source_id={source_id} classification={classification} "
+        f"consecutive_failures={failures} last_success={last_success}"
+        for source_id, classification, failures, last_success in (
+            _source_health_row(record) for record in records
+        )
+    ]
+    return "\n".join(lines)
+
+
+def _markdown_cell(value: str) -> str:
+    """Neutralize GFM table syntax: the summary is world-readable, and a value carrying a
+    pipe or a newline must not break the layout or spoof rows outside its own cell."""
+
+    return value.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
+def _source_health_markdown(records: Sequence[SourceHealth]) -> str:
+    # A source_id and a classification code, never a title or a URL: this is meant for
+    # $GITHUB_STEP_SUMMARY on a public repository, matching the diagnostic report's convention.
+    lines = [
+        "| Source | Classification | Consecutive Failures | Last Success |",
+        "| --- | --- | --- | --- |",
+    ]
+    for source_id, classification, failures, last_success in (
+        _source_health_row(record) for record in records
+    ):
+        marker = "⚠️ " if failures >= 3 else ""
+        lines.append(
+            f"| {marker}{_markdown_cell(source_id)} | {_markdown_cell(classification)} "
+            f"| {failures} | {last_success} |"
+        )
+    return "\n".join(lines)
+
+
+def _source_health(state_path: Path, output_format: str) -> int:
+    """Always exits 0: a report surfaces Source health, it does not gate the Edition.
+
+    That promise has to survive a corrupt file too — the workflow step runs under
+    ``set -e`` after a delivered Edition, and a report must never turn that delivery red.
+    """
+
+    try:
+        records = read_source_health(state_path)
+    except (sqlite3.Error, OSError, ValueError):
+        print("Source health could not be read; the Edition is unaffected.")
+        return 0
+    if not records:
+        print("No Source health has been recorded yet.")
+        return 0
+    ordered = sorted(records, key=lambda record: (-record.consecutive_failures, record.source_id))
+    if output_format == "markdown":
+        print(_source_health_markdown(ordered))
+    else:
+        print(_source_health_text(ordered))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
@@ -294,4 +384,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _state_pull(arguments.state, arguments.state_folder, arguments.state_environment)
     if arguments.command == "state-push":
         return _state_push(arguments.state, arguments.state_folder, arguments.state_environment)
+    if arguments.command == "source-health":
+        return _source_health(arguments.state, arguments.format)
     raise AssertionError(f"Unhandled command: {arguments.command}")

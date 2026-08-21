@@ -3,13 +3,13 @@ from __future__ import annotations
 import re
 import socket
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from ipaddress import ip_address
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import feedparser
 import httpcore
@@ -84,6 +84,17 @@ class AcquisitionOutcome:
     code: str
     articles: tuple[AcquiredArticle, ...]
     omitted: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _PageBody:
+    """One publisher page's extracted body, plus the raw document for metadata reads."""
+
+    body: str
+    blocks: tuple[BodyBlock, ...]
+    classification: str
+    url: httpx.URL
+    document: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,13 +241,29 @@ def _has_full_article_cta(fragment: str) -> bool:
 _MAXIMUM_LIST_RUN = 12
 _SHORT_LIST_ITEM_WORDS = 8
 
+# The largest decoded chunk one download iteration may hand back, bounding how far a
+# compressed response can exceed the response cap before the size check sees it.
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
+# WordPress appends this to every feed item's content; it is metadata about syndication,
+# never publisher prose, so the anchored full match cannot condemn a real sentence.
+_WORDPRESS_TRAILER = re.compile(r"^The post .+ appeared first on .+$")
+
+# The longest a navigation menu entry gets. "Om oss", "Logga in", "Prenumeration" are one
+# or two words; a real first sentence is not.
+_CHROME_LIST_ITEM_WORDS = 4
+
+_CREDIT_LINE_WORDS = 8
+_STOCK_AGENCIES = ("shutterstock", "getty images", "istock", "unsplash")
+_CREDIT_PREFIXES = ("foto:", "bild:", "photo:", "image:", "genrebild")
+
 
 def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
-    """Drop the two kinds of publisher furniture that read as body text but are not.
+    """Drop the kinds of publisher furniture that read as body text but are not.
 
-    A first cut, deliberately narrow — the general question of separating article text
-    from furniture is open (issue #85). These two were observed corrupting a delivered
-    Edition and have signatures precise enough to act on now:
+    Deliberately a list of narrow signatures rather than a general classifier — the general
+    question of separating article text from furniture is open (issue #85). Each rule below
+    was observed corrupting a delivered Edition and is precise enough to act on:
 
     - **Fixture tables.** An SVT Sport report ended in a hundred consecutive list items of
       four words each - a whole season's results, one scoreline per item - rendered as
@@ -245,25 +272,91 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
       so both survive.
     - **Section labels.** A bare ``BLOG`` on its own, which is a heading the page styles
       and a reader cannot place.
+    - **Feed trailers.** WordPress closes every item with "The post <title> appeared first
+      on <site>." — syndication metadata, not journalism.
+    - **Leading navigation.** Special Nest pages open with the site menu — "Om oss",
+      "Cookiepolicy", "Logga in" — extracted as a list before the first paragraph. A run of
+      uniformly tiny list items ahead of any prose is chrome; after prose it may be content.
+    - **Stock-photo credits.** "Genrebild från Shutterstock." is a caption for an image the
+      Edition does not carry.
+    - **Related-headlines widgets.** Special Nest pages end in a list of other articles'
+      headlines. Beyond being junk, the widget changes as the site publishes, so an
+      unchanged article kept re-reading as materially updated and re-entering Editions.
     """
 
     kept: list[BodyBlock] = []
     index = 0
+    seen_prose = False
     while index < len(blocks):
         block = blocks[index]
         if block.kind != "list":
-            if not _is_bare_label(block):
+            if (
+                not _is_bare_label(block)
+                and not _is_credit_line(block)
+                and not (block.kind == "paragraph" and _WORDPRESS_TRAILER.match(block.text))
+            ):
                 kept.append(block)
+                seen_prose = True
             index += 1
             continue
         run_end = index
         while run_end < len(blocks) and blocks[run_end].kind == "list":
             run_end += 1
         run = blocks[index:run_end]
-        if not _is_tabular_run(run):
-            kept.extend(item for item in run if not _is_bare_label(item))
+        if (
+            _is_tabular_run(run)
+            or (not seen_prose and _is_chrome_run(run))
+            or (seen_prose and run_end == len(blocks) and _is_related_headline_run(run))
+        ):
+            index = run_end
+            continue
+        kept.extend(item for item in run if not _is_bare_label(item))
+        seen_prose = True
         index = run_end
     return tuple(kept)
+
+
+def _is_chrome_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A list of uniformly tiny items ahead of any prose is a navigation menu."""
+
+    return all(len(item.text.split()) <= _CHROME_LIST_ITEM_WORDS for item in run)
+
+
+_RELATED_HEADLINE_MIN_ITEMS = 2
+_RELATED_HEADLINE_MIN_WORDS = 5
+# Closing quotes and brackets a headline may end with, ahead of the punctuation test:
+# straight quotes, curly double and single closing quotes, guillemet, parenthesis, bracket.
+_CLOSING_MARKS = "\"'\u201d\u2019\u00bb)]"
+
+
+def _is_related_headline_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A body-final run of headline-shaped items is a related-articles widget.
+
+    Headline-shaped means every item is long enough to be a headline rather than a keyword,
+    and no item ends in a full stop. Headlines end with question marks, exclamations and
+    quotes but not periods; a how-to list writes sentences and a packing list writes short
+    noun phrases, so both survive while a widget of nothing but headlines does not.
+    """
+
+    if len(run) < _RELATED_HEADLINE_MIN_ITEMS:
+        return False
+    for item in run:
+        if len(item.text.split()) < _RELATED_HEADLINE_MIN_WORDS:
+            return False
+        if item.text.rstrip(_CLOSING_MARKS).endswith("."):
+            return False
+    return True
+
+
+def _is_credit_line(block: BodyBlock) -> bool:
+    """A short standalone line naming a stock agency is an image credit, not a sentence."""
+
+    if block.kind != "paragraph" or len(block.text.split()) > _CREDIT_LINE_WORDS:
+        return False
+    lowered = block.text.casefold()
+    return lowered.startswith(_CREDIT_PREFIXES) or any(
+        agency in lowered for agency in _STOCK_AGENCIES
+    )
 
 
 def _is_tabular_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
@@ -281,6 +374,106 @@ def _is_bare_label(block: BodyBlock) -> bool:
 
     text = block.text.strip()
     return len(text) <= 12 and text.isupper() and len(text.split()) == 1
+
+
+# In how many distinct articles of one fetch a block must recur verbatim before it is
+# furniture. Three, not two: two articles legitimately quoting the same advisory sentence
+# were observed live, while the ad paragraphs this exists for ran across most of the feed.
+_MINIMUM_BOILERPLATE_ARTICLES = 3
+
+
+def _strip_feedwide_boilerplate(
+    articles: list[AcquiredArticle], request: SourceRequest
+) -> tuple[list[AcquiredArticle], int]:
+    """Drop blocks that recur verbatim across articles of one fetch; they are furniture.
+
+    Observed live: Cyber Security News appended the same marketing paragraph to most items
+    in a feed, and Special Nest pages carried identical site chrome into every extraction.
+    No sentence of actual journalism repeats verbatim across three different articles, so
+    repetition within one fetch is a signature that needs no per-publisher pattern list.
+
+    Bodies are rebuilt from the surviving blocks so revision hashing sees the same text a
+    reader does — otherwise shifting furniture keeps manufacturing false "material updates".
+    An article reduced below the full-body minimum was mostly furniture and is omitted
+    rather than delivered as a stub.
+    """
+
+    counts: dict[str, int] = {}
+    for article in articles:
+        for text in {block.text for block in article.blocks}:
+            counts[text] = counts.get(text, 0) + 1
+    boilerplate = {text for text, count in counts.items() if count >= _MINIMUM_BOILERPLATE_ARTICLES}
+    if not boilerplate:
+        return articles, 0
+
+    kept: list[AcquiredArticle] = []
+    omitted = 0
+    for article in articles:
+        if article.body is None or not any(block.text in boilerplate for block in article.blocks):
+            kept.append(article)
+            continue
+        blocks = tuple(block for block in article.blocks if block.text not in boilerplate)
+        body = _body_text(blocks)
+        if len(body.split()) >= request.minimum_full_words:
+            kept.append(replace(article, body=body, blocks=blocks))
+        elif body and request.allow_short_as_published:
+            kept.append(
+                replace(article, body=body, blocks=blocks, classification="short_as_published")
+            )
+        else:
+            omitted += 1
+    return kept, omitted
+
+
+_TEASER_MAXIMUM_WORDS = 200
+# A complete sentence ends with one of these; anything else after stripping _CLOSING_MARKS
+# is a cut, not an ending. Not Latin-only: the CJK full stop and fullwidth bang/question
+# marks, the Arabic question mark and the Devanagari danda end sentences exactly as "."
+# does, and a complete paragraph in another script is not a paywall stub.
+_TERMINAL_MARKS = ".!?\u2026\u3002\uff01\uff1f\u061f\u0964"
+
+
+def _demote_teasers(
+    articles: list[AcquiredArticle], request: SourceRequest
+) -> list[AcquiredArticle]:
+    """Demote teaser-shaped bodies to Publisher Link Briefs, after furniture is gone.
+
+    Deliberately after ``_strip_feedwide_boilerplate``, and load-bearing in both directions:
+    a footer repeated unpunctuated across the fetch must not make three complete articles
+    read as mid-sentence stubs, and a repeated punctuated footer must not lend a genuine
+    stub its full stop. Only the cleaned body — what a reader would actually get — is the
+    honest thing to classify.
+    """
+
+    if request.allow_short_as_published:
+        return articles
+    demoted: list[AcquiredArticle] = []
+    for article in articles:
+        if article.body is not None and _is_teaser(article.blocks, len(article.body.split())):
+            demoted.append(replace(article, body=None, blocks=(), classification="teaser_link"))
+        else:
+            demoted.append(article)
+    return demoted
+
+
+def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
+    """A short body whose last paragraph stops mid-sentence is a paywall teaser, not an Article.
+
+    Observed live: a Special Nest page under 200 words ended "...har Philip Lindersten, som
+    ar grundare av och verksamh" - cut mid-word. It cleared the 80-word full-body minimum and
+    was delivered as a complete Article, spending an Article Slot on something that was not
+    readable journalism.
+
+    A body ending in a list or code block is exempt: rendering already decided that shape
+    survives, and a mid-sentence cut only happens to prose. A headline plus the publisher
+    route is an honest description of what the Source's evidence allows; a stub pretending to
+    be a finished Article is not.
+    """
+
+    if word_count >= _TEASER_MAXIMUM_WORDS or not blocks or blocks[-1].kind != "paragraph":
+        return False
+    trimmed = blocks[-1].text.rstrip(_CLOSING_MARKS)
+    return not trimmed or trimmed[-1] not in _TERMINAL_MARKS
 
 
 def _decoded_feed(payload: bytes) -> str | bytes:
@@ -337,6 +530,26 @@ def _page_content(
         containers = [root]
     blocks = _root_blocks(containers[0], fallback_to_root_text=False)
     return _body_text(blocks), blocks, canonical_url
+
+
+def _page_metadata(document: bytes) -> tuple[str | None, datetime | None]:
+    """A page's own title and published time, for the one route that has no feed entry.
+
+    ``og:title`` over ``<title>``: publishers keep the former clean while the latter
+    usually carries a "| Site" suffix a reader should not see as a headline. The
+    published time is optional — an undated recovery is treated as fresh downstream,
+    exactly like an undated feed entry.
+    """
+
+    root = cast(HtmlElement, html.fromstring(document))
+    og_titles = cast(list[str], root.xpath("//meta[@property='og:title']/@content"))
+    page_titles = cast(list[str], root.xpath("//title/text()"))
+    title = next((value.strip() for value in (*og_titles, *page_titles) if value.strip()), None)
+    published_values = cast(
+        list[str], root.xpath("//meta[@property='article:published_time']/@content")
+    )
+    published = _entry_datetime(published_values[0]) if published_values else None
+    return title, published
 
 
 def _entry_datetime(value: object) -> datetime | None:
@@ -547,6 +760,9 @@ class SourceClient:
                 omitted += 1
             else:
                 articles.append(article)
+        articles, boilerplate_omitted = _strip_feedwide_boilerplate(articles, request)
+        omitted += boilerplate_omitted
+        articles = _demote_teasers(articles, request)
         code = "SOURCE_OK" if omitted == 0 else "SOURCE_PARTIAL"
         return AcquisitionOutcome(request.source_id, code, tuple(articles), omitted)
 
@@ -601,6 +817,11 @@ class SourceClient:
         guid = str(guid_value) if guid_value is not None else None
         author_value = entry.get("author")
         author = str(author_value).strip() if author_value else None
+        # A byline that opens with "Sponsored" is the publisher's own label for paid
+        # placement. Advertising is not journalism, so it never becomes an Article or a
+        # Brief — observed live as a 1,700-word advertorial filling a personal Section.
+        if author is not None and author.casefold().startswith("sponsored"):
+            return None
         published = _entry_datetime(entry.get("published") or entry.get("updated"))
         language = _article_language(entry.get("language"), request.default_article_language)
         tags: Sequence[Mapping[str, Any]] = entry.get("tags", ())
@@ -637,7 +858,15 @@ class SourceClient:
                     fragment = str(item.get("value", ""))
                     candidate_blocks = _html_blocks(fragment)
                     candidate = _body_text(candidate_blocks)
-                    if request.mode == AcquisitionMode.AUTO and _has_full_article_cta(fragment):
+                    # A teaser-shaped feed body is as good a fallback signal as the explicit
+                    # read-full-article CTA: the complete article is one page fetch away.
+                    if request.mode == AcquisitionMode.AUTO and (
+                        _has_full_article_cta(fragment)
+                        or (
+                            not request.allow_short_as_published
+                            and _is_teaser(candidate_blocks, len(candidate.split()))
+                        )
+                    ):
                         continue
                     if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
                         continue
@@ -656,37 +885,15 @@ class SourceClient:
                         )
                         break
         if body is None and request.mode in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
-            try:
-                response = self._get_permitted(
-                    link_url,
-                    allowed_origins=publisher_origins,
-                    loopback_origin=loopback_origin,
-                )
-            except _RouteDenied:
+            page = self._page_body(request, link_url, publisher_origins, loopback_origin)
+            if page is None:
                 return None
-            candidate, candidate_blocks, canonical = _page_content(response.content, response.url)
-            if canonical is not None:
-                try:
-                    canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
-                except _RouteDenied:
-                    return None
-                if _origin(canonical_url) not in publisher_origins:
-                    return None
-                try:
-                    _require_public_resolution(canonical_url, loopback_origin)
-                except _RouteDenied:
-                    return None
-                link_url = canonical_url
-            else:
-                link_url = response.url
-            if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
-                return None
-            if len(candidate.split()) >= request.minimum_full_words:
-                body, blocks, classification = candidate, candidate_blocks, "verified_page_body"
-            elif candidate and request.allow_short_as_published:
-                body, blocks, classification = candidate, candidate_blocks, "short_as_published"
+            body, blocks, classification = page.body, page.blocks, page.classification
+            link_url = page.url
         if body is None or classification is None:
             return None
+        # Teaser demotion happens in `acquire`, after feed-wide boilerplate stripping —
+        # only the cleaned body is honest to classify. See `_demote_teasers`.
         return AcquiredArticle(
             request.source_id,
             request.publisher_id,
@@ -702,6 +909,116 @@ class SourceClient:
             blocks,
             classification,
         )
+
+    def acquire_article(self, request: SourceRequest, url: str) -> AcquiredArticle | None:
+        """Re-acquire one Article by its stored canonical URL, for Near Miss recovery.
+
+        The URL comes from the State Store, which is data rather than authority, so this
+        route re-derives and re-checks everything the feed route would have: the Source's
+        evidence (including ``page_acquisition``), the publisher origin allowlist, public
+        resolution, and — inside ``_page_body`` — robots, redirect discipline, SSRF pinning
+        and the size caps. Only ``web`` and ``auto`` Sources qualify: a ``feed`` or
+        ``metadata_only`` Source's evidence never contemplated page fetches, so recovery
+        must not introduce them.
+
+        With no feed entry to speak for the page, the title and publication time come from
+        the page's own metadata; a page that declares no usable title is skipped rather
+        than delivered nameless.
+        """
+
+        if request.mode not in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
+            return None
+        if self._evidence_denial(request) is not None:
+            return None
+        try:
+            _, feed_origin, loopback_origin = _feed_url_context(request.feed_url)
+            link_url = _parse_safe_url(url, loopback_origin=loopback_origin)
+            publisher_origins = self._publisher_origins(request, feed_origin, loopback_origin)
+        except _RouteDenied:
+            return None
+        if _origin(link_url) not in publisher_origins:
+            return None
+        try:
+            _require_public_resolution(link_url, loopback_origin)
+        except _RouteDenied:
+            return None
+        page = self._page_body(request, link_url, publisher_origins, loopback_origin)
+        if page is None:
+            return None
+        # A publisher can close its paywall between the Near Miss and the recovery, turning
+        # the page into a mid-sentence stub. The feed route demotes that shape to a Brief;
+        # a week-old headline is not worth a Brief, so recovery simply skips it.
+        if not request.allow_short_as_published and _is_teaser(page.blocks, len(page.body.split())):
+            return None
+        title, published = _page_metadata(page.document)
+        if title is None:
+            return None
+        return AcquiredArticle(
+            request.source_id,
+            request.publisher_id,
+            request.title,
+            None,
+            title,
+            None,
+            str(page.url),
+            published,
+            (),
+            request.default_article_language,
+            page.body,
+            page.blocks,
+            page.classification,
+        )
+
+    def _page_body(
+        self,
+        request: SourceRequest,
+        link_url: httpx.URL,
+        publisher_origins: set[_Origin],
+        loopback_origin: _Origin | None,
+    ) -> _PageBody | None:
+        """Fetch and extract one publisher page under every acquisition safety rule.
+
+        The single page route: robots, redirect discipline, SSRF pinning and the response
+        size cap live in ``_get_permitted``; a declared canonical URL must itself pass the
+        origin allowlist and public resolution before it may replace the link. Shared
+        verbatim between the feed entry path and Near Miss recovery so the two routes can
+        never drift apart.
+        """
+
+        try:
+            response = self._get_permitted(
+                link_url,
+                allowed_origins=publisher_origins,
+                loopback_origin=loopback_origin,
+            )
+        except _RouteDenied:
+            return None
+        candidate, candidate_blocks, canonical = _page_content(response.content, response.url)
+        if canonical is not None:
+            try:
+                canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
+            except _RouteDenied:
+                return None
+            if _origin(canonical_url) not in publisher_origins:
+                return None
+            try:
+                _require_public_resolution(canonical_url, loopback_origin)
+            except _RouteDenied:
+                return None
+            link_url = canonical_url
+        else:
+            link_url = response.url
+        if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
+            return None
+        if len(candidate.split()) >= request.minimum_full_words:
+            return _PageBody(
+                candidate, candidate_blocks, "verified_page_body", link_url, response.content
+            )
+        if candidate and request.allow_short_as_published:
+            return _PageBody(
+                candidate, candidate_blocks, "short_as_published", link_url, response.content
+            )
+        return None
 
     def _publisher_origins(
         self,
@@ -796,7 +1113,10 @@ class SourceClient:
                 if declared_size > self._max_response_bytes:
                     raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
             content = bytearray()
-            for chunk in response.iter_bytes():
+            # A bounded chunk size caps how far a compressed response can overshoot the
+            # response limit: iter_bytes yields *decoded* bytes, and without the bound a
+            # small gzip body could expand into one enormous chunk before the check runs.
+            for chunk in response.iter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
                 content.extend(chunk)
                 if len(content) > self._max_response_bytes:
                     raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
@@ -845,5 +1165,9 @@ class SourceClient:
         path_and_query = parsed.path or "/"
         if parsed.query:
             path_and_query = f"{path_and_query}?{parsed.query}"
+        # RFC 9309 matches percent-decoded octets: "/%70rivate" is "/private", and an
+        # encoded byte must not sidestep a rule the publisher wrote in plain text. An
+        # encoded slash stays encoded — it is data inside a segment, not a separator.
+        path_and_query = unquote(path_and_query.replace("%2F", "%252F").replace("%2f", "%252f"))
         if not cached.allows(self._product, path_and_query):
             raise _RouteDenied("SOURCE_ROBOTS_DENIED")
