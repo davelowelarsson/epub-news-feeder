@@ -83,6 +83,17 @@ class PendingDelivery:
     briefs: tuple[PendingBrief, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SourceHealth:
+    """One Source's ``source_health`` row, as read by a report rather than the writer path."""
+
+    source_id: str
+    last_attempt: datetime
+    last_success: datetime | None
+    consecutive_failures: int
+    response_classification: str
+
+
 def normalize_url(url: str) -> str:
     parsed = urlsplit(url.strip())
     scheme = parsed.scheme.lower()
@@ -1456,3 +1467,50 @@ class StateStore:
             """,
             (source_id, attempted_at.isoformat(), last_success, failures, classification),
         )
+
+
+def read_source_health(path: Path) -> list[SourceHealth]:
+    """Every ``source_health`` row, for a report - never for the writer path.
+
+    Opens SQLite itself in ``mode=ro`` rather than through ``StateStore.__enter__``: a report
+    has no business taking the exclusive writer lock, generating the fingerprint key, or
+    creating any ``.key``/``.lock`` sidecar file, and must be safe to run concurrently with (or
+    entirely without) a writer. A missing State Store - the normal state of a fresh clone, or a
+    run that failed before ever writing one - returns an empty list rather than raising; a
+    report about nothing to report is not itself a failure.
+    """
+
+    if not path.exists():
+        return []
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT source_id, last_attempt, last_success, consecutive_failures,
+                       response_classification
+                FROM source_health
+                ORDER BY source_id
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # The file exists but the schema has not been migrated yet - equally nothing
+            # to report.
+            return []
+    finally:
+        connection.close()
+    return [
+        SourceHealth(
+            source_id=str(row["source_id"]),
+            last_attempt=datetime.fromisoformat(str(row["last_attempt"])),
+            last_success=(
+                None
+                if row["last_success"] is None
+                else datetime.fromisoformat(str(row["last_success"]))
+            ),
+            consecutive_failures=int(row["consecutive_failures"]),
+            response_classification=str(row["response_classification"]),
+        )
+        for row in rows
+    ]

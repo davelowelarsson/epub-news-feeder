@@ -149,3 +149,19 @@ jobs:
             | grep -oE '"code":"[A-Z_]*"|"source_id":"[a-z0-9_]*"' \
             | paste - - \
             || echo "every Source delivered cleanly"
+
+      # Same log-privacy convention as the step above: only Source ids and classification
+      # codes, because $GITHUB_STEP_SUMMARY is world-readable on a public repository. An early
+      # failure (before "generate" ever opens the State Store) leaves no database to read, and
+      # that is a normal outcome for this step, not a reason to fail it.
+      - name: Source health summary
+        if: always()
+        run: |
+          set -euo pipefail
+          state="${RUNNER_TEMP}/state/state.sqlite3"
+          if [ ! -f "$state" ]; then
+            echo "No State Store was available for a Source health summary." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          uv run epub-news-feeder source-health --state "$state" --format markdown \
+            >> "$GITHUB_STEP_SUMMARY"
