@@ -199,8 +199,21 @@ class Publication(StrictModel):
     # the same instant, whichever delivered first settles precedence deterministically. A
     # Publication that names nothing here behaves exactly as it did before this field existed.
     reads_history_from: list[NonEmptyString] = Field(default_factory=list)
+    # Whether this Publication may recover the Near Misses of the Publications it reads.
+    # Recovery is a page re-fetch, so it stays opt-in: every Publication records Near Misses
+    # (they are body-free pointers), but only one that names a history should ever spend
+    # network requests recovering them.
+    recovers_near_misses: bool = False
     editorial: EditorialConfig | None = None
     sections: list[Section]
+
+    @model_validator(mode="after")
+    def recovery_requires_a_history(self) -> Publication:
+        # A Publication with nobody to recover from is a configuration error: Near Misses
+        # are read from the referenced Publications, never from the recovering one itself.
+        if self.recovers_near_misses and not self.reads_history_from:
+            raise ValueError("recovers_near_misses requires reads_history_from")
+        return self
 
 
 class Configuration(StrictModel):

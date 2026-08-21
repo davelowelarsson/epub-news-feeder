@@ -87,6 +87,17 @@ class AcquisitionOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _PageBody:
+    """One publisher page's extracted body, plus the raw document for metadata reads."""
+
+    body: str
+    blocks: tuple[BodyBlock, ...]
+    classification: str
+    url: httpx.URL
+    document: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class _RobotsRules:
     groups: tuple[tuple[tuple[str, ...], tuple[tuple[str, str], ...]], ...]
 
@@ -466,6 +477,26 @@ def _page_content(
     return _body_text(blocks), blocks, canonical_url
 
 
+def _page_metadata(document: bytes) -> tuple[str | None, datetime | None]:
+    """A page's own title and published time, for the one route that has no feed entry.
+
+    ``og:title`` over ``<title>``: publishers keep the former clean while the latter
+    usually carries a "| Site" suffix a reader should not see as a headline. The
+    published time is optional — an undated recovery is treated as fresh downstream,
+    exactly like an undated feed entry.
+    """
+
+    root = cast(HtmlElement, html.fromstring(document))
+    og_titles = cast(list[str], root.xpath("//meta[@property='og:title']/@content"))
+    page_titles = cast(list[str], root.xpath("//title/text()"))
+    title = next((value.strip() for value in (*og_titles, *page_titles) if value.strip()), None)
+    published_values = cast(
+        list[str], root.xpath("//meta[@property='article:published_time']/@content")
+    )
+    published = _entry_datetime(published_values[0]) if published_values else None
+    return title, published
+
+
 def _entry_datetime(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -790,35 +821,11 @@ class SourceClient:
                         )
                         break
         if body is None and request.mode in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
-            try:
-                response = self._get_permitted(
-                    link_url,
-                    allowed_origins=publisher_origins,
-                    loopback_origin=loopback_origin,
-                )
-            except _RouteDenied:
+            page = self._page_body(request, link_url, publisher_origins, loopback_origin)
+            if page is None:
                 return None
-            candidate, candidate_blocks, canonical = _page_content(response.content, response.url)
-            if canonical is not None:
-                try:
-                    canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
-                except _RouteDenied:
-                    return None
-                if _origin(canonical_url) not in publisher_origins:
-                    return None
-                try:
-                    _require_public_resolution(canonical_url, loopback_origin)
-                except _RouteDenied:
-                    return None
-                link_url = canonical_url
-            else:
-                link_url = response.url
-            if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
-                return None
-            if len(candidate.split()) >= request.minimum_full_words:
-                body, blocks, classification = candidate, candidate_blocks, "verified_page_body"
-            elif candidate and request.allow_short_as_published:
-                body, blocks, classification = candidate, candidate_blocks, "short_as_published"
+            body, blocks, classification = page.body, page.blocks, page.classification
+            link_url = page.url
         if body is None or classification is None:
             return None
         return AcquiredArticle(
@@ -836,6 +843,111 @@ class SourceClient:
             blocks,
             classification,
         )
+
+    def acquire_article(self, request: SourceRequest, url: str) -> AcquiredArticle | None:
+        """Re-acquire one Article by its stored canonical URL, for Near Miss recovery.
+
+        The URL comes from the State Store, which is data rather than authority, so this
+        route re-derives and re-checks everything the feed route would have: the Source's
+        evidence (including ``page_acquisition``), the publisher origin allowlist, public
+        resolution, and — inside ``_page_body`` — robots, redirect discipline, SSRF pinning
+        and the size caps. Only ``web`` and ``auto`` Sources qualify: a ``feed`` or
+        ``metadata_only`` Source's evidence never contemplated page fetches, so recovery
+        must not introduce them.
+
+        With no feed entry to speak for the page, the title and publication time come from
+        the page's own metadata; a page that declares no usable title is skipped rather
+        than delivered nameless.
+        """
+
+        if request.mode not in {AcquisitionMode.WEB, AcquisitionMode.AUTO}:
+            return None
+        if self._evidence_denial(request) is not None:
+            return None
+        try:
+            _, feed_origin, loopback_origin = _feed_url_context(request.feed_url)
+            link_url = _parse_safe_url(url, loopback_origin=loopback_origin)
+            publisher_origins = self._publisher_origins(request, feed_origin, loopback_origin)
+        except _RouteDenied:
+            return None
+        if _origin(link_url) not in publisher_origins:
+            return None
+        try:
+            _require_public_resolution(link_url, loopback_origin)
+        except _RouteDenied:
+            return None
+        page = self._page_body(request, link_url, publisher_origins, loopback_origin)
+        if page is None:
+            return None
+        title, published = _page_metadata(page.document)
+        if title is None:
+            return None
+        return AcquiredArticle(
+            request.source_id,
+            request.publisher_id,
+            request.title,
+            None,
+            title,
+            None,
+            str(page.url),
+            published,
+            (),
+            request.default_article_language,
+            page.body,
+            page.blocks,
+            page.classification,
+        )
+
+    def _page_body(
+        self,
+        request: SourceRequest,
+        link_url: httpx.URL,
+        publisher_origins: set[_Origin],
+        loopback_origin: _Origin | None,
+    ) -> _PageBody | None:
+        """Fetch and extract one publisher page under every acquisition safety rule.
+
+        The single page route: robots, redirect discipline, SSRF pinning and the response
+        size cap live in ``_get_permitted``; a declared canonical URL must itself pass the
+        origin allowlist and public resolution before it may replace the link. Shared
+        verbatim between the feed entry path and Near Miss recovery so the two routes can
+        never drift apart.
+        """
+
+        try:
+            response = self._get_permitted(
+                link_url,
+                allowed_origins=publisher_origins,
+                loopback_origin=loopback_origin,
+            )
+        except _RouteDenied:
+            return None
+        candidate, candidate_blocks, canonical = _page_content(response.content, response.url)
+        if canonical is not None:
+            try:
+                canonical_url = _parse_safe_url(canonical, loopback_origin=loopback_origin)
+            except _RouteDenied:
+                return None
+            if _origin(canonical_url) not in publisher_origins:
+                return None
+            try:
+                _require_public_resolution(canonical_url, loopback_origin)
+            except _RouteDenied:
+                return None
+            link_url = canonical_url
+        else:
+            link_url = response.url
+        if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
+            return None
+        if len(candidate.split()) >= request.minimum_full_words:
+            return _PageBody(
+                candidate, candidate_blocks, "verified_page_body", link_url, response.content
+            )
+        if candidate and request.allow_short_as_published:
+            return _PageBody(
+                candidate, candidate_blocks, "short_as_published", link_url, response.content
+            )
+        return None
 
     def _publisher_origins(
         self,

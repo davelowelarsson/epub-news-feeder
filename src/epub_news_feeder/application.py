@@ -13,6 +13,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder.acquisition import (
+    AcquiredArticle,
     AcquisitionMode,
     EligibilityEvidence,
     SourceClient,
@@ -57,6 +58,7 @@ from epub_news_feeder.models import (
     PolicyPreset,
     Publication,
     Section,
+    Source,
 )
 from epub_news_feeder.ollama import OllamaStructuredProvider
 from epub_news_feeder.openai_responses import OpenAIResponsesProvider
@@ -92,6 +94,16 @@ from epub_news_feeder.validation import EpubValidationError, validate_epub
 # recurring, it is over. Cluster coverage is never pruned, so without a window the archive would
 # eventually outrank the week.
 _RECURRENCE_WINDOW = timedelta(days=7)
+
+# The most page fetches one Run may spend recovering Near Misses. Twenty bounds a Saturday
+# morning's extra load on publishers to less than the feed pass itself, and the newest-first
+# order means the budget is spent on the freshest end of the week deterministically.
+_NEAR_MISS_RECOVERY_LIMIT = 20
+
+# How far back a recovering Publication reads Near Misses. Seven days, matching the
+# recurrence window: the weekly recovers its week, and a Near Miss older than the week
+# was already outside every Section's age window when it was recorded.
+_NEAR_MISS_RECOVERY_WINDOW = timedelta(days=7)
 
 # How long a Delivery Copy stays in the Drive delivery folder before housekeeping moves it
 # to the archive folder. Seven days keeps roughly one week visible on the device — five
@@ -426,35 +438,7 @@ def _run(
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
-            outcome = client.acquire(
-                SourceRequest(
-                    source_id=source_id,
-                    publisher_id=source.publisher_id or source_id,
-                    title=source.title,
-                    feed_url=str(source.feed_url),
-                    mode=AcquisitionMode(source.acquisition),
-                    llm_processing=source.llm_processing,
-                    default_article_language=source.default_article_language,
-                    allowed_publisher_origins=tuple(
-                        str(origin) for origin in source.allowed_publisher_origins
-                    ),
-                    evidence=EligibilityEvidence(
-                        evidence_id=evidence.evidence_id,
-                        reviewed_at=datetime.combine(
-                            evidence.evidence_reviewed_at, time.min, tzinfo=UTC
-                        ),
-                        expires_at=datetime.combine(
-                            evidence.review_expires_at, time.max, tzinfo=UTC
-                        ),
-                        feed_acquisition=evidence.feed_acquisition,
-                        page_acquisition=evidence.page_acquisition,
-                        retention=evidence.retention,
-                        private_distribution=evidence.private_distribution,
-                        local_llm=evidence.local_llm,
-                        remote_llm=evidence.remote_llm,
-                    ),
-                )
-            )
+            outcome = client.acquire(_source_request(source_id, source))
             succeeded = outcome.code in {"SOURCE_OK", "SOURCE_PARTIAL"}
             state.record_source_health(
                 source_id,
@@ -512,40 +496,23 @@ def _run(
                 )
                 if not observation.eligible:
                     continue
-                article_record = _ArticleRecord(
-                    article=ArticleInput(
-                        identifier=observation.article_id,
-                        title=acquired.title,
-                        body=acquired.body,
-                        blocks=tuple(
-                            BodyBlock(kind=block.kind, text=block.text) for block in acquired.blocks
-                        ),
-                        source_name=acquired.source_title,
-                        canonical_url=acquired.canonical_url,
-                        language=acquired.language,
-                        author=acquired.author,
-                        published_at=(
-                            acquired.published_at.astimezone(UTC).date().isoformat()
-                            if acquired.published_at is not None
-                            else None
-                        ),
-                        materially_updated=observation.materially_changed,
-                        copyright_notice=source.copyright_notice,
-                    ),
-                    observation=observation,
-                    categories=acquired.categories,
-                    published_at=acquired.published_at or generated_at,
-                    publisher_published_at=acquired.published_at,
-                    source_id=source_id,
-                    publisher_id=acquired.publisher_id,
-                    cluster_id=state.match_story_cluster(
-                        observation.article_id,
-                        signals=_story_signals(acquired.title, acquired.categories),
-                        observed_at=generated_at,
-                    ),
+                records.setdefault(
+                    observation.article_id,
+                    _article_record(state, source, source_id, acquired, observation, generated_at),
                 )
-                records.setdefault(observation.article_id, article_record)
                 source_records[source_id].append(observation.article_id)
+        if publication.recovers_near_misses:
+            _recover_near_misses(
+                configuration,
+                publication,
+                state,
+                client,
+                records,
+                source_records,
+                generated_at,
+                run_id,
+                diagnostics,
+            )
     finally:
         client.close()
 
@@ -622,6 +589,17 @@ def _run(
         raise GenerationError(
             "PUBLICATION_BELOW_MINIMUM", "Eligible articles did not meet the publication minimum"
         )
+    # Every Publication records its Near Misses — body-free pointers are cheap, and the daily
+    # cannot know on Monday whether a weekly will exist to want them on Saturday. Only a
+    # Publication that names a history ever reads them back.
+    selected_ids = set(selection.unique_article_ids)
+    near_misses = sorted(
+        (article_id, records[article_id].source_id)
+        for article_id in records
+        if article_id not in selected_ids
+    )
+    state.record_near_misses(publication.id, near_misses, recorded_at=generated_at)
+    diagnostics.emit("NEAR_MISSES_RECORDED", phase="selection", articles=len(near_misses))
     for article_id in selection.unique_article_ids:
         record = records[article_id]
         diagnostics.emit(
@@ -1160,6 +1138,170 @@ def _remove_candidate(source_records: dict[str, list[str]], article_id: str) -> 
         candidate_ids[:] = [
             candidate_id for candidate_id in candidate_ids if candidate_id != article_id
         ]
+
+
+def _source_request(source_id: str, source: Source) -> SourceRequest:
+    """The one way a Source's configuration becomes an acquisition request.
+
+    Shared by the feed pass and Near Miss recovery, deliberately: two constructions would
+    eventually disagree about evidence or origins, and every acquisition safety check is
+    only as good as the request that carries it.
+    """
+
+    evidence = source.eligibility
+    if evidence is None:  # Callers gate on evidence before building a request.
+        raise ValueError(f"Source has no eligibility evidence: {source_id}")
+    return SourceRequest(
+        source_id=source_id,
+        publisher_id=source.publisher_id or source_id,
+        title=source.title,
+        feed_url=str(source.feed_url),
+        mode=AcquisitionMode(source.acquisition),
+        llm_processing=source.llm_processing,
+        default_article_language=source.default_article_language,
+        allowed_publisher_origins=tuple(str(origin) for origin in source.allowed_publisher_origins),
+        evidence=EligibilityEvidence(
+            evidence_id=evidence.evidence_id,
+            reviewed_at=datetime.combine(evidence.evidence_reviewed_at, time.min, tzinfo=UTC),
+            expires_at=datetime.combine(evidence.review_expires_at, time.max, tzinfo=UTC),
+            feed_acquisition=evidence.feed_acquisition,
+            page_acquisition=evidence.page_acquisition,
+            retention=evidence.retention,
+            private_distribution=evidence.private_distribution,
+            local_llm=evidence.local_llm,
+            remote_llm=evidence.remote_llm,
+        ),
+    )
+
+
+def _article_record(
+    state: StateStore,
+    source: Source,
+    source_id: str,
+    acquired: AcquiredArticle,
+    observation: ArticleObservation,
+    generated_at: datetime,
+) -> _ArticleRecord:
+    """Turn one acquired, observed Article into the record every downstream rule reads.
+
+    Shared by the feed pass and Near Miss recovery so a recovered Article is an ordinary
+    candidate — same clustering, same twin and history suppression, same selection — with
+    no special treatment left to drift.
+    """
+
+    assert acquired.body is not None  # Callers only record body-carrying acquisitions.
+    return _ArticleRecord(
+        article=ArticleInput(
+            identifier=observation.article_id,
+            title=acquired.title,
+            body=acquired.body,
+            blocks=tuple(BodyBlock(kind=block.kind, text=block.text) for block in acquired.blocks),
+            source_name=acquired.source_title,
+            canonical_url=acquired.canonical_url,
+            language=acquired.language,
+            author=acquired.author,
+            published_at=(
+                acquired.published_at.astimezone(UTC).date().isoformat()
+                if acquired.published_at is not None
+                else None
+            ),
+            materially_updated=observation.materially_changed,
+            copyright_notice=source.copyright_notice,
+        ),
+        observation=observation,
+        categories=acquired.categories,
+        published_at=acquired.published_at or generated_at,
+        publisher_published_at=acquired.published_at,
+        source_id=source_id,
+        publisher_id=acquired.publisher_id,
+        cluster_id=state.match_story_cluster(
+            observation.article_id,
+            signals=_story_signals(acquired.title, acquired.categories),
+            observed_at=generated_at,
+        ),
+    )
+
+
+def _recover_near_misses(
+    configuration: Configuration,
+    publication: Publication,
+    state: StateStore,
+    client: SourceClient,
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    generated_at: datetime,
+    run_id: str,
+    diagnostics: Diagnostics,
+) -> None:
+    """Re-acquire the referenced Publications' Near Misses that fell off the live feeds.
+
+    A Saturday Run acquires from the same feeds as any daily Run, so alone it can only
+    carry what is still in them — and Monday's Near Miss usually is not. This route reads
+    the week's Near Misses (newest recorded first) and re-fetches each by its stored
+    canonical URL through ``SourceClient.acquire_article``, which enforces the same
+    evidence, origin, robots and SSRF rules as the feed route.
+
+    Bounded and skip-heavy by design: at most ``_NEAR_MISS_RECOVERY_LIMIT`` fetches per
+    Run, and no fetch at all for an Article this Run already acquired, one any involved
+    Publication already delivered, or a Source that has since left the configuration,
+    lost its evidence, left this Publication's Sections, or never permitted page fetches.
+    A recovered Article then flows through ``observe_article`` and becomes an ordinary
+    candidate, subject to every downstream rule with no special treatment.
+    """
+
+    candidates = state.near_misses(
+        publication.reads_history_from,
+        since=generated_at - _NEAR_MISS_RECOVERY_WINDOW,
+    )
+    delivered = state.delivered_article_ids((publication.id, *publication.reads_history_from))
+    fetches = 0
+    recovered = 0
+    for article_id, source_id, canonical_url in candidates:
+        if fetches >= _NEAR_MISS_RECOVERY_LIMIT:
+            break
+        if article_id in records or article_id in delivered:
+            continue
+        source = configuration.sources.get(source_id)
+        if source is None or source.rights is None or source.eligibility is None:
+            continue
+        if source_id not in source_records:
+            # A Source in the configuration but not in this Publication's Sections has
+            # nowhere to place a recovery, so the fetch would be spent on nothing.
+            continue
+        if source.acquisition not in {"web", "auto"}:
+            # Recovery is a page fetch; feed and metadata_only evidence never contemplated
+            # one, and `acquire_article` would refuse anyway — refusing here saves nothing
+            # from the fetch budget by accident.
+            continue
+        fetches += 1
+        acquired = client.acquire_article(_source_request(source_id, source), canonical_url)
+        if acquired is None or acquired.body is None:
+            continue
+        observation = state.observe_article(
+            source_id=source_id,
+            publisher_id=acquired.publisher_id,
+            canonical_url=acquired.canonical_url,
+            guid=acquired.guid,
+            title=acquired.title,
+            author=acquired.author,
+            normalized_body=acquired.body,
+            observed_at=generated_at,
+            publication_id=publication.id,
+            run_id=run_id,
+        )
+        if not observation.eligible or observation.article_id in records:
+            continue
+        records[observation.article_id] = _article_record(
+            state, source, source_id, acquired, observation, generated_at
+        )
+        source_records[source_id].append(observation.article_id)
+        recovered += 1
+    diagnostics.emit(
+        "NEAR_MISSES_RECOVERED",
+        phase="acquisition",
+        articles=recovered,
+        omitted=len(candidates) - recovered,
+    )
 
 
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
