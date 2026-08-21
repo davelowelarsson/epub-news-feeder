@@ -921,3 +921,217 @@ def test_a_bare_all_capitals_label_is_not_body_text() -> None:
     fragment = "<div><p>BLOG</p><p>A new npm worm hit Keyv and cacheable this week.</p></div>"
 
     assert _blocks(fragment) == ("A new npm worm hit Keyv and cacheable this week.",)
+
+
+def test_a_wordpress_feed_trailer_is_not_body_text() -> None:
+    """Observed live: every Cyber Security News and WWF article ended in the WordPress
+    trailer "The post <title> appeared first on <site>.", rendered as if it were prose."""
+
+    fragment = (
+        "<div><p>Microsoft confirmed the flaw is exploited in the wild.</p>"
+        "<p>The post Microsoft Entra ID Remote Code Execution Vulnerability Exploited "
+        "in the Wild appeared first on Cyber Security News.</p></div>"
+    )
+
+    assert _blocks(fragment) == ("Microsoft confirmed the flaw is exploited in the wild.",)
+
+
+def test_prose_that_merely_mentions_a_trailer_phrase_survives() -> None:
+    fragment = (
+        "<div><p>The article appeared first on the publisher's own site before "
+        "syndication picked it up, which is why The post label matters here.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 1
+
+
+def test_leading_navigation_chrome_is_not_body_text() -> None:
+    """Observed live: Special Nest article bodies opened with the site menu — "Om oss",
+    "Cookiepolicy", "Prenumeration", "Logga in" — rendered as a list before the article."""
+
+    fragment = (
+        "<div><ul><li>Om oss</li><li>Cookiepolicy</li><li>Prenumeration</li>"
+        "<li>Logga in</li></ul><p>Skolstart stundar runt om i landet.</p></div>"
+    )
+
+    assert _blocks(fragment) == ("Skolstart stundar runt om i landet.",)
+
+
+def test_a_short_list_after_prose_still_survives() -> None:
+    fragment = (
+        "<div><p>Pack these before the trip.</p>"
+        "<ul><li>Passport</li><li>Charger</li><li>Water bottle</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Pack these before the trip.",
+        "Passport",
+        "Charger",
+        "Water bottle",
+    )
+
+
+def test_a_stock_agency_credit_line_is_not_body_text() -> None:
+    """Observed live: Special Nest bodies carried "Genrebild från Shutterstock." as prose."""
+
+    fragment = (
+        "<div><p>Genrebild från Shutterstock.</p>"
+        "<p>Philip Lindersten har tagit fram konkreta råd inför skolstarten.</p></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Philip Lindersten har tagit fram konkreta råd inför skolstarten.",
+    )
+
+
+def test_prose_that_discusses_a_stock_agency_survives() -> None:
+    fragment = (
+        "<div><p>Shutterstock reported quarterly earnings that beat analyst "
+        "expectations by a wide margin this week.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 1
+
+
+def test_a_paragraph_repeated_across_the_feed_is_boilerplate() -> None:
+    """Observed live: Cyber Security News appended the same ad paragraph to most items in
+    one fetch. A paragraph recurring verbatim across three articles is furniture, not news."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    advert = (
+        "Prevent incidents due to slow investigations. Power your Tier 1 with threat "
+        "intelligence: Integrate TI Lookup in your SOC."
+    )
+    shared_by_two = "Both reports cite the same advisory published on Wednesday."
+    items = []
+    for index in range(3):
+        prose = " ".join(f"unique-{index}-{word}" for word in range(90)) + "."
+        extra = f"<p>{shared_by_two}</p>" if index < 2 else ""
+        items.append(
+            f"<item><title>Report {index}</title>"
+            f"<link>https://publisher.example/report-{index}</link>"
+            f"<guid>repeat-{index}</guid>"
+            f"<content:encoded><![CDATA[<p>{prose}</p>{extra}<p>{advert}</p>]]>"
+            f"</content:encoded></item>"
+        )
+    feed = (
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Repeats</title>{''.join(items)}</channel></rss>"
+    ).encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="repeats",
+                publisher_id="publisher.example",
+                title="Repeats",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert len(outcome.articles) == 3
+    for article in outcome.articles:
+        assert article.body is not None
+        assert "Integrate TI Lookup" not in article.body
+    two_carriers = [
+        article
+        for article in outcome.articles
+        if article.body is not None and shared_by_two in article.body
+    ]
+    assert len(two_carriers) == 2
+
+
+def test_an_article_that_is_mostly_boilerplate_is_omitted() -> None:
+    """Stripping feed-wide furniture must not leave a stub pretending to be a full article."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    advert = (
+        "Prevent incidents due to slow investigations. Power your Tier 1 with threat "
+        "intelligence: Integrate TI Lookup in your SOC. "
+    ) * 6
+    items = []
+    for index in range(3):
+        prose = (
+            " ".join(f"unique-{index}-{word}" for word in range(90)) + "."
+            if index < 2
+            else "One lonely sentence."
+        )
+        items.append(
+            f"<item><title>Report {index}</title>"
+            f"<link>https://publisher.example/report-{index}</link>"
+            f"<guid>stub-{index}</guid>"
+            f"<content:encoded><![CDATA[<p>{prose}</p><p>{advert}</p>]]>"
+            f"</content:encoded></item>"
+        )
+    feed = (
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Stubs</title>{''.join(items)}</channel></rss>"
+    ).encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="stubs",
+                publisher_id="publisher.example",
+                title="Stubs",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["Report 0", "Report 1"]
+    assert outcome.omitted == 1
+
+
+def test_a_sponsored_byline_is_not_an_article() -> None:
+    """Observed live: a 1,700-word advertorial with byline "Sponsored by Material Security"
+    was selected as a real article. Sponsored content is advertising, not journalism."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel><title>Sponsored</title><item><title>The Modern Attack Chain</title>
+    <link>https://publisher.example/sponsored</link><guid>sponsored-1</guid>
+    <dc:creator>Sponsored by Material Security</dc:creator>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    <item><title>A real report</title>
+    <link>https://publisher.example/real</link><guid>real-1</guid>
+    <dc:creator>A. Reporter</dc:creator>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="sponsored",
+                publisher_id="publisher.example",
+                title="Sponsored",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["A real report"]
+    assert outcome.omitted == 1

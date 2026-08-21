@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import socket
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
@@ -230,13 +230,25 @@ def _has_full_article_cta(fragment: str) -> bool:
 _MAXIMUM_LIST_RUN = 12
 _SHORT_LIST_ITEM_WORDS = 8
 
+# WordPress appends this to every feed item's content; it is metadata about syndication,
+# never publisher prose, so the anchored full match cannot condemn a real sentence.
+_WORDPRESS_TRAILER = re.compile(r"^The post .+ appeared first on .+$")
+
+# The longest a navigation menu entry gets. "Om oss", "Logga in", "Prenumeration" are one
+# or two words; a real first sentence is not.
+_CHROME_LIST_ITEM_WORDS = 4
+
+_CREDIT_LINE_WORDS = 8
+_STOCK_AGENCIES = ("shutterstock", "getty images", "istock", "unsplash")
+_CREDIT_PREFIXES = ("foto:", "bild:", "photo:", "image:", "genrebild")
+
 
 def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
-    """Drop the two kinds of publisher furniture that read as body text but are not.
+    """Drop the kinds of publisher furniture that read as body text but are not.
 
-    A first cut, deliberately narrow — the general question of separating article text
-    from furniture is open (issue #85). These two were observed corrupting a delivered
-    Edition and have signatures precise enough to act on now:
+    Deliberately a list of narrow signatures rather than a general classifier — the general
+    question of separating article text from furniture is open (issue #85). Each rule below
+    was observed corrupting a delivered Edition and is precise enough to act on:
 
     - **Fixture tables.** An SVT Sport report ended in a hundred consecutive list items of
       four words each - a whole season's results, one scoreline per item - rendered as
@@ -245,25 +257,56 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
       so both survive.
     - **Section labels.** A bare ``BLOG`` on its own, which is a heading the page styles
       and a reader cannot place.
+    - **Feed trailers.** WordPress closes every item with "The post <title> appeared first
+      on <site>." — syndication metadata, not journalism.
+    - **Leading navigation.** Special Nest pages open with the site menu — "Om oss",
+      "Cookiepolicy", "Logga in" — extracted as a list before the first paragraph. A run of
+      uniformly tiny list items ahead of any prose is chrome; after prose it may be content.
+    - **Stock-photo credits.** "Genrebild från Shutterstock." is a caption for an image the
+      Edition does not carry.
     """
 
     kept: list[BodyBlock] = []
     index = 0
+    seen_prose = False
     while index < len(blocks):
         block = blocks[index]
         if block.kind != "list":
-            if not _is_bare_label(block):
+            if not _is_bare_label(block) and not _is_credit_line(block) and not (
+                block.kind == "paragraph" and _WORDPRESS_TRAILER.match(block.text)
+            ):
                 kept.append(block)
+                seen_prose = True
             index += 1
             continue
         run_end = index
         while run_end < len(blocks) and blocks[run_end].kind == "list":
             run_end += 1
         run = blocks[index:run_end]
-        if not _is_tabular_run(run):
-            kept.extend(item for item in run if not _is_bare_label(item))
+        if _is_tabular_run(run) or (not seen_prose and _is_chrome_run(run)):
+            index = run_end
+            continue
+        kept.extend(item for item in run if not _is_bare_label(item))
+        seen_prose = True
         index = run_end
     return tuple(kept)
+
+
+def _is_chrome_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A list of uniformly tiny items ahead of any prose is a navigation menu."""
+
+    return all(len(item.text.split()) <= _CHROME_LIST_ITEM_WORDS for item in run)
+
+
+def _is_credit_line(block: BodyBlock) -> bool:
+    """A short standalone line naming a stock agency is an image credit, not a sentence."""
+
+    if block.kind != "paragraph" or len(block.text.split()) > _CREDIT_LINE_WORDS:
+        return False
+    lowered = block.text.casefold()
+    return lowered.startswith(_CREDIT_PREFIXES) or any(
+        agency in lowered for agency in _STOCK_AGENCIES
+    )
 
 
 def _is_tabular_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
@@ -281,6 +324,59 @@ def _is_bare_label(block: BodyBlock) -> bool:
 
     text = block.text.strip()
     return len(text) <= 12 and text.isupper() and len(text.split()) == 1
+
+
+# In how many distinct articles of one fetch a block must recur verbatim before it is
+# furniture. Three, not two: two articles legitimately quoting the same advisory sentence
+# were observed live, while the ad paragraphs this exists for ran across most of the feed.
+_MINIMUM_BOILERPLATE_ARTICLES = 3
+
+
+def _strip_feedwide_boilerplate(
+    articles: list[AcquiredArticle], request: SourceRequest
+) -> tuple[list[AcquiredArticle], int]:
+    """Drop blocks that recur verbatim across articles of one fetch; they are furniture.
+
+    Observed live: Cyber Security News appended the same marketing paragraph to most items
+    in a feed, and Special Nest pages carried identical site chrome into every extraction.
+    No sentence of actual journalism repeats verbatim across three different articles, so
+    repetition within one fetch is a signature that needs no per-publisher pattern list.
+
+    Bodies are rebuilt from the surviving blocks so revision hashing sees the same text a
+    reader does — otherwise shifting furniture keeps manufacturing false "material updates".
+    An article reduced below the full-body minimum was mostly furniture and is omitted
+    rather than delivered as a stub.
+    """
+
+    counts: dict[str, int] = {}
+    for article in articles:
+        for text in {block.text for block in article.blocks}:
+            counts[text] = counts.get(text, 0) + 1
+    boilerplate = {
+        text for text, count in counts.items() if count >= _MINIMUM_BOILERPLATE_ARTICLES
+    }
+    if not boilerplate:
+        return articles, 0
+
+    kept: list[AcquiredArticle] = []
+    omitted = 0
+    for article in articles:
+        if article.body is None or not any(
+            block.text in boilerplate for block in article.blocks
+        ):
+            kept.append(article)
+            continue
+        blocks = tuple(block for block in article.blocks if block.text not in boilerplate)
+        body = _body_text(blocks)
+        if len(body.split()) >= request.minimum_full_words:
+            kept.append(replace(article, body=body, blocks=blocks))
+        elif body and request.allow_short_as_published:
+            kept.append(
+                replace(article, body=body, blocks=blocks, classification="short_as_published")
+            )
+        else:
+            omitted += 1
+    return kept, omitted
 
 
 def _decoded_feed(payload: bytes) -> str | bytes:
@@ -547,6 +643,8 @@ class SourceClient:
                 omitted += 1
             else:
                 articles.append(article)
+        articles, boilerplate_omitted = _strip_feedwide_boilerplate(articles, request)
+        omitted += boilerplate_omitted
         code = "SOURCE_OK" if omitted == 0 else "SOURCE_PARTIAL"
         return AcquisitionOutcome(request.source_id, code, tuple(articles), omitted)
 
@@ -601,6 +699,11 @@ class SourceClient:
         guid = str(guid_value) if guid_value is not None else None
         author_value = entry.get("author")
         author = str(author_value).strip() if author_value else None
+        # A byline that opens with "Sponsored" is the publisher's own label for paid
+        # placement. Advertising is not journalism, so it never becomes an Article or a
+        # Brief — observed live as a 1,700-word advertorial filling a personal Section.
+        if author is not None and author.casefold().startswith("sponsored"):
+            return None
         published = _entry_datetime(entry.get("published") or entry.get("updated"))
         language = _article_language(entry.get("language"), request.default_article_language)
         tags: Sequence[Mapping[str, Any]] = entry.get("tags", ())
