@@ -837,14 +837,21 @@ publications:
   # through Wednesday reprinted articles Saturday had already carried, because the daily had
   # no idea they were delivered. One reader reads both, so each suppresses against the other.
   #
-  # Note the ceiling this cannot exceed today: a Saturday Run acquires from the same feeds as any
-  # other, so it can only carry what is still in them. Monday's near-miss has usually fallen off
-  # by Saturday, and re-fetching one by its stored canonical_url needs an acquisition route that
-  # does not exist yet. Wednesday through Friday is the honest reach of this Edition for now.
+  # `recovers_near_misses: true` is what lets Saturday reach back past the feeds' own memory.
+  # A Saturday Run acquires from the same live feeds as any other, so alone it could only carry
+  # what is still in them — and Monday's near-miss has usually fallen off by Saturday. Every
+  # Publication records its Near Misses (body-free pointers: an Article identity and its
+  # Source; the canonical URL is already in the State Store), and this one, because it reads
+  # the daily's history, may re-fetch them: the week's Near Misses, newest first, at most 20
+  # page fetches per Run, skipping anything already delivered or already in the feeds. The
+  # re-fetch runs through the same evidence, origin-allowlist, robots and SSRF checks as any
+  # acquisition, and only against `web`/`auto` Sources — a feed-only or metadata-only Source's
+  # evidence never contemplated page fetches, so its misses stay missed.
   - id: weekly
     title: Veckoutgåvan
     language: sv
     reads_history_from: [daily]
+    recovers_near_misses: true
     # Twice the daily's Briefs, for six days of them rather than one.
     max_briefs: 12
     budget:

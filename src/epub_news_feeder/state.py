@@ -18,6 +18,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
+# How long a Near Miss stays recoverable. Two weeks comfortably covers the weekly's
+# seven-day read window while keeping the table a window rather than an archive.
+_NEAR_MISS_RETENTION = timedelta(days=14)
+
 
 @dataclass(frozen=True, slots=True)
 class ArticleObservation:
@@ -442,6 +446,18 @@ class StateStore:
                 "ALTER TABLE pending_deliveries ADD COLUMN briefs TEXT NOT NULL DEFAULT '[]'"
             )
         self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (5)")
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS near_misses (
+                publication_id TEXT NOT NULL,
+                article_id TEXT NOT NULL REFERENCES articles(article_id),
+                source_id TEXT NOT NULL,
+                recorded_at TEXT NOT NULL,
+                PRIMARY KEY(publication_id, article_id)
+            );
+            INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);
+            """
+        )
 
     def observe_article(
         self,
@@ -1048,6 +1064,71 @@ class StateStore:
             story = (str(row["publisher_id"]), normalize_text(str(row["title"])).casefold())
             delivered.setdefault(story, set()).add(str(row["article_id"]))
         return delivered
+
+    def record_near_misses(
+        self,
+        publication_id: str,
+        article_ids_with_sources: Iterable[tuple[str, str]],
+        recorded_at: datetime,
+    ) -> None:
+        """Record this Run's Near Misses and prune every record past its recovery window.
+
+        A Near Miss is a body-free pointer — an Article identity and the Source that carried
+        it; the canonical URL already lives in ``articles`` and is joined on read. Re-recording
+        moves ``recorded_at`` forward, because a Run that considered the Article again renewed
+        its claim to recovery. Pruning rides along on every recording, opportunistically, so
+        the table stays a two-week recovery window and never becomes an archive: a Near Miss
+        nobody recovered inside the window was not worth a Saturday slot either.
+        """
+
+        with self._transaction():
+            for article_id, source_id in article_ids_with_sources:
+                self.connection.execute(
+                    """
+                    INSERT INTO near_misses(publication_id, article_id, source_id, recorded_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(publication_id, article_id) DO UPDATE SET
+                        source_id = excluded.source_id,
+                        recorded_at = excluded.recorded_at
+                    """,
+                    (publication_id, article_id, source_id, recorded_at.isoformat()),
+                )
+            self.connection.execute(
+                "DELETE FROM near_misses WHERE recorded_at < ?",
+                ((recorded_at - _NEAR_MISS_RETENTION).isoformat(),),
+            )
+
+    def near_misses(
+        self, publication_ids: Iterable[str], *, since: datetime
+    ) -> list[tuple[str, str, str]]:
+        """Near Misses of *publication_ids* since *since*: (article_id, source_id, url) rows.
+
+        Distinct by Article — several referenced Publications missing the same story is one
+        recovery, not several fetches — keeping the most recently recorded row's Source.
+        Newest recorded first, then Article identity, so a bounded recovery budget spends
+        itself on the fresh end of the window deterministically.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return []
+        placeholders = ",".join("?" * len(identifiers))
+        rows = self.connection.execute(
+            f"""
+            SELECT n.article_id, n.source_id, a.canonical_url,
+                   MAX(n.recorded_at) AS recorded_at
+            FROM near_misses n
+            JOIN articles a ON a.article_id = n.article_id
+            WHERE n.publication_id IN ({placeholders}) AND n.recorded_at >= ?
+            GROUP BY n.article_id
+            ORDER BY recorded_at DESC, n.article_id
+            """,
+            (*identifiers, since.isoformat()),
+        ).fetchall()
+        return [
+            (str(row["article_id"]), str(row["source_id"]), str(row["canonical_url"]))
+            for row in rows
+        ]
 
     def cluster_recurrence(
         self, publication_ids: Iterable[str], *, since: datetime | None = None
