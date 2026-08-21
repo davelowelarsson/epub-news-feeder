@@ -971,6 +971,44 @@ def test_a_short_list_after_prose_still_survives() -> None:
     )
 
 
+def test_a_trailing_run_of_related_headlines_is_not_body_text() -> None:
+    """Observed live: Special Nest page bodies ended in the site's related-articles widget —
+    seven headline list items that change over time, so every fetch read as a material
+    update and the same article kept re-entering Editions."""
+
+    fragment = (
+        "<div><p>Adhd förekommer hos knappt tre procent av den vuxna befolkningen.</p>"
+        "<ul><li>Kurs om adhd till nytta för föräldrar med egna symtom</li>"
+        "<li>Hur ser personer med autism på att skaffa barn?</li>"
+        "<li>Om Pans: ”Svårt att fastställa diagnosen”</li>"
+        "<li>Motoriska problem starkt kopplat till NPF i ny studie</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Adhd förekommer hos knappt tre procent av den vuxna befolkningen.",
+    )
+
+
+def test_a_trailing_how_to_list_with_sentences_survives() -> None:
+    fragment = (
+        "<div><p>Gör så här inför loppet.</p>"
+        "<ul><li>Ladda med kolhydrater kvällen före loppet.</li>"
+        "<li>Värm upp i minst femton minuter före starten.</li>"
+        "<li>Håll jämn fart under de första kilometrarna.</li></ul></div>"
+    )
+
+    assert len(_blocks(fragment)) == 4
+
+
+def test_a_trailing_list_of_short_items_survives() -> None:
+    fragment = (
+        "<div><p>Pack these before the trip.</p>"
+        "<ul><li>Passport and visa</li><li>Charger</li><li>Water bottle</li></ul></div>"
+    )
+
+    assert len(_blocks(fragment)) == 4
+
+
 def test_a_stock_agency_credit_line_is_not_body_text() -> None:
     """Observed live: Special Nest bodies carried "Genrebild från Shutterstock." as prose."""
 

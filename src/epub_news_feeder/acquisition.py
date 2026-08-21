@@ -264,6 +264,9 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
       uniformly tiny list items ahead of any prose is chrome; after prose it may be content.
     - **Stock-photo credits.** "Genrebild från Shutterstock." is a caption for an image the
       Edition does not carry.
+    - **Related-headlines widgets.** Special Nest pages end in a list of other articles'
+      headlines. Beyond being junk, the widget changes as the site publishes, so an
+      unchanged article kept re-reading as materially updated and re-entering Editions.
     """
 
     kept: list[BodyBlock] = []
@@ -285,7 +288,11 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
         while run_end < len(blocks) and blocks[run_end].kind == "list":
             run_end += 1
         run = blocks[index:run_end]
-        if _is_tabular_run(run) or (not seen_prose and _is_chrome_run(run)):
+        if (
+            _is_tabular_run(run)
+            or (not seen_prose and _is_chrome_run(run))
+            or (seen_prose and run_end == len(blocks) and _is_related_headline_run(run))
+        ):
             index = run_end
             continue
         kept.extend(item for item in run if not _is_bare_label(item))
@@ -298,6 +305,32 @@ def _is_chrome_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
     """A list of uniformly tiny items ahead of any prose is a navigation menu."""
 
     return all(len(item.text.split()) <= _CHROME_LIST_ITEM_WORDS for item in run)
+
+
+_RELATED_HEADLINE_MIN_ITEMS = 2
+_RELATED_HEADLINE_MIN_WORDS = 5
+# Closing quotes and brackets a headline may end with, ahead of the punctuation test:
+# straight quotes, curly double and single closing quotes, guillemet, parenthesis, bracket.
+_CLOSING_MARKS = "\"'\u201d\u2019\u00bb)]"
+
+
+def _is_related_headline_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A body-final run of headline-shaped items is a related-articles widget.
+
+    Headline-shaped means every item is long enough to be a headline rather than a keyword,
+    and no item ends in a full stop. Headlines end with question marks, exclamations and
+    quotes but not periods; a how-to list writes sentences and a packing list writes short
+    noun phrases, so both survive while a widget of nothing but headlines does not.
+    """
+
+    if len(run) < _RELATED_HEADLINE_MIN_ITEMS:
+        return False
+    for item in run:
+        if len(item.text.split()) < _RELATED_HEADLINE_MIN_WORDS:
+            return False
+        if item.text.rstrip(_CLOSING_MARKS).endswith("."):
+            return False
+    return True
 
 
 def _is_credit_line(block: BodyBlock) -> bool:
