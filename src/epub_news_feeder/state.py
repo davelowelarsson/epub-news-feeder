@@ -699,7 +699,14 @@ class StateStore:
         if delivered is None:
             return True, False
         previous_hashes = self._load_token_hashes(str(delivered["token_hashes"]))
-        threshold = max(50, (int(delivered["word_count"]) * 15 + 99) // 100)
+        # A body that lost half its words since delivery is an extraction artifact — a
+        # paywall teaser or a chrome-only scrape — not publisher news. Re-delivering it
+        # would replace a full article the reader already has with a stub labelled
+        # "updated", so a shrunken observation is never material however large its diff.
+        delivered_word_count = int(delivered["word_count"])
+        if len(current_hashes) * 2 < delivered_word_count:
+            return False, False
+        threshold = max(50, (delivered_word_count * 15 + 99) // 100)
         materially_changed = _changed_words(previous_hashes, current_hashes) >= threshold
         return materially_changed, materially_changed
 
