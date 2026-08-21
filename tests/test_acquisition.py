@@ -199,6 +199,45 @@ def test_ticket_04_robots_redirect_fails_closed_before_feed_fetch() -> None:
 
 
 @pytest.mark.acceptance
+def test_robots_rules_match_percent_decoded_paths() -> None:
+    """RFC 9309 matches percent-decoded octets: "/%70rivate" is "/private", and an encoded
+    byte must not sidestep a rule the publisher wrote in plain text."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    robots = b"User-agent: *\nDisallow: /private\n"
+    feed = b"""<rss version="2.0"><channel><title>Encoded</title><item>
+    <title>Behind the rule</title><link>REPLACE/%70rivate/report</link><guid>enc-1</guid>
+    </item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", robots),
+            "/feed.xml": (200, "application/rss+xml", b""),
+            "/%70rivate/report": (200, "text/html", b"<article><p>must not be read</p></article>"),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            feed.replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="encoded",
+                publisher_id="publisher",
+                title="Encoded",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+    assert not any("rivate" in hit for hit in site.hits), "the page must never be fetched"
+
+
+@pytest.mark.acceptance
 def test_ticket_04_robots_wildcards_and_end_anchors_follow_rfc_matching() -> None:
     now = datetime(2026, 8, 9, tzinfo=UTC)
     robots = b"""User-agent: epub-news-feeder
@@ -1308,6 +1347,153 @@ def test_a_body_ending_in_a_how_to_list_is_never_demoted_as_a_teaser() -> None:
 
     assert outcome.articles[0].classification == "verified_feed_body"
     assert outcome.articles[0].blocks[-1].kind == "list"
+
+
+def test_an_auto_feed_teaser_falls_back_to_the_complete_page() -> None:
+    """A teaser-shaped AUTO feed body must reject the candidate and try the page, exactly
+    as the explicit read-full-article CTA does — the complete article is one fetch away."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    teaser = " ".join(f"stub-{index}" for index in range(100))
+    complete = " ".join(f"complete-{index}" for index in range(300)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Auto</title><item><title>Cut in the feed</title>
+    <link>REPLACE/reports/cut</link><guid>auto-cut-1</guid>
+    <content:encoded><![CDATA[<p>{teaser}</p>]]></content:encoded></item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", b""),
+            "/reports/cut": (
+                200,
+                "text/html",
+                f"<html><body><article><p>{complete}</p></article></body></html>".encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            feed.replace("REPLACE", site.base_url).encode(),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="auto-cut",
+                publisher_id="publisher",
+                title="Auto",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.AUTO,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    (article,) = outcome.articles
+    assert article.classification == "verified_page_body"
+    assert article.body is not None and "complete-5" in article.body
+
+
+def test_a_repeated_unpunctuated_footer_does_not_demote_complete_articles() -> None:
+    """Teaser demotion must run after feed-wide boilerplate stripping: a footer repeated
+    across the fetch is furniture, and furniture must not make three complete articles
+    read as mid-sentence stubs."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    items = []
+    for index in range(3):
+        prose = " ".join(f"complete-{index}-{word}" for word in range(90)) + "."
+        items.append(
+            f"<item><title>Report {index}</title>"
+            f"<link>https://publisher.example/report-{index}</link>"
+            f"<guid>footer-{index}</guid>"
+            f"<content:encoded><![CDATA[<p>{prose}</p>"
+            f"<p>Continue reading with an unpunctuated membership pitch</p>]]>"
+            f"</content:encoded></item>"
+        )
+    feed = (
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Footers</title>{''.join(items)}</channel></rss>"
+    ).encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="footers",
+                publisher_id="publisher.example",
+                title="Footers",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert len(outcome.articles) == 3
+    for article in outcome.articles:
+        assert article.classification == "verified_feed_body"
+        assert article.body is not None
+        assert "membership pitch" not in article.body
+
+
+def test_a_repeated_punctuated_footer_cannot_lend_a_stub_its_full_stop() -> None:
+    """The same ordering in the other direction: a repeated punctuated footer is stripped
+    first, so the mid-sentence stub it was hiding is still recognized and demoted."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    items = []
+    for index in range(3):
+        stub = " ".join(f"stub-{index}-{word}" for word in range(90))
+        items.append(
+            f"<item><title>Stub {index}</title>"
+            f"<link>https://publisher.example/stub-{index}</link>"
+            f"<guid>hidden-{index}</guid>"
+            f"<content:encoded><![CDATA[<p>{stub}</p>"
+            f"<p>This shared legal notice ends with a period.</p>]]>"
+            f"</content:encoded></item>"
+        )
+    feed = (
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Hidden</title>{''.join(items)}</channel></rss>"
+    ).encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="hidden",
+                publisher_id="publisher.example",
+                title="Hidden",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert len(outcome.articles) == 3
+    for article in outcome.articles:
+        assert article.classification == "teaser_link"
+        assert article.body is None
+
+
+def test_terminal_punctuation_is_not_latin_only() -> None:
+    """A complete sentence in another script must not read as a cut: "。", "؟" and "।" end
+    sentences exactly as "." does."""
+
+    from epub_news_feeder.acquisition import BodyBlock, _is_teaser
+
+    for ending in ("。", "؟", "।"):
+        blocks = (BodyBlock("paragraph", f"a complete sentence in another script{ending}"),)
+        assert not _is_teaser(blocks, 90), f"{ending!r} ends a sentence"
+    cut = (BodyBlock("paragraph", "a sentence cut mid"),)
+    assert _is_teaser(cut, 90)
 
 
 def test_a_teaser_and_boilerplate_stripping_do_not_collide() -> None:

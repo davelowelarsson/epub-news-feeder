@@ -100,6 +100,10 @@ class Source(StrictModel):
     feed_url: HttpUrl
     acquisition: Literal["auto", "feed", "web", "metadata_only"] = "auto"
     presentation: Literal["full_text", "briefing_roll"] | None = None
+    # A Source that genuinely publishes short or unpunctuated items — micro-posts, verse,
+    # one-line updates — may opt in to carrying them as published. Without this, items
+    # under the full-body minimum are rejected and teaser-shaped bodies become Briefs.
+    allow_short_as_published: bool = False
     weight: Weight = 5
     llm_processing: Literal["disabled", "local_only", "remote_allowed"] = "local_only"
     rights: RightsPolicy | None = None

@@ -9,7 +9,7 @@ from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from ipaddress import ip_address
 from typing import Any, cast
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import feedparser
 import httpcore
@@ -241,6 +241,10 @@ def _has_full_article_cta(fragment: str) -> bool:
 _MAXIMUM_LIST_RUN = 12
 _SHORT_LIST_ITEM_WORDS = 8
 
+# The largest decoded chunk one download iteration may hand back, bounding how far a
+# compressed response can exceed the response cap before the size check sees it.
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
 # WordPress appends this to every feed item's content; it is metadata about syndication,
 # never publisher prose, so the anchored full match cannot condemn a real sentence.
 _WORDPRESS_TRAILER = re.compile(r"^The post .+ appeared first on .+$")
@@ -423,8 +427,33 @@ def _strip_feedwide_boilerplate(
 
 _TEASER_MAXIMUM_WORDS = 200
 # A complete sentence ends with one of these; anything else after stripping _CLOSING_MARKS
-# is a cut, not an ending.
-_TERMINAL_MARKS = ".!?…"
+# is a cut, not an ending. Not Latin-only: the CJK full stop and fullwidth bang/question
+# marks, the Arabic question mark and the Devanagari danda end sentences exactly as "."
+# does, and a complete paragraph in another script is not a paywall stub.
+_TERMINAL_MARKS = ".!?\u2026\u3002\uff01\uff1f\u061f\u0964"
+
+
+def _demote_teasers(
+    articles: list[AcquiredArticle], request: SourceRequest
+) -> list[AcquiredArticle]:
+    """Demote teaser-shaped bodies to Publisher Link Briefs, after furniture is gone.
+
+    Deliberately after ``_strip_feedwide_boilerplate``, and load-bearing in both directions:
+    a footer repeated unpunctuated across the fetch must not make three complete articles
+    read as mid-sentence stubs, and a repeated punctuated footer must not lend a genuine
+    stub its full stop. Only the cleaned body — what a reader would actually get — is the
+    honest thing to classify.
+    """
+
+    if request.allow_short_as_published:
+        return articles
+    demoted: list[AcquiredArticle] = []
+    for article in articles:
+        if article.body is not None and _is_teaser(article.blocks, len(article.body.split())):
+            demoted.append(replace(article, body=None, blocks=(), classification="teaser_link"))
+        else:
+            demoted.append(article)
+    return demoted
 
 
 def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
@@ -733,6 +762,7 @@ class SourceClient:
                 articles.append(article)
         articles, boilerplate_omitted = _strip_feedwide_boilerplate(articles, request)
         omitted += boilerplate_omitted
+        articles = _demote_teasers(articles, request)
         code = "SOURCE_OK" if omitted == 0 else "SOURCE_PARTIAL"
         return AcquisitionOutcome(request.source_id, code, tuple(articles), omitted)
 
@@ -828,7 +858,15 @@ class SourceClient:
                     fragment = str(item.get("value", ""))
                     candidate_blocks = _html_blocks(fragment)
                     candidate = _body_text(candidate_blocks)
-                    if request.mode == AcquisitionMode.AUTO and _has_full_article_cta(fragment):
+                    # A teaser-shaped feed body is as good a fallback signal as the explicit
+                    # read-full-article CTA: the complete article is one page fetch away.
+                    if request.mode == AcquisitionMode.AUTO and (
+                        _has_full_article_cta(fragment)
+                        or (
+                            not request.allow_short_as_published
+                            and _is_teaser(candidate_blocks, len(candidate.split()))
+                        )
+                    ):
                         continue
                     if len(candidate.encode("utf-8")) > self._max_article_body_bytes:
                         continue
@@ -854,25 +892,8 @@ class SourceClient:
             link_url = page.url
         if body is None or classification is None:
             return None
-        # Applied only once the body route is fully resolved - after the AUTO-mode web
-        # fallback, on whatever body won - because a feed teaser that AUTO rejects for a
-        # complete page must not be judged on the teaser it never kept.
-        if not request.allow_short_as_published and _is_teaser(blocks, len(body.split())):
-            return AcquiredArticle(
-                request.source_id,
-                request.publisher_id,
-                request.title,
-                guid,
-                title,
-                author,
-                str(link_url),
-                published,
-                categories,
-                language,
-                None,
-                (),
-                "teaser_link",
-            )
+        # Teaser demotion happens in `acquire`, after feed-wide boilerplate stripping —
+        # only the cleaned body is honest to classify. See `_demote_teasers`.
         return AcquiredArticle(
             request.source_id,
             request.publisher_id,
@@ -1092,7 +1113,10 @@ class SourceClient:
                 if declared_size > self._max_response_bytes:
                     raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
             content = bytearray()
-            for chunk in response.iter_bytes():
+            # A bounded chunk size caps how far a compressed response can overshoot the
+            # response limit: iter_bytes yields *decoded* bytes, and without the bound a
+            # small gzip body could expand into one enormous chunk before the check runs.
+            for chunk in response.iter_bytes(chunk_size=_DOWNLOAD_CHUNK_BYTES):
                 content.extend(chunk)
                 if len(content) > self._max_response_bytes:
                     raise _RouteDenied("SOURCE_RESPONSE_TOO_LARGE")
@@ -1141,5 +1165,9 @@ class SourceClient:
         path_and_query = parsed.path or "/"
         if parsed.query:
             path_and_query = f"{path_and_query}?{parsed.query}"
+        # RFC 9309 matches percent-decoded octets: "/%70rivate" is "/private", and an
+        # encoded byte must not sidestep a rule the publisher wrote in plain text. An
+        # encoded slash stays encoded — it is data inside a segment, not a separator.
+        path_and_query = unquote(path_and_query.replace("%2F", "%252F").replace("%2f", "%252f"))
         if not cached.allows(self._product, path_and_query):
             raise _RouteDenied("SOURCE_ROBOTS_DENIED")

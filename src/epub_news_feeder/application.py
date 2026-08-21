@@ -595,11 +595,18 @@ def _run(
         )
     # Every Publication records its Near Misses — body-free pointers are cheap, and the daily
     # cannot know on Monday whether a weekly will exist to want them on Saturday. Only a
-    # Publication that names a history ever reads them back.
+    # Publication that names a history ever reads them back. The pool is `source_records`,
+    # not `records`: history suppression removes another Publication's delivered Articles
+    # from the pool only, and recording those as this Publication's own misses would
+    # launder that delivery back into circulation through any third Publication reading
+    # only this one.
     selected_ids = set(selection.unique_article_ids)
+    candidate_pool = {
+        article_id for candidate_ids in source_records.values() for article_id in candidate_ids
+    }
     near_misses = sorted(
         (article_id, records[article_id].source_id)
-        for article_id in records
+        for article_id in candidate_pool
         if article_id not in selected_ids
     )
     state.record_near_misses(publication.id, near_misses, recorded_at=generated_at)
@@ -1164,6 +1171,7 @@ def _source_request(source_id: str, source: Source) -> SourceRequest:
         llm_processing=source.llm_processing,
         default_article_language=source.default_article_language,
         allowed_publisher_origins=tuple(str(origin) for origin in source.allowed_publisher_origins),
+        allow_short_as_published=source.allow_short_as_published,
         evidence=EligibilityEvidence(
             evidence_id=evidence.evidence_id,
             reviewed_at=datetime.combine(evidence.evidence_reviewed_at, time.min, tzinfo=UTC),
@@ -1260,7 +1268,7 @@ def _recover_near_misses(
     delivered = state.delivered_article_ids((publication.id, *publication.reads_history_from))
     fetches = 0
     recovered = 0
-    for article_id, source_id, canonical_url in candidates:
+    for article_id, source_id, canonical_url, recorded_at in candidates:
         if fetches >= _NEAR_MISS_RECOVERY_LIMIT:
             break
         if article_id in records or article_id in delivered:
@@ -1278,9 +1286,21 @@ def _recover_near_misses(
             # from the fetch budget by accident.
             continue
         fetches += 1
-        acquired = client.acquire_article(_source_request(source_id, source), canonical_url)
+        try:
+            acquired = client.acquire_article(_source_request(source_id, source), canonical_url)
+        except Exception:
+            # A page can decay into anything in a week — an empty 200, invalid gzip, HTML
+            # the extractor cannot begin to parse. One decayed page costs its own recovery,
+            # never the whole delivered Edition.
+            continue
         if acquired is None or acquired.body is None:
             continue
+        recovered_body = acquired.body
+        if acquired.published_at is None:
+            # The page declared no publication time, and an undated Article would bypass
+            # every Section age window. The Near Miss's recording time is the honest upper
+            # bound: the Article existed no later than the morning that recorded it.
+            acquired = replace(acquired, published_at=recorded_at)
         observation = state.observe_article(
             source_id=source_id,
             publisher_id=acquired.publisher_id,
@@ -1288,7 +1308,7 @@ def _recover_near_misses(
             guid=acquired.guid,
             title=acquired.title,
             author=acquired.author,
-            normalized_body=acquired.body,
+            normalized_body=recovered_body,
             observed_at=generated_at,
             publication_id=publication.id,
             run_id=run_id,

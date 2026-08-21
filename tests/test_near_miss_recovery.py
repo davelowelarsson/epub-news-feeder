@@ -92,14 +92,26 @@ def test_near_misses_round_trip_distinct_and_windowed(tmp_path: Path) -> None:
         )
 
         rows = state.near_misses(("daily",), since=MONDAY - timedelta(days=1))
-        # Distinct by Article, newest recorded first, canonical URL joined from `articles`.
-        assert rows == [
-            (monday_miss, "source-one", "https://publisher.example/monday"),
-            (tuesday_miss, "source-one", "https://publisher.example/tuesday"),
-        ] or rows == [
-            (tuesday_miss, "source-one", "https://publisher.example/tuesday"),
-            (monday_miss, "source-one", "https://publisher.example/monday"),
-        ]
+        # Distinct by Article, newest recorded first, canonical URL joined from `articles`,
+        # and each row carries when it was recorded — the only date recovery can trust when
+        # the recovered page declares none.
+        both_recorded_tuesday = MONDAY + timedelta(days=1)
+        assert sorted(rows) == sorted(
+            [
+                (
+                    monday_miss,
+                    "source-one",
+                    "https://publisher.example/monday",
+                    both_recorded_tuesday,
+                ),
+                (
+                    tuesday_miss,
+                    "source-one",
+                    "https://publisher.example/tuesday",
+                    both_recorded_tuesday,
+                ),
+            ]
+        )
         # The re-record moved Monday's recorded_at forward, so both sit inside a
         # one-day window that Monday's original recording would have missed.
         assert len(state.near_misses(("daily",), since=MONDAY + timedelta(hours=12))) == 2
@@ -127,7 +139,24 @@ def test_near_misses_newest_recorded_first_is_the_order(tmp_path: Path) -> None:
         )
 
         rows = state.near_misses(("daily",), since=MONDAY - timedelta(days=1))
-        assert [article_id for article_id, _, _ in rows] == [newer, older]
+        assert [article_id for article_id, _, _, _ in rows] == [newer, older]
+
+
+def test_near_misses_break_recorded_at_ties_deterministically(tmp_path: Path) -> None:
+    """Two Publications recording the same Article at the same instant through different
+    Sources must not leave SQLite to pick one: which Source wins decides which evidence
+    and origin allowlist the recovery fetch runs under."""
+
+    with StateStore(tmp_path / "state.sqlite3", environment="test") as state:
+        article = _observe(
+            state, url="https://publisher.example/shared", title="Shared", when=MONDAY
+        )
+        state.record_near_misses("daily", [(article, "source-b")], recorded_at=MONDAY)
+        state.record_near_misses("weekly", [(article, "source-a")], recorded_at=MONDAY)
+
+        rows = state.near_misses(("daily", "weekly"), since=MONDAY - timedelta(days=1))
+
+        assert [(row[0], row[1]) for row in rows] == [(article, "source-a")]
 
 
 def test_recording_prunes_near_misses_older_than_fourteen_days(tmp_path: Path) -> None:
@@ -142,7 +171,7 @@ def test_recording_prunes_near_misses_older_than_fourteen_days(tmp_path: Path) -
         state.record_near_misses("daily", [(fresh, "source-one")], recorded_at=later)
 
         rows = state.near_misses(("daily",), since=MONDAY - timedelta(days=1))
-        assert [article_id for article_id, _, _ in rows] == [fresh]
+        assert [article_id for article_id, _, _, _ in rows] == [fresh]
 
 
 @pytest.mark.security
@@ -548,6 +577,110 @@ def test_the_weekly_recovers_a_near_miss_the_feed_no_longer_carries(tmp_path: Pa
     assert "The near-missed report" in rendered
     assert "missed-5" in rendered
     assert "The selected report" not in rendered, "the daily already delivered it"
+    # The publisher page declares no article:published_time, so the recovered Article is
+    # dated by when its Near Miss was recorded — never left undated, which would let it
+    # bypass every Section age window.
+    assert MONDAY.date().isoformat() in rendered
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_history_suppressed_article_is_not_recorded_as_a_near_miss(tmp_path: Path) -> None:
+    """History suppression removes another Publication's delivered Article from this Run's
+    candidate pool. Recording it as this Publication's own Near Miss would launder that
+    delivery back into circulation through any third Publication reading only this one."""
+
+    pages = {
+        "/reports/first": _page("The first report", [f"first-{index}" for index in range(120)]),
+        "/reports/second": _page("The second report", [f"second-{index}" for index in range(90)]),
+    }
+    hits: list[str] = []
+    with _publisher_site(pages, hits) as server:
+        pages["/feed.xml"] = _feed(
+            server.server_port,
+            [
+                ("The first report", "first", "Mon, 10 Aug 2026 05:00:00 GMT"),
+                ("The second report", "second", "Mon, 10 Aug 2026 04:00:00 GMT"),
+            ],
+        )
+        configuration = _yaml_configuration(tmp_path, server.server_port)
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260810T040000Z-DAILYAAA",
+            generated_at=MONDAY,
+            publication_id="daily",
+        )
+        # Saturday: the feed still carries both. "first" is history-suppressed (the daily
+        # delivered it); "second" is selected. Neither is a Near Miss of the weekly.
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260815T050000Z-WEEKAAAA",
+            generated_at=SATURDAY,
+            publication_id="weekly",
+        )
+
+    with StateStore(tmp_path / "state.sqlite3", environment="test") as state:
+        assert state.near_misses(("weekly",), since=MONDAY - timedelta(days=1)) == []
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_malformed_publisher_page_never_fails_a_recovering_run(tmp_path: Path) -> None:
+    """Recovery is opportunistic: one publisher page that has decayed into something the
+    extractor cannot parse must cost that one recovery, never the whole delivered Edition."""
+
+    pages = {
+        "/reports/selected": _page(
+            "The selected report", [f"selected-{index}" for index in range(120)]
+        ),
+        "/reports/broken": _page("The broken report", [f"broken-{index}" for index in range(90)]),
+        "/reports/good": _page("The good report", [f"good-{index}" for index in range(90)]),
+    }
+    hits: list[str] = []
+    with _publisher_site(pages, hits) as server:
+        pages["/feed.xml"] = _feed(
+            server.server_port,
+            [
+                ("The selected report", "selected", "Mon, 10 Aug 2026 06:00:00 GMT"),
+                ("The broken report", "broken", "Mon, 10 Aug 2026 05:00:00 GMT"),
+                ("The good report", "good", "Mon, 10 Aug 2026 04:00:00 GMT"),
+            ],
+        )
+        configuration = _yaml_configuration(tmp_path, server.server_port)
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260810T040000Z-DAILYAAA",
+            generated_at=MONDAY,
+            publication_id="daily",
+        )
+
+        # Saturday: the feed has moved on; the broken page now serves an empty 200, which
+        # the HTML extractor cannot even begin to parse.
+        pages["/feed.xml"] = _feed(server.server_port, [])
+        pages["/reports/broken"] = ""
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260815T050000Z-WEEKAAAA",
+            generated_at=SATURDAY,
+            publication_id="weekly",
+        )
+
+    assert result.article_count == 1
+    rendered = _epub_text(result.receipt.path)
+    assert "The good report" in rendered
+    assert "The broken report" not in rendered
 
 
 @pytest.mark.acceptance

@@ -1111,13 +1111,16 @@ class StateStore:
 
     def near_misses(
         self, publication_ids: Iterable[str], *, since: datetime
-    ) -> list[tuple[str, str, str]]:
-        """Near Misses of *publication_ids* since *since*: (article_id, source_id, url) rows.
+    ) -> list[tuple[str, str, str, datetime]]:
+        """Near Misses of *publication_ids* since *since*: (article, source, url, recorded).
 
         Distinct by Article — several referenced Publications missing the same story is one
-        recovery, not several fetches — keeping the most recently recorded row's Source.
-        Newest recorded first, then Article identity, so a bounded recovery budget spends
-        itself on the fresh end of the window deterministically.
+        recovery, not several fetches — keeping the most recently recorded row's Source,
+        with the lowest source_id breaking a same-instant tie so which evidence and origin
+        allowlist the recovery runs under never depends on row order. Newest recorded
+        first, so a bounded recovery budget spends itself on the fresh end of the window.
+        The recorded time rides along because it is the only date recovery can trust when
+        the recovered page declares none.
         """
 
         identifiers = tuple(dict.fromkeys(publication_ids))
@@ -1126,20 +1129,30 @@ class StateStore:
         placeholders = ",".join("?" * len(identifiers))
         rows = self.connection.execute(
             f"""
-            SELECT n.article_id, n.source_id, a.canonical_url,
-                   MAX(n.recorded_at) AS recorded_at
+            SELECT n.article_id, n.source_id, a.canonical_url, n.recorded_at
             FROM near_misses n
             JOIN articles a ON a.article_id = n.article_id
             WHERE n.publication_id IN ({placeholders}) AND n.recorded_at >= ?
-            GROUP BY n.article_id
-            ORDER BY recorded_at DESC, n.article_id
+            ORDER BY n.recorded_at DESC, n.source_id, n.article_id
             """,
             (*identifiers, since.isoformat()),
         ).fetchall()
-        return [
-            (str(row["article_id"]), str(row["source_id"]), str(row["canonical_url"]))
-            for row in rows
-        ]
+        seen: set[str] = set()
+        misses: list[tuple[str, str, str, datetime]] = []
+        for row in rows:
+            article_id = str(row["article_id"])
+            if article_id in seen:
+                continue
+            seen.add(article_id)
+            misses.append(
+                (
+                    article_id,
+                    str(row["source_id"]),
+                    str(row["canonical_url"]),
+                    datetime.fromisoformat(str(row["recorded_at"])),
+                )
+            )
+        return misses
 
     def cluster_recurrence(
         self, publication_ids: Iterable[str], *, since: datetime | None = None

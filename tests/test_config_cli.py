@@ -45,6 +45,33 @@ publications:
 """.lstrip()
 
 
+def test_a_source_may_opt_in_to_short_as_published(tmp_path: Path) -> None:
+    """The teaser exemption has to be reachable from configuration: a Source that
+    genuinely publishes short or unpunctuated items opts in per Source, and the default
+    stays the demoting behavior."""
+
+    config_path = tmp_path / "short.yaml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            "    feed_url: https://example.com/feed.xml",
+            "    feed_url: https://example.com/feed.xml\n    allow_short_as_published: true",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_config(config_path)
+
+    assert configuration.sources["source-one"].allow_short_as_published is True
+    default_configuration = load_config(_write_minimal(tmp_path))
+    assert default_configuration.sources["source-one"].allow_short_as_published is False
+
+
+def _write_minimal(tmp_path: Path) -> Path:
+    config_path = tmp_path / "minimal.yaml"
+    config_path.write_text(MINIMAL_CONFIG, encoding="utf-8")
+    return config_path
+
+
 def run_cli(
     *arguments: str, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
