@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from types import TracebackType
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 _TRACKING_PARAMETERS = {"fbclid", "gclid", "mc_cid", "mc_eid"}
 
@@ -1519,7 +1519,9 @@ def read_source_health(path: Path) -> list[SourceHealth]:
 
     if not path.exists():
         return []
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # SQLite URI filenames treat ``?`` and ``#`` as syntax: an unescaped path would open a
+    # different file and silently swallow ``mode=ro`` — the one flag keeping this a report.
+    connection = sqlite3.connect(f"file:{quote(str(path))}?mode=ro", uri=True)
     try:
         connection.row_factory = sqlite3.Row
         try:

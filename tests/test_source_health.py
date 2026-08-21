@@ -177,3 +177,59 @@ def test_source_health_cli_never_takes_the_writer_lock(tmp_path: Path) -> None:
     after = set(os.listdir(tmp_path))
     assert "state.sqlite3.key" not in after
     assert "state.sqlite3.lock" not in after
+
+
+def test_read_source_health_opens_the_exact_file_even_with_uri_metacharacters(
+    tmp_path: Path,
+) -> None:
+    """SQLite URI filenames treat ``?`` and ``#`` as syntax. An unescaped path would make
+    SQLite open a different file — and swallow the ``mode=ro`` that keeps this a report."""
+
+    state_path = tmp_path / "state?copy#1.sqlite3"
+    _seed(state_path)
+
+    records = read_source_health(state_path)
+
+    assert {record.source_id for record in records} == {"healthy", "beta", "alpha", "zeta"}
+    # The would-be misparse target must not have been created read-write as a side effect.
+    assert not (tmp_path / "state").exists()
+
+
+def test_source_health_markdown_escapes_table_syntax_in_values(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The summary is world-readable GFM: a value carrying a pipe must not break or spoof
+    the table layout."""
+
+    state_path = tmp_path / "state.sqlite3"
+    with StateStore(state_path, environment="test") as state:
+        state.record_source_health(
+            "odd|id",
+            attempted_at=datetime(2026, 8, 21, 6, tzinfo=UTC),
+            succeeded=False,
+            classification="SOURCE_FETCH_FAILED",
+        )
+
+    exit_code = main(["source-health", "--state", str(state_path), "--format", "markdown"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    row = next(line for line in captured.out.splitlines() if "odd" in line)
+    assert "odd\\|id" in row
+    assert row.count(" | ") == 3, "the row must keep exactly four columns"
+
+
+def test_source_health_cli_is_never_a_gate_even_for_an_unreadable_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The workflow step runs under set -e after a delivered Edition; a corrupt or
+    non-SQLite file must produce a one-line note and exit 0, never fail the job."""
+
+    state_path = tmp_path / "state.sqlite3"
+    state_path.write_bytes(b"this is not a sqlite database at all")
+
+    exit_code = main(["source-health", "--state", str(state_path)])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() != ""

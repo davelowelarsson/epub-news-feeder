@@ -13,6 +13,7 @@ from epub_news_feeder.drive import DriveAuthError, DriveError, DriveFile, DriveF
 from epub_news_feeder.state_sync import (
     StateSyncAuthError,
     StateSyncError,
+    _checkpoint_wal,
     pack_state_archive,
     restore_state,
     save_state,
@@ -136,6 +137,36 @@ def _read_table_value(state_path: Path) -> str:
         connection.close()
     assert row is not None
     return str(row[0])
+
+
+def test_an_incomplete_wal_checkpoint_raises_rather_than_archiving_a_partial_database(
+    tmp_path: Path,
+) -> None:
+    """SQLite reports an obstructed TRUNCATE checkpoint through its result row, not an
+    exception. Ignoring that row would pack a main database file missing committed WAL
+    frames — the archive would silently lose delivery history. A concurrent reader (the
+    Source health report is one) holding a read snapshot is exactly the obstruction."""
+
+    state_path = tmp_path / "state.sqlite3"
+    writer = sqlite3.connect(state_path, isolation_level=None)
+    reader = sqlite3.connect(state_path, isolation_level=None)
+    try:
+        writer.execute("PRAGMA journal_mode = WAL")
+        writer.execute("CREATE TABLE t(value TEXT)")
+        writer.execute("INSERT INTO t VALUES ('before-snapshot')")
+        # The reader takes and holds a read snapshot, which blocks a TRUNCATE checkpoint.
+        reader.execute("BEGIN")
+        reader.execute("SELECT value FROM t").fetchall()
+        writer.execute("INSERT INTO t VALUES ('after-snapshot')")
+
+        with pytest.raises(StateSyncError, match="checkpoint"):
+            _checkpoint_wal(state_path, writer)
+
+        reader.execute("COMMIT")
+        _checkpoint_wal(state_path, writer)
+    finally:
+        reader.close()
+        writer.close()
 
 
 # --- pack / unpack -----------------------------------------------------------------

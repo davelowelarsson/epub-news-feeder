@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import sqlite3
 import sys
 import webbrowser
 from collections.abc import Sequence
@@ -321,6 +322,13 @@ def _source_health_text(records: Sequence[SourceHealth]) -> str:
     return "\n".join(lines)
 
 
+def _markdown_cell(value: str) -> str:
+    """Neutralize GFM table syntax: the summary is world-readable, and a value carrying a
+    pipe or a newline must not break the layout or spoof rows outside its own cell."""
+
+    return value.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
+
+
 def _source_health_markdown(records: Sequence[SourceHealth]) -> str:
     # A source_id and a classification code, never a title or a URL: this is meant for
     # $GITHUB_STEP_SUMMARY on a public repository, matching the diagnostic report's convention.
@@ -332,14 +340,25 @@ def _source_health_markdown(records: Sequence[SourceHealth]) -> str:
         _source_health_row(record) for record in records
     ):
         marker = "⚠️ " if failures >= 3 else ""
-        lines.append(f"| {marker}{source_id} | {classification} | {failures} | {last_success} |")
+        lines.append(
+            f"| {marker}{_markdown_cell(source_id)} | {_markdown_cell(classification)} "
+            f"| {failures} | {last_success} |"
+        )
     return "\n".join(lines)
 
 
 def _source_health(state_path: Path, output_format: str) -> int:
-    """Always exits 0: a report surfaces Source health, it does not gate the Edition."""
+    """Always exits 0: a report surfaces Source health, it does not gate the Edition.
 
-    records = read_source_health(state_path)
+    That promise has to survive a corrupt file too — the workflow step runs under
+    ``set -e`` after a delivered Edition, and a report must never turn that delivery red.
+    """
+
+    try:
+        records = read_source_health(state_path)
+    except (sqlite3.Error, OSError, ValueError):
+        print("Source health could not be read; the Edition is unaffected.")
+        return 0
     if not records:
         print("No Source health has been recorded yet.")
         return 0
