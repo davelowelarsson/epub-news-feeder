@@ -98,6 +98,19 @@ def _item(*, title: str, slug: str, body_words: list[str], pub_date: str) -> str
     )
 
 
+def _teaser_item(*, title: str, slug: str, body_words: list[str], pub_date: str) -> str:
+    """No trailing full stop: a paywall teaser's last paragraph stops mid-sentence."""
+
+    body = " ".join(body_words)
+    return (
+        f"<item><title>{title}</title>"
+        f"<link>https://publisher.example/reports/{slug}</link>"
+        f"<guid>{slug}</guid><author>A. Reporter</author>"
+        f"<pubDate>{pub_date}</pubDate>"
+        f"<content:encoded><![CDATA[<p>{body}</p>]]></content:encoded></item>"
+    )
+
+
 def _epub_text(epub_path: Path) -> str:
     with zipfile.ZipFile(epub_path) as archive:
         return "".join(
@@ -520,3 +533,105 @@ publications:
     rendered = _epub_text(result.receipt.path)
     assert "Viss rapportering från Trasig Källa var inte tillgänglig" in rendered
     assert "Some reporting from" not in rendered
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_paywall_teaser_fills_the_briefing_roll_and_never_returns(tmp_path: Path) -> None:
+    """Observed live: a Special Nest page under 200 words stopped mid-word - "...har Philip
+    Lindersten, som ar grundare av och verksamh". It cleared the 80-word full-body minimum
+    and was delivered as a complete Article, spending an Article Slot on a paywalled stub.
+    Demoted to a Publisher Link Brief, it fills the Briefing Roll instead, and the existing
+    brief_deliveries suppression keeps it from spending a slot again the next morning."""
+
+    teaser_words = [f"stub-{index}" for index in range(100)]
+    full_words = [f"full-{index}" for index in range(150)]
+    holder = {
+        "xml": _feed(
+            _teaser_item(
+                title="Teaser report",
+                slug="teaser",
+                body_words=teaser_words,
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            )
+            + _item(
+                title="Full report",
+                slug="full",
+                body_words=full_words,
+                pub_date="Wed, 19 Aug 2026 07:00:00 GMT",
+            )
+        )
+    }
+    with _mutable_feed_server(holder) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    max_briefs: 6
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        first = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260820T040000Z-TEASERAA",
+            generated_at=datetime(2026, 8, 20, 4, tzinfo=UTC),
+        )
+
+        # The teaser is still in the feed, unchanged, so this exercises brief_deliveries
+        # suppression rather than the teaser simply falling out of the feed. An unchanged
+        # article is not eligible again, so a fresh unrelated report keeps the second run
+        # above its own publication minimum - exactly what would happen on a real morning.
+        holder["xml"] = _feed(
+            _teaser_item(
+                title="Teaser report",
+                slug="teaser",
+                body_words=teaser_words,
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            )
+            + _item(
+                title="An unrelated fresh report",
+                slug="unrelated",
+                body_words=[f"other-{index}" for index in range(90)],
+                pub_date="Thu, 20 Aug 2026 06:00:00 GMT",
+            )
+        )
+        second = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260821T040000Z-TEASERBB",
+            generated_at=datetime(2026, 8, 21, 4, tzinfo=UTC),
+        )
+
+    assert first.article_count == 1
+    assert first.brief_count == 1
+    rendered = _epub_text(first.receipt.path)
+    assert "Full report" in rendered
+    assert "full-5" in rendered
+    assert "Teaser report" in rendered
+    assert "stub-5" not in rendered
+
+    # Delivered once, the teaser's Brief is suppressed permanently rather than
+    # re-spending a Briefing Roll slot every morning.
+    assert second.brief_count == 0

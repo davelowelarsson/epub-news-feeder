@@ -81,7 +81,7 @@ class FakeDriveClient:
 
 
 class _FixtureHandler(BaseHTTPRequestHandler):
-    body = " ".join(f"complete-journalism-{index}" for index in range(180))
+    body = " ".join(f"complete-journalism-{index}" for index in range(180)) + "."
 
     def do_GET(self) -> None:
         if self.path == "/robots.txt":
