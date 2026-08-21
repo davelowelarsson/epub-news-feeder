@@ -243,8 +243,8 @@ Allow: /private/public-*.xml$
 @pytest.mark.acceptance
 def test_ticket_05_feed_page_and_metadata_routes_never_use_previews_as_articles() -> None:
     now = datetime(2026, 8, 9, tzinfo=UTC)
-    full_text = " ".join(f"verified-word-{index}" for index in range(160))
-    page_text = " ".join(f"page-word-{index}" for index in range(160))
+    full_text = " ".join(f"verified-word-{index}" for index in range(160)) + "."
+    page_text = " ".join(f"page-word-{index}" for index in range(160)) + "."
     full_feed = f"""<?xml version="1.0"?>
 <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel><title>Full</title><item>
@@ -467,7 +467,7 @@ def test_auto_route_rejects_a_feed_teaser_and_fetches_the_complete_page() -> Non
     now = datetime(2026, 8, 9, tzinfo=UTC)
     teaser = " ".join(f"teaser-{index}" for index in range(100))
     first = " ".join(f"complete-first-{index}" for index in range(80))
-    second = " ".join(f"complete-second-{index}" for index in range(80))
+    second = " ".join(f"complete-second-{index}" for index in range(80)) + "."
     feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
     <channel><title>Auto</title><item><title>Complete report</title>
     <link>REPLACE/article</link><guid>auto-1</guid>
@@ -515,7 +515,7 @@ def test_auto_route_rejects_a_feed_teaser_and_fetches_the_complete_page() -> Non
 def test_web_page_body_stays_byte_identical_to_paragraph_only_extraction() -> None:
     now = datetime(2026, 8, 9, tzinfo=UTC)
     first = " ".join(f"page-first-{index}" for index in range(80))
-    second = " ".join(f"page-second-{index}" for index in range(80))
+    second = " ".join(f"page-second-{index}" for index in range(80)) + "."
     with fixture_site(
         {
             "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
@@ -1173,3 +1173,199 @@ def test_a_sponsored_byline_is_not_an_article() -> None:
     assert outcome.code == "SOURCE_PARTIAL"
     assert [article.title for article in outcome.articles] == ["A real report"]
     assert outcome.omitted == 1
+
+
+def test_a_body_cut_mid_sentence_is_demoted_to_a_teaser_link() -> None:
+    """Observed live: a Special Nest page under 200 words ended "...har Philip Lindersten,
+    som ar grundare av och verksamh" - cut mid-word. It cleared the 80-word full-body minimum
+    and was delivered as a complete Article, spending an Article Slot on a paywalled stub."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    teaser = " ".join(f"word-{index}" for index in range(120))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Special Nest</title><item><title>Paywalled report</title>
+    <link>https://publisher.example/paywalled</link><guid>teaser-1</guid>
+    <content:encoded><![CDATA[<p>{teaser}</p>]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="teaser",
+                publisher_id="publisher.example",
+                title="Special Nest",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].classification == "teaser_link"
+    assert outcome.articles[0].body is None
+    assert outcome.articles[0].blocks == ()
+    assert outcome.articles[0].title == "Paywalled report"
+
+
+def test_a_body_ending_with_a_full_stop_stays_a_full_article() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    complete = " ".join(f"word-{index}" for index in range(149)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Complete</title><item><title>Complete report</title>
+    <link>https://publisher.example/complete</link><guid>complete-1</guid>
+    <content:encoded><![CDATA[<p>{complete}</p>]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="complete",
+                publisher_id="publisher.example",
+                title="Complete",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].classification == "verified_feed_body"
+    assert outcome.articles[0].body == complete
+
+
+def test_a_mid_sentence_cut_from_a_source_that_allows_short_bodies_stays_short_as_published() -> (
+    None
+):
+    """allow_short_as_published means the operator already accepted short items from this
+    Source; the teaser rule must not override that explicit acceptance."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    stub = " ".join(f"word-{index}" for index in range(30))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Short</title><item><title>Short report</title>
+    <link>https://publisher.example/short</link><guid>short-1</guid>
+    <content:encoded><![CDATA[<p>{stub}</p>]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="short",
+                publisher_id="publisher.example",
+                title="Short",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+                allow_short_as_published=True,
+            )
+        )
+
+    assert outcome.articles[0].classification == "short_as_published"
+    assert outcome.articles[0].body == stub
+
+
+def test_a_body_ending_in_a_how_to_list_is_never_demoted_as_a_teaser() -> None:
+    """A list or code block is a shape rendering already decided survives; a mid-sentence
+    cut only happens to prose, so a body that ends in a list must not be demoted."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>How-to</title><item><title>How-to report</title>
+    <link>https://publisher.example/how-to</link><guid>how-to-1</guid>
+    <content:encoded><![CDATA[
+      <p>{prose}</p>
+      <ol><li>Do the first step of the routine.</li>
+      <li>Do the second step of the routine.</li></ol>
+    ]]></content:encoded></item></channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="how-to",
+                publisher_id="publisher.example",
+                title="How-to",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles[0].classification == "verified_feed_body"
+    assert outcome.articles[0].blocks[-1].kind == "list"
+
+
+def test_a_teaser_and_boilerplate_stripping_do_not_collide() -> None:
+    """_strip_feedwide_boilerplate runs after every article is classified, including a
+    teaser demoted to body=None; it must skip that article rather than treat its empty
+    block set as ordinary furniture-free content."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    advert = (
+        "Prevent incidents due to slow investigations. Power your Tier 1 with threat "
+        "intelligence: Integrate TI Lookup in your SOC."
+    )
+    teaser = " ".join(f"word-{index}" for index in range(120))
+    items = []
+    for index in range(3):
+        prose = " ".join(f"unique-{index}-{word}" for word in range(90)) + "."
+        items.append(
+            f"<item><title>Report {index}</title>"
+            f"<link>https://publisher.example/report-{index}</link>"
+            f"<guid>collide-{index}</guid>"
+            f"<content:encoded><![CDATA[<p>{prose}</p><p>{advert}</p>]]></content:encoded>"
+            f"</item>"
+        )
+    items.append(
+        f"<item><title>Paywalled report</title>"
+        f"<link>https://publisher.example/paywalled</link>"
+        f"<guid>collide-teaser</guid>"
+        f"<content:encoded><![CDATA[<p>{teaser}</p>]]></content:encoded></item>"
+    )
+    feed = (
+        '<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+        f"<channel><title>Collide</title>{''.join(items)}</channel></rss>"
+    ).encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="collide",
+                publisher_id="publisher.example",
+                title="Collide",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    teaser_articles = [
+        article for article in outcome.articles if article.title == "Paywalled report"
+    ]
+    assert len(teaser_articles) == 1
+    assert teaser_articles[0].classification == "teaser_link"
+    assert teaser_articles[0].body is None
+    for article in outcome.articles:
+        if article.title != "Paywalled report":
+            assert article.body is not None
+            assert "Integrate TI Lookup" not in article.body

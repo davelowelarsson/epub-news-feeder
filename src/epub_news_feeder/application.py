@@ -459,10 +459,14 @@ def _run(
                 notes.append(_note(publication.language, "unavailable", title=source.title))
             for acquired in outcome.articles:
                 if acquired.body is None:
-                    # A body-free item only ever reaches here from a metadata_only Source, so a
-                    # Brief stays a rights outcome and never becomes a failure outcome. Identity
-                    # is the durable, body-free brief_id: it is also the in-run element id, so
-                    # there is one identity rather than two.
+                    # A body-free item reaches here two ways: a metadata_only Source that never
+                    # asked for a body, or a teaser acquisition demoted after the full body route
+                    # resolved to a paywalled stub. Either way a Brief stays a rights outcome and
+                    # never becomes a failure outcome - a headline and its publisher route is
+                    # strictly less than the full-text retention the Source's evidence already
+                    # allows, so demoting to a Brief never exceeds what that evidence permits.
+                    # Identity is the durable, body-free brief_id: it is also the in-run element
+                    # id, so there is one identity rather than two.
                     brief_id = durable_brief_id(acquired.canonical_url)
                     briefs[brief_id] = _BriefRecord(
                         brief=BriefInput(

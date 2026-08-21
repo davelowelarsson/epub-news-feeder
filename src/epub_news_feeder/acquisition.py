@@ -421,6 +421,32 @@ def _strip_feedwide_boilerplate(
     return kept, omitted
 
 
+_TEASER_MAXIMUM_WORDS = 200
+# A complete sentence ends with one of these; anything else after stripping _CLOSING_MARKS
+# is a cut, not an ending.
+_TERMINAL_MARKS = ".!?…"
+
+
+def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
+    """A short body whose last paragraph stops mid-sentence is a paywall teaser, not an Article.
+
+    Observed live: a Special Nest page under 200 words ended "...har Philip Lindersten, som
+    ar grundare av och verksamh" - cut mid-word. It cleared the 80-word full-body minimum and
+    was delivered as a complete Article, spending an Article Slot on something that was not
+    readable journalism.
+
+    A body ending in a list or code block is exempt: rendering already decided that shape
+    survives, and a mid-sentence cut only happens to prose. A headline plus the publisher
+    route is an honest description of what the Source's evidence allows; a stub pretending to
+    be a finished Article is not.
+    """
+
+    if word_count >= _TEASER_MAXIMUM_WORDS or not blocks or blocks[-1].kind != "paragraph":
+        return False
+    trimmed = blocks[-1].text.rstrip(_CLOSING_MARKS)
+    return not trimmed or trimmed[-1] not in _TERMINAL_MARKS
+
+
 def _decoded_feed(payload: bytes) -> str | bytes:
     """Decode a feed as UTF-8, degrading one bad byte rather than the whole document.
 
@@ -828,6 +854,25 @@ class SourceClient:
             link_url = page.url
         if body is None or classification is None:
             return None
+        # Applied only once the body route is fully resolved - after the AUTO-mode web
+        # fallback, on whatever body won - because a feed teaser that AUTO rejects for a
+        # complete page must not be judged on the teaser it never kept.
+        if not request.allow_short_as_published and _is_teaser(blocks, len(body.split())):
+            return AcquiredArticle(
+                request.source_id,
+                request.publisher_id,
+                request.title,
+                guid,
+                title,
+                author,
+                str(link_url),
+                published,
+                categories,
+                language,
+                None,
+                (),
+                "teaser_link",
+            )
         return AcquiredArticle(
             request.source_id,
             request.publisher_id,

@@ -54,7 +54,7 @@ def test_editorial_evidence_is_batched_by_article_language() -> None:
 
 
 class EditionFixtureHandler(BaseHTTPRequestHandler):
-    body = " ".join(f"complete-journalism-{index}" for index in range(180))
+    body = " ".join(f"complete-journalism-{index}" for index in range(180)) + "."
     hits: ClassVar[list[str]] = []
 
     def do_GET(self) -> None:
@@ -89,7 +89,7 @@ class EditionFixtureHandler(BaseHTTPRequestHandler):
 
 
 class MixedEditionFixtureHandler(BaseHTTPRequestHandler):
-    body = " ".join(f"verified-report-{index}" for index in range(180))
+    body = " ".join(f"verified-report-{index}" for index in range(180)) + "."
 
     def do_GET(self) -> None:
         if self.path == "/robots.txt":
@@ -1154,8 +1154,8 @@ publications:
 class RemoteEditorialFixtureHandler(BaseHTTPRequestHandler):
     """Two full-text publishers whose bodies are distinguishable by a single token."""
 
-    granted_body = " ".join(f"granted-token-{index}" for index in range(180))
-    withheld_body = " ".join(f"withheld-token-{index}" for index in range(180))
+    granted_body = " ".join(f"granted-token-{index}" for index in range(180)) + "."
+    withheld_body = " ".join(f"withheld-token-{index}" for index in range(180)) + "."
 
     def do_GET(self) -> None:
         if self.path == "/robots.txt":
