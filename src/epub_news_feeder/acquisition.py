@@ -924,6 +924,11 @@ class SourceClient:
         page = self._page_body(request, link_url, publisher_origins, loopback_origin)
         if page is None:
             return None
+        # A publisher can close its paywall between the Near Miss and the recovery, turning
+        # the page into a mid-sentence stub. The feed route demotes that shape to a Brief;
+        # a week-old headline is not worth a Brief, so recovery simply skips it.
+        if not request.allow_short_as_published and _is_teaser(page.blocks, len(page.body.split())):
+            return None
         title, published = _page_metadata(page.document)
         if title is None:
             return None

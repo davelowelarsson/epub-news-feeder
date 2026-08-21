@@ -408,6 +408,30 @@ def test_acquire_article_returns_the_page_as_an_ordinary_article(tmp_path: Path)
     assert acquired.classification == "verified_page_body"
 
 
+def test_acquire_article_skips_a_page_that_has_become_a_teaser(tmp_path: Path) -> None:
+    """A publisher can close the paywall between Monday's near miss and Saturday's
+    recovery. The page then yields a mid-sentence stub — the very shape teaser demotion
+    exists to keep out of Article Slots — so recovery skips it rather than delivering it."""
+
+    now = datetime(2026, 8, 15, 6, tzinfo=UTC)
+    hits: list[str] = []
+    stub = " ".join(f"teaser-{index}" for index in range(120))
+    page = {
+        "/reports/miss": (
+            "<html><head><title>A paywalled report</title></head>"
+            f"<body><article><p>{stub}</p></article></body></html>"
+        )
+    }
+    with _publisher_site(page, hits) as server:
+        client = SourceClient(now=lambda: now)
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/reports/miss"
+            acquired = client.acquire_article(_request(server, now), url)
+        finally:
+            client.close()
+    assert acquired is None
+
+
 # --------------------------------------------------------------------------- pipeline
 
 
