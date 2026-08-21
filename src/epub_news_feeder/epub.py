@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
@@ -1012,6 +1013,30 @@ def _add_pointer(
     )
 
 
+# An email address or a bare UUID is feed plumbing, not a byline. The address is also
+# personal data the Edition has no need to carry.
+_EMAIL_AUTHOR = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_UUID_AUTHOR = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+
+
+def _presentable_author(author: str | None, source_name: str) -> str | None:
+    """The author name a reader can use, or None when the publisher supplied plumbing.
+
+    Observed live: bylines rendered as an email address, as a raw UUID, and as the source's
+    own name repeated directly above the source line. Each falls back to the honest
+    byline-missing label rather than being dressed up as attribution.
+    """
+
+    if author is None:
+        return None
+    candidate = author.strip()
+    if not candidate or candidate.casefold() == source_name.strip().casefold():
+        return None
+    if _EMAIL_AUTHOR.match(candidate) or _UUID_AUTHOR.match(candidate):
+        return None
+    return candidate
+
+
 def _add_publisher_metadata(
     parent: etree._Element,
     *,
@@ -1020,10 +1045,11 @@ def _add_publisher_metadata(
     published_at: str | None,
     language: str,
 ) -> None:
+    presentable = _presentable_author(author, source_name)
     byline = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "byline"})
     byline.text = (
-        _localized(language, "byline", author=author)
-        if author
+        _localized(language, "byline", author=presentable)
+        if presentable
         else _localized(language, "byline_missing")
     )
     source = etree.SubElement(parent, f"{{{_XHTML_NS}}}p", attrib={"class": "source"})

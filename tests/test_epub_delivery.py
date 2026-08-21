@@ -93,6 +93,37 @@ def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
         assert section.xpath("//*[local-name()='a']/@href") == ["https://example.test/articles/1"]
 
 
+def test_a_byline_that_is_not_a_person_falls_back_to_the_missing_label() -> None:
+    """Observed live: bylines rendered as "Av tomas@specialnest.se", as a raw UUID, and as
+    the source's own name repeated under the source line. None of those attribute anything
+    a reader can use, and the address is personal data the Edition has no need to carry."""
+
+    base = _edition().sections[0].articles[0]
+    articles = tuple(
+        replace(base, identifier=f"article-{index}", author=author)
+        for index, author in enumerate(
+            (
+                "tomas@specialnest.se",
+                "cb482791-4ef1-4762-96ad-b0c1de1eb0f1",
+                "Example News",
+                "A. Reporter",
+            )
+        )
+    )
+    edition = replace(_edition(), sections=(replace(_edition().sections[0], articles=articles),))
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
+        section = etree.fromstring(archive.read(section_path))
+    rendered = " ".join(text for text in section.itertext() if isinstance(text, str))
+
+    assert "tomas@specialnest.se" not in rendered
+    assert "cb482791" not in rendered
+    assert "By Example News" not in rendered
+    assert "By A. Reporter" in rendered
+    assert rendered.count("Byline: Not supplied by publisher") == 3
+
+
 def test_verified_editorial_summary_is_labeled_and_cited() -> None:
     article = replace(
         _edition().sections[0].articles[0],

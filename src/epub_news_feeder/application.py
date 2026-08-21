@@ -422,9 +422,7 @@ def _run(
                     source_id, attempted_at=generated_at, succeeded=False, classification=code
                 )
                 diagnostics.emit(code, phase="acquisition", source_id=source_id)
-                notes.append(
-                    _note(publication.language, "evidence_missing", title=source.title)
-                )
+                notes.append(_note(publication.language, "evidence_missing", title=source.title))
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility

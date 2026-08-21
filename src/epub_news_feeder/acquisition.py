@@ -272,8 +272,10 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
     while index < len(blocks):
         block = blocks[index]
         if block.kind != "list":
-            if not _is_bare_label(block) and not _is_credit_line(block) and not (
-                block.kind == "paragraph" and _WORDPRESS_TRAILER.match(block.text)
+            if (
+                not _is_bare_label(block)
+                and not _is_credit_line(block)
+                and not (block.kind == "paragraph" and _WORDPRESS_TRAILER.match(block.text))
             ):
                 kept.append(block)
                 seen_prose = True
@@ -352,18 +354,14 @@ def _strip_feedwide_boilerplate(
     for article in articles:
         for text in {block.text for block in article.blocks}:
             counts[text] = counts.get(text, 0) + 1
-    boilerplate = {
-        text for text, count in counts.items() if count >= _MINIMUM_BOILERPLATE_ARTICLES
-    }
+    boilerplate = {text for text, count in counts.items() if count >= _MINIMUM_BOILERPLATE_ARTICLES}
     if not boilerplate:
         return articles, 0
 
     kept: list[AcquiredArticle] = []
     omitted = 0
     for article in articles:
-        if article.body is None or not any(
-            block.text in boilerplate for block in article.blocks
-        ):
+        if article.body is None or not any(block.text in boilerplate for block in article.blocks):
             kept.append(article)
             continue
         blocks = tuple(block for block in article.blocks if block.text not in boilerplate)

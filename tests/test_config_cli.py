@@ -556,8 +556,9 @@ def test_the_weekly_completes_the_week_instead_of_reprinting_it() -> None:
 
     Without `reads_history_from` the Saturday Edition is a sixth daily built from the same feeds:
     per-Publication suppression means it would carry precisely the reading the weekdays already
-    delivered. The reference must also stay one-directional, or the daily starts suppressing
-    against Saturday and the weekday Editions change for a reason nobody asked for.
+    delivered. The reference is mutual: the first delivered week showed Monday through Wednesday
+    reprinting what Saturday had carried, because the daily had no idea it was delivered. One
+    reader reads both Editions, so each suppresses against the other.
     """
 
     configuration = load_config(REALITY_CHECK_CONFIG)
@@ -566,7 +567,7 @@ def test_the_weekly_completes_the_week_instead_of_reprinting_it() -> None:
     daily = publications["daily"]
 
     assert weekly.reads_history_from == ["daily"]
-    assert daily.reads_history_from == [], "the daily must not know the weekly exists"
+    assert daily.reads_history_from == ["weekly"], "one reader reads both Editions"
 
     # A weekly at the daily's Budget would report the week in fifteen Articles it is forbidden
     # from carrying. Whatever the numbers become, the weekly's has to be the larger.
