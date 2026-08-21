@@ -12,7 +12,7 @@ import pytest
 
 from epub_news_feeder.application import DriveTarget, RetryableGenerationError, generate_edition
 from epub_news_feeder.config import load_config
-from epub_news_feeder.drive import DriveError, DriveFile
+from epub_news_feeder.drive import DriveError, DriveFile, DriveFolderEntry
 from epub_news_feeder.models import Configuration
 
 
@@ -65,6 +65,15 @@ class FakeDriveClient:
             if existing_id == file_id:
                 return content
         raise KeyError(file_id)
+
+    def list_folder(self, *, folder_id: str) -> tuple[DriveFolderEntry, ...]:
+        return tuple(
+            DriveFolderEntry(file_id=existing_id, name=filename)
+            for filename, (existing_id, _content) in self.files.items()
+        )
+
+    def move(self, *, file_id: str, from_folder_id: str, to_folder_id: str) -> str:
+        return file_id
 
 
 class _FixtureHandler(BaseHTTPRequestHandler):

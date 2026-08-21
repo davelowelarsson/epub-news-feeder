@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import date, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
@@ -76,6 +78,12 @@ _OAUTH_ERROR_IDENTIFIERS = frozenset(
 # Beyond this, an operator-supplied Retry-After is ignored: honouring a ten-minute hint would
 # spend the Edition's whole delivery margin waiting.
 _MAXIMUM_RETRY_AFTER_SECONDS = 30.0
+
+# The shape a filename has to have for the pipeline to recognize it as one of its own editions:
+# an ISO date, the slug produced for the Edition, and the base32 identifier that makes the name
+# unique. Anything else in the delivery folder — a state tarball, a legacy run's filename — was
+# not named by this shape and so is not this function's property to move.
+_EDITION_FILENAME = re.compile(r"^(\d{4}-\d{2}-\d{2})-[a-z0-9-]+-[A-Z2-7]{8}\.epub$")
 
 
 class DriveError(Exception):
@@ -155,6 +163,14 @@ class DriveFile:
     sha256: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class DriveFolderEntry:
+    """One entry of a Drive folder listing: just enough to decide what to do with it."""
+
+    file_id: str
+    name: str
+
+
 class DriveClient(Protocol):
     """Injected boundary implemented by a concrete Drive HTTP adapter."""
 
@@ -172,6 +188,10 @@ class DriveClient(Protocol):
     def update(self, *, file_id: str, content: bytes, content_type: str) -> str: ...
 
     def download(self, *, file_id: str) -> bytes: ...
+
+    def list_folder(self, *, folder_id: str) -> tuple[DriveFolderEntry, ...]: ...
+
+    def move(self, *, file_id: str, from_folder_id: str, to_folder_id: str) -> str: ...
 
 
 def credentials_from_environment(env: Mapping[str, str] | None = None) -> DriveCredentials:
@@ -318,6 +338,81 @@ class HttpDriveClient:
         )
         return response.content
 
+    def list_folder(self, *, folder_id: str) -> tuple[DriveFolderEntry, ...]:
+        """List every non-trashed entry of one folder, in name order, across all pages.
+
+        Read-only and idempotent, so every page fetch is replayable. Entries are validated as
+        strictly as ``find_file`` validates its own response: a listing Drive housekeeping will
+        act on is not a place to guess a missing id or name, so a malformed entry raises rather
+        than being silently skipped.
+        """
+
+        query = f"'{_escape(folder_id)}' in parents and trashed = false"
+        entries: list[DriveFolderEntry] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, str | int] = {
+                "q": query,
+                "fields": "nextPageToken,files(id,name)",
+                "orderBy": "name",
+                "pageSize": 100,
+            }
+            if page_token is not None:
+                params["pageToken"] = page_token
+
+            # ``page_params`` is bound as a default argument, evaluated once at def time rather
+            # than looked up from the loop when the closure runs, so this is safe to rebuild on
+            # every page even though _authorized may call it more than once per page.
+            def build(
+                client: httpx.Client, token: str, page_params: dict[str, str | int] = params
+            ) -> httpx.Response:
+                return client.get("/drive/v3/files", params=page_params, headers=_bearer(token))
+
+            response = self._authorized(
+                build,
+                failure="Drive folder listing failed",
+                replayable=True,
+            )
+            payload = _decode(response, failure="Drive folder listing failed")
+            files = payload.get("files") if isinstance(payload, dict) else None
+            if not isinstance(files, list):
+                raise DriveError("Drive folder listing returned an invalid entry")
+            for item in files:
+                entries.append(_folder_entry(item))
+            next_token = payload.get("nextPageToken")
+            if not isinstance(next_token, str) or not next_token:
+                break
+            page_token = next_token
+        return tuple(entries)
+
+    def move(self, *, file_id: str, from_folder_id: str, to_folder_id: str) -> str:
+        """Relocate one file between folders by editing its parents, never its content.
+
+        Replayable: adding a parent the file already has, and removing a parent it no longer
+        has, are both no-ops at Drive. A replay of an identical request lands on the same final
+        parent set as the first attempt, unlike upload where a replay could create a second file.
+        """
+
+        response = self._authorized(
+            lambda client, token: client.patch(
+                f"/drive/v3/files/{file_id}",
+                params={
+                    "addParents": to_folder_id,
+                    "removeParents": from_folder_id,
+                    "fields": "id",
+                },
+                headers={**_bearer(token), "Content-Type": "application/json"},
+                content=b"{}",
+            ),
+            failure="Drive move failed",
+            replayable=True,
+        )
+        payload = _decode(response, failure="Drive move failed")
+        returned_id = payload.get("id") if isinstance(payload, dict) else None
+        if not isinstance(returned_id, str) or not returned_id:
+            raise DriveError("Drive move returned no file id")
+        return returned_id
+
     def _authorized(
         self,
         build: Callable[[httpx.Client, str], httpx.Response],
@@ -426,6 +521,20 @@ class HttpDriveClient:
         return httpx.Client(
             base_url=_DRIVE_API, timeout=self._timeout, transport=self._transport, trust_env=False
         )
+
+
+def _folder_entry(item: object) -> DriveFolderEntry:
+    """Validate one ``files()`` list entry as strictly as ``find_file`` validates its own."""
+
+    if not isinstance(item, dict):
+        raise DriveError("Drive folder listing returned an invalid entry")
+    file_id = item.get("id")
+    name = item.get("name")
+    if not isinstance(file_id, str) or not file_id:
+        raise DriveError("Drive folder listing returned an invalid entry")
+    if not isinstance(name, str) or not name:
+        raise DriveError("Drive folder listing returned an invalid entry")
+    return DriveFolderEntry(file_id=file_id, name=name)
 
 
 def _decode(response: httpx.Response, *, failure: str) -> Mapping[str, object]:
@@ -590,3 +699,50 @@ def deliver_drive(
         )
     file_id = client.upload(folder_id=folder_id, filename=filename, content=epub_bytes)
     return DeliveryReceipt(path=Path(file_id), sha256=expected_digest, size_bytes=len(epub_bytes))
+
+
+def archive_due_editions(
+    *,
+    client: DriveClient,
+    delivery_folder_id: str,
+    archive_folder_id: str,
+    generated_at_date: date,
+    retention_days: int = 7,
+) -> tuple[str, ...]:
+    """Move editions older than the retention window out of the delivery folder.
+
+    The delivery folder is read by eye and by a Kobo, so this only moves what the pipeline
+    itself named: an entry counts as an edition only when its name has the exact shape this
+    pipeline produces (an ISO date, the Edition's slug, the base32 identifier) and that date
+    component parses as a real calendar date. A state tarball, a legacy run's filename, or a
+    date-shaped string that is not actually a date is left exactly where it is — none of those
+    are this function's property to move, and guessing would risk moving something a person or
+    the Kobo still expects to find in the delivery folder.
+
+    An edition is due once its date is strictly older than ``generated_at_date`` minus
+    ``retention_days``; the boundary date itself is kept one more day. Archiving is a move, never
+    a delete, so a housekeeping mistake is always recoverable from the archive folder.
+
+    Raises whatever ``DriveError`` a listing or a move raises: this function does not decide
+    whether a failed archive pass should fail the run, that is the caller's call to make.
+    """
+
+    cutoff = generated_at_date - timedelta(days=retention_days)
+    archived: list[str] = []
+    for entry in client.list_folder(folder_id=delivery_folder_id):
+        match = _EDITION_FILENAME.match(entry.name)
+        if match is None:
+            continue
+        try:
+            file_date = date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if file_date >= cutoff:
+            continue
+        client.move(
+            file_id=entry.file_id,
+            from_folder_id=delivery_folder_id,
+            to_folder_id=archive_folder_id,
+        )
+        archived.append(entry.name)
+    return tuple(sorted(archived))
