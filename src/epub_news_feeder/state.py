@@ -1019,6 +1019,36 @@ class StateStore:
         ).fetchall()
         return frozenset(str(row["article_id"]) for row in rows)
 
+    def recent_deliveries_by_title(
+        self, publication_ids: Iterable[str], *, since: datetime
+    ) -> dict[tuple[str, str], set[str]]:
+        """Delivered Article identities since *since*, keyed by publisher and normalized title.
+
+        Exists for republished-title suppression: a publisher re-issuing a delivered story at
+        a new URL creates a new identity, so identity-based history suppression cannot see it.
+        Titles come from ``articles``, which tracks the latest observed title — good enough,
+        because a republication carries the headline it wants recognized by.
+        """
+
+        identifiers = tuple(dict.fromkeys(publication_ids))
+        if not identifiers:
+            return {}
+        placeholders = ",".join("?" * len(identifiers))
+        rows = self.connection.execute(
+            f"""
+            SELECT DISTINCT a.article_id, a.publisher_id, a.title
+            FROM deliveries d
+            JOIN articles a ON a.article_id = d.article_id
+            WHERE d.publication_id IN ({placeholders}) AND d.delivered_at >= ?
+            """,
+            (*identifiers, since.isoformat()),
+        ).fetchall()
+        delivered: dict[tuple[str, str], set[str]] = {}
+        for row in rows:
+            story = (str(row["publisher_id"]), normalize_text(str(row["title"])).casefold())
+            delivered.setdefault(story, set()).add(str(row["article_id"]))
+        return delivered
+
     def cluster_recurrence(
         self, publication_ids: Iterable[str], *, since: datetime | None = None
     ) -> dict[str, int]:

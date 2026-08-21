@@ -37,13 +37,15 @@ _EVIDENCE = """
 
 
 @contextmanager
-def _feed_server(feed_xml: str) -> Iterator[ThreadingHTTPServer]:
+def _mutable_feed_server(holder: dict[str, str]) -> Iterator[ThreadingHTTPServer]:
+    """Serve ``holder["xml"]`` as the feed, so one test can change it between runs."""
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path == "/robots.txt":
                 payload, status = b"User-agent: *\nAllow: /\n", 200
             elif self.path == "/feed.xml":
-                payload, status = feed_xml.encode(), 200
+                payload, status = holder["xml"].encode(), 200
             else:
                 payload, status = b"not found", 404
             self.send_response(status)
@@ -63,6 +65,12 @@ def _feed_server(feed_xml: str) -> Iterator[ThreadingHTTPServer]:
         server.shutdown()
         thread.join()
         server.server_close()
+
+
+@contextmanager
+def _feed_server(feed_xml: str) -> Iterator[ThreadingHTTPServer]:
+    with _mutable_feed_server({"xml": feed_xml}) as server:
+        yield server
 
 
 def _configuration(tmp_path: Path, yaml_text: str) -> Configuration:
@@ -167,6 +175,222 @@ publications:
     assert "longer-5" in rendered, "the fuller body must be the survivor"
     assert "shorter-5" not in rendered
     assert "ARTICLE_TITLE_TWIN_SUPPRESSED" in _diagnostic_codes(tmp_path / "diagnostics")
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_recurring_column_reusing_its_title_is_not_a_twin(tmp_path: Path) -> None:
+    """A weekly column publishes under the same headline every time. Two same-title
+    articles a week apart are two columns, not one story at two URLs."""
+
+    title = "Veckans pass"
+    feed_xml = _feed(
+        _item(
+            title=title,
+            slug="veckans-pass-33",
+            body_words=[f"week-one-{index}" for index in range(90)],
+            pub_date="Mon, 10 Aug 2026 06:00:00 GMT",
+        )
+        + _item(
+            title=title,
+            slug="veckans-pass-34",
+            body_words=[f"week-two-{index}" for index in range(90)],
+            pub_date="Mon, 17 Aug 2026 06:00:00 GMT",
+        )
+    )
+    with _feed_server(feed_xml) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260818T040000Z-COLUMNAA",
+            generated_at=datetime(2026, 8, 18, 4, tzinfo=UTC),
+        )
+
+    assert result.article_count == 2
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_story_republished_at_a_new_url_does_not_return_the_next_morning(
+    tmp_path: Path,
+) -> None:
+    """The within-run twin suppression cannot see yesterday: the delivered URL is no longer
+    a candidate, so the republished URL arrives as a singleton. A recently delivered
+    headline from the same publisher under a different identity is the same story."""
+
+    title = "Fyra av tio elever saknar behörighet"
+    holder = {
+        "xml": _feed(
+            _item(
+                title=title,
+                slug="behorighet",
+                body_words=[f"first-{index}" for index in range(90)],
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            )
+        )
+    }
+    with _mutable_feed_server(holder) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260819T040000Z-REPUBAAA",
+            generated_at=datetime(2026, 8, 19, 4, tzinfo=UTC),
+        )
+
+        holder["xml"] = _feed(
+            _item(
+                title=title,
+                slug="behorighet-2",
+                body_words=[f"second-{index}" for index in range(120)],
+                pub_date="Thu, 20 Aug 2026 06:00:00 GMT",
+            )
+            + _item(
+                title="An unrelated fresh report",
+                slug="unrelated",
+                body_words=[f"other-{index}" for index in range(90)],
+                pub_date="Thu, 20 Aug 2026 06:00:00 GMT",
+            )
+        )
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260820T040000Z-REPUBBBB",
+            generated_at=datetime(2026, 8, 20, 4, tzinfo=UTC),
+        )
+
+    assert result.article_count == 1
+    rendered = _epub_text(result.receipt.path)
+    assert "An unrelated fresh report" in rendered
+    assert title not in rendered
+    assert "ARTICLE_REPUBLISHED_TITLE_SUPPRESSED" in _diagnostic_codes(tmp_path / "diagnostics")
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_material_update_of_the_same_url_still_returns(tmp_path: Path) -> None:
+    """The republished-title suppression is about a second identity. A genuine revision of
+    the delivered URL keeps its identity and must keep flowing as an update."""
+
+    title = "En rapport som uppdateras"
+    holder = {
+        "xml": _feed(
+            _item(
+                title=title,
+                slug="uppdateras",
+                body_words=[f"first-{index}" for index in range(200)],
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            )
+        )
+    }
+    with _mutable_feed_server(holder) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260819T040000Z-UPDATAAA",
+            generated_at=datetime(2026, 8, 19, 4, tzinfo=UTC),
+        )
+
+        holder["xml"] = _feed(
+            _item(
+                title=title,
+                slug="uppdateras",
+                body_words=[f"rewritten-{index}" for index in range(200)],
+                pub_date="Thu, 20 Aug 2026 06:00:00 GMT",
+            )
+        )
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260820T040000Z-UPDATBBB",
+            generated_at=datetime(2026, 8, 20, 4, tzinfo=UTC),
+        )
+
+    assert result.article_count == 1
+    rendered = _epub_text(result.receipt.path)
+    assert title in rendered
+    assert "Updated since your previous Edition" in rendered
 
 
 @pytest.mark.acceptance

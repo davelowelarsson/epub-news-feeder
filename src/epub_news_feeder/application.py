@@ -550,6 +550,14 @@ def _run(
         client.close()
 
     _suppress_title_twins(records, source_records, diagnostics)
+    _suppress_recently_delivered_titles(
+        state,
+        records,
+        source_records,
+        (publication.id, *publication.reads_history_from),
+        generated_at,
+        diagnostics,
+    )
 
     # A Brief already delivered is suppressed at candidacy, before it ever reaches selection: a
     # reworded headline on the same report is not new. Every Publication this one reads is asked
@@ -1038,20 +1046,34 @@ def _resume_spooled_delivery(
     )
 
 
+# How close two same-title publications must be to count as one story rather than a
+# recurring column. Two days covers a republish-with-corrections; a weekly column reusing
+# its headline sits a week apart and stays two Articles.
+_TWIN_PROXIMITY = timedelta(days=2)
+
+# How long a delivered headline blocks a same-publisher re-publication under a new URL.
+# Three days, not longer: past that, a reused title is far more likely a recurring column
+# than the same story wearing a fresh address.
+_REPUBLISHED_TITLE_WINDOW = timedelta(days=3)
+
+
 def _suppress_title_twins(
     records: dict[str, _SelectableRecord],
     source_records: dict[str, list[str]],
     diagnostics: Diagnostics,
 ) -> None:
-    """One publisher carrying one headline at two URLs is one story, not two Articles.
+    """One publisher carrying one headline at two nearby URLs is one story, not two Articles.
 
     Observed live: a publisher re-published the same piece at a second URL under another
     byline, and both filled Article Slots in one Section of one Edition. Identity is per
     canonical URL, and the two bodies differed too much for near-duplicate merging, so this
     run's candidate pool is the last place left to notice. The fullest body wins; freshness
-    and then identity break the remaining ties, so the survivor is deterministic. Scoped to
-    one publisher deliberately — two publishers sharing a headline is Story Cluster
-    territory, not an identity question.
+    and then identity break the remaining ties, so the survivor is deterministic.
+
+    Two scope limits, both deliberate: one publisher only, because two publishers sharing a
+    headline is Story Cluster territory rather than an identity question; and publication
+    dates within days of each other, because a recurring column reuses its headline every
+    week and each column is its own journalism.
     """
 
     by_story: dict[tuple[str, str], list[str]] = {}
@@ -1061,28 +1083,83 @@ def _suppress_title_twins(
     for twins in by_story.values():
         if len(twins) < 2:
             continue
-        kept = max(
-            twins,
-            key=lambda article_id: (
-                len(records[article_id].article.body.split()),
-                records[article_id].published_at,
-                article_id,
-            ),
+        ordered = sorted(
+            twins, key=lambda article_id: (records[article_id].published_at, article_id)
         )
-        for article_id in twins:
-            if article_id == kept:
+        clusters: list[list[str]] = [[ordered[0]]]
+        for article_id in ordered[1:]:
+            previous = records[clusters[-1][-1]].published_at
+            if records[article_id].published_at - previous <= _TWIN_PROXIMITY:
+                clusters[-1].append(article_id)
+            else:
+                clusters.append([article_id])
+        for cluster in clusters:
+            if len(cluster) < 2:
                 continue
-            record = records.pop(article_id)
-            for candidate_ids in source_records.values():
-                candidate_ids[:] = [
-                    candidate_id for candidate_id in candidate_ids if candidate_id != article_id
-                ]
-            diagnostics.emit(
-                "ARTICLE_TITLE_TWIN_SUPPRESSED",
-                phase="selection",
-                article_id=article_id,
-                source_id=record.source_id,
+            kept = max(
+                cluster,
+                key=lambda article_id: (
+                    len(records[article_id].article.body.split()),
+                    records[article_id].published_at,
+                    article_id,
+                ),
             )
+            for article_id in cluster:
+                if article_id == kept:
+                    continue
+                record = records.pop(article_id)
+                _remove_candidate(source_records, article_id)
+                diagnostics.emit(
+                    "ARTICLE_TITLE_TWIN_SUPPRESSED",
+                    phase="selection",
+                    article_id=article_id,
+                    source_id=record.source_id,
+                )
+
+
+def _suppress_recently_delivered_titles(
+    state: StateStore,
+    records: dict[str, _SelectableRecord],
+    source_records: dict[str, list[str]],
+    publication_ids: tuple[str, ...],
+    generated_at: datetime,
+    diagnostics: Diagnostics,
+) -> None:
+    """A story delivered days ago and re-published at a new URL is not new journalism.
+
+    The within-run twin suppression cannot see yesterday: the delivered URL is no longer a
+    candidate, so the republished URL arrives as a singleton and would sail through both
+    twin suppression and identity-based history suppression. A candidate whose publisher
+    and normalized title match a recent delivery under a *different* identity is that
+    delivery wearing a fresh address. The same identity is deliberately exempt — a material
+    revision of the delivered URL is the update path working as designed.
+    """
+
+    delivered = state.recent_deliveries_by_title(
+        publication_ids, since=generated_at - _REPUBLISHED_TITLE_WINDOW
+    )
+    if not delivered:
+        return
+    for article_id, record in list(records.items()):
+        story = (record.publisher_id, normalize_text(record.article.title).casefold())
+        delivered_ids = delivered.get(story)
+        if not delivered_ids or article_id in delivered_ids:
+            continue
+        del records[article_id]
+        _remove_candidate(source_records, article_id)
+        diagnostics.emit(
+            "ARTICLE_REPUBLISHED_TITLE_SUPPRESSED",
+            phase="selection",
+            article_id=article_id,
+            source_id=record.source_id,
+        )
+
+
+def _remove_candidate(source_records: dict[str, list[str]], article_id: str) -> None:
+    for candidate_ids in source_records.values():
+        candidate_ids[:] = [
+            candidate_id for candidate_id in candidate_ids if candidate_id != article_id
+        ]
 
 
 def _publication(configuration: Configuration, publication_id: str | None) -> Publication:
