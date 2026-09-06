@@ -76,6 +76,7 @@ from epub_news_feeder.selection import (
 from epub_news_feeder.state import (
     ArticleObservation,
     PendingBrief,
+    PendingDelivery,
     StateStore,
     normalize_text,
 )
@@ -713,6 +714,7 @@ def _run(
             )
         )
 
+    rendered_corrections = state.pending_corrections(publication.id)
     edition = EditionInput(
         title=publication.title,
         identifier=edition_id,
@@ -729,7 +731,7 @@ def _run(
                 correction.kind,
                 correction.signaled_at.astimezone(UTC).date().isoformat(),
             )
-            for correction in state.pending_corrections(publication.id)
+            for correction in rendered_corrections
         ),
         briefs=tuple(briefs[item.brief_id].brief for item in selection.selected_briefs),
         editorial_excluded_sources=_editorial_excluded_sources(
@@ -791,6 +793,7 @@ def _run(
             )
             for selected_brief in selected_briefs
         ],
+        corrections=[correction.signal_id for correction in rendered_corrections],
     )
     try:
         receipt = deliver_local(
@@ -813,7 +816,7 @@ def _run(
     with suppress(sqlite3.Error):
         state.acknowledge_corrections(
             publication.id,
-            (correction.signal_id for correction in state.pending_corrections(publication.id)),
+            (correction.signal_id for correction in rendered_corrections),
             delivered_at=generated_at,
         )
         for article_id in selection.unique_article_ids:
@@ -947,16 +950,7 @@ def _resume_spooled_delivery(
                 delivered_at=generated_at,
                 delivery_digest=receipt.sha256,
             )
-            with suppress(sqlite3.Error):
-                for pending_brief in current.briefs:
-                    state.record_brief_delivery(
-                        publication_id=publication.id,
-                        brief_id=pending_brief.brief_id,
-                        source_id=pending_brief.source_id,
-                        published_at=pending_brief.published_at,
-                        delivered_at=generated_at,
-                        run_id=run_id,
-                    )
+            _record_resumed_delivery(state, publication, current, delivered_at=generated_at)
             article_count, publisher_link_count = state.run_item_counts(run_id)
             _, publication_maximum = _publication_limits(publication)
             return GenerationResult(
@@ -985,7 +979,9 @@ def _resume_spooled_delivery(
         )
     if current is None:
         # The prior attempt crashed before its own Brief selection could be staged: nothing
-        # durable records which Briefs it chose, so none are recorded here either.
+        # durable records which Briefs and Correction Notices it rendered, so none are recorded
+        # or acknowledged here either. A Notice re-rendered in the next Edition is a repetition;
+        # one acknowledged unseen would be lost.
         current = state.prepare_delivery(
             run_id=run_id,
             publication_id=publication.id,
@@ -1004,16 +1000,7 @@ def _resume_spooled_delivery(
         raise RetryableGenerationError(
             "DELIVERY_FINALIZATION_PENDING", "Delivered copy awaits State finalization"
         ) from error
-    with suppress(sqlite3.Error):
-        for pending_brief in current.briefs:
-            state.record_brief_delivery(
-                publication_id=publication.id,
-                brief_id=pending_brief.brief_id,
-                source_id=pending_brief.source_id,
-                published_at=pending_brief.published_at,
-                delivered_at=generated_at,
-                run_id=run_id,
-            )
+    _record_resumed_delivery(state, publication, current, delivered_at=generated_at)
     article_count, publisher_link_count = state.run_item_counts(run_id)
     _, publication_maximum = _publication_limits(publication)
     with suppress(OSError):
@@ -1033,6 +1020,37 @@ def _resume_spooled_delivery(
         article_count + publisher_link_count < publication_maximum,
         brief_count=publisher_link_count,
     )
+
+
+def _record_resumed_delivery(
+    state: StateStore,
+    publication: Publication,
+    delivery: PendingDelivery,
+    *,
+    delivered_at: datetime,
+) -> None:
+    """Record what a resumed Edition carried to the reader: its Briefs and Correction Notices.
+
+    Only what the spool itself rendered counts. A Correction Notice signalled after the spool was
+    prepared never reached this Edition, so it stays queued rather than being acknowledged unseen.
+    """
+
+    # Two suppressions, not one: a failed acknowledgement must not also lose the Brief records,
+    # which were independent of correction writes before this helper existed.
+    with suppress(sqlite3.Error):
+        state.acknowledge_corrections(
+            publication.id, delivery.corrections, delivered_at=delivered_at
+        )
+    with suppress(sqlite3.Error):
+        for pending_brief in delivery.briefs:
+            state.record_brief_delivery(
+                publication_id=publication.id,
+                brief_id=pending_brief.brief_id,
+                source_id=pending_brief.source_id,
+                published_at=pending_brief.published_at,
+                delivered_at=delivered_at,
+                run_id=delivery.run_id,
+            )
 
 
 # How close two same-title publications must be to count as one story rather than a

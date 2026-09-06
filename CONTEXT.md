@@ -29,7 +29,7 @@ An external private destination configured to receive an Edition. Its acknowledg
 _Avoid_: State Store, reader
 
 **Pending Delivery**:
-The private durable record that correlates an Edition and Run ID with its intended Delivery Target while handoff is incomplete or awaiting reconciliation.
+The private durable record that correlates an Edition and Run ID with its intended Delivery Target while handoff is incomplete or awaiting reconciliation. It records the Correction Notices that Edition rendered, so a resumed handoff acknowledges exactly those.
 _Avoid_: Upload retry, Article Reservation
 
 **Delivery Copy**:
