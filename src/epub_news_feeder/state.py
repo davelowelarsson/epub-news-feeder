@@ -85,6 +85,9 @@ class PendingDelivery:
     delivery_digest: str
     prepared_at: datetime
     briefs: tuple[PendingBrief, ...] = ()
+    # The Correction Notice signal ids rendered into this Edition. A resumed Run acknowledges
+    # exactly these, so a Notice signalled after spooling stays queued for the next Edition.
+    corrections: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +472,15 @@ class StateStore:
             INSERT OR IGNORE INTO schema_migrations(version) VALUES (6);
             """
         )
+        pending_columns = {
+            str(row["name"])
+            for row in self.connection.execute("PRAGMA table_info(pending_deliveries)").fetchall()
+        }
+        if "corrections" not in pending_columns:
+            self.connection.execute(
+                "ALTER TABLE pending_deliveries ADD COLUMN corrections TEXT NOT NULL DEFAULT '[]'"
+            )
+        self.connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)")
 
     def observe_article(
         self,
@@ -1435,6 +1447,7 @@ class StateStore:
         delivery_digest: str,
         prepared_at: datetime,
         briefs: Iterable[PendingBrief] = (),
+        corrections: Iterable[str] = (),
     ) -> PendingDelivery:
         run = self.connection.execute(
             "SELECT publication_id, edition_id, status FROM runs WHERE run_id = ?", (run_id,)
@@ -1451,11 +1464,12 @@ class StateStore:
             delivery_digest=delivery_digest,
             prepared_at=prepared_at,
             briefs=tuple(briefs),
+            corrections=tuple(corrections),
         )
         existing = self.connection.execute(
             """
             SELECT run_id, publication_id, edition_id, delivery_target,
-                   delivery_digest, prepared_at, briefs
+                   delivery_digest, prepared_at, briefs, corrections
             FROM pending_deliveries WHERE run_id = ?
             """,
             (run_id,),
@@ -1469,8 +1483,8 @@ class StateStore:
             """
             INSERT INTO pending_deliveries(
                 run_id, publication_id, edition_id, delivery_target,
-                delivery_digest, prepared_at, briefs
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                delivery_digest, prepared_at, briefs, corrections
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 delivery.run_id,
@@ -1489,6 +1503,7 @@ class StateStore:
                         for brief in delivery.briefs
                     ]
                 ),
+                json.dumps(list(delivery.corrections)),
             ),
         )
         return delivery
@@ -1497,7 +1512,7 @@ class StateStore:
         rows = self.connection.execute(
             """
             SELECT run_id, publication_id, edition_id, delivery_target,
-                   delivery_digest, prepared_at, briefs
+                   delivery_digest, prepared_at, briefs, corrections
             FROM pending_deliveries
             WHERE publication_id = ? ORDER BY prepared_at, run_id
             """,
@@ -1522,6 +1537,7 @@ class StateStore:
                 )
                 for item in json.loads(str(row["briefs"]))
             ),
+            corrections=tuple(str(item) for item in json.loads(str(row["corrections"]))),
         )
 
     def delivered_brief_ids(self, publication_id: str) -> frozenset[str]:
