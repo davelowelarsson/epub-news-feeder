@@ -18,6 +18,7 @@ from epub_news_feeder.application import GenerationError, RetryableGenerationErr
 from epub_news_feeder.config import load_config
 from epub_news_feeder.delivery import DeliveryReceipt
 from epub_news_feeder.editorial import ArticleEvidence, CallUsage, StructuredCall
+from epub_news_feeder.state import StateStore
 from epub_news_feeder.state import brief_id as compute_brief_id
 
 
@@ -1035,6 +1036,191 @@ publications:
             )
         }
     assert recorded_ids == expected_ids
+
+
+def _write_correction_publication(config_path: Path, port: int) -> None:
+    config_path.write_text(
+        f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+    rights:
+      basis: fixture_private_use
+      audience: single_operator
+      attribution_required: true
+      media_reuse: false
+    eligibility:
+      evidence_reviewed_at: 2026-08-09
+      review_expires_at: 2026-09-08
+      evidence_id: fixture-20260809
+      feed_acquisition: allow
+      page_acquisition: allow
+      retention: allow
+      private_distribution: allow
+      local_llm: allow
+      remote_llm: unknown
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 2, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def _record_correction_signal(state_path: Path, signal_id: str, observed_at: datetime) -> None:
+    with StateStore(state_path, environment="test") as store:
+        store.observe_article(
+            source_id="fixture",
+            publisher_id="fixture-publisher",
+            canonical_url=f"https://publisher.example/corrected/{signal_id}",
+            guid=signal_id,
+            title=f"An earlier report corrected by {signal_id}",
+            author=None,
+            normalized_body=" ".join(f"{signal_id}-passage-{index}" for index in range(200)),
+            observed_at=observed_at,
+            publication_id="morning",
+            correction_signal_id=signal_id,
+            correction_kind="correction",
+        )
+
+
+def _pending_correction_ids(state_path: Path) -> set[str]:
+    with StateStore(state_path, environment="test") as store:
+        return {notice.signal_id for notice in store.pending_corrections("morning")}
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_correction_delivered_through_spooled_resume_is_acknowledged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EditionFixtureHandler)
+    EditionFixtureHandler.hits = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config_path = tmp_path / "publication.yaml"
+    _write_correction_publication(config_path, server.server_port)
+    configuration = load_config(config_path)
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+    diagnostics = tmp_path / "diagnostics"
+    run_id = "20260809T090000Z-CORRECTAA"
+    generated_at = datetime(2026, 8, 9, 9, tzinfo=UTC)
+    _record_correction_signal(state, "publisher-notice-spooled", generated_at)
+    original_delivery = application.deliver_local  # type: ignore[attr-defined]
+
+    def fail_final_delivery(
+        epub_bytes: bytes, *, output_directory: Path, filename: str
+    ) -> DeliveryReceipt:
+        if output_directory == output:
+            raise OSError("simulated unavailable final target")
+        return original_delivery(epub_bytes, output_directory=output_directory, filename=filename)
+
+    monkeypatch.setattr(application, "deliver_local", fail_final_delivery)
+    try:
+        with pytest.raises(RetryableGenerationError, match="Delivery remains pending"):
+            generate_edition(
+                configuration,
+                state_path=state,
+                output_directory=output,
+                diagnostics_directory=diagnostics,
+                run_id=run_id,
+                generated_at=generated_at,
+            )
+
+        spool_path = tmp_path / "pending-editions" / f"{run_id}.epub"
+        with ZipFile(spool_path) as archive:
+            spooled_corrections = archive.read("OEBPS/corrections.xhtml").decode("utf-8")
+        assert "publisher-notice-spooled" in spooled_corrections
+        assert _pending_correction_ids(state) == {"publisher-notice-spooled"}
+
+        monkeypatch.setattr(application, "deliver_local", original_delivery)
+        generate_edition(
+            configuration,
+            state_path=state,
+            output_directory=output,
+            diagnostics_directory=diagnostics,
+            run_id=run_id,
+            generated_at=generated_at,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    # The Correction Notice reached the reader in the resumed Edition, so it must stop queuing.
+    assert _pending_correction_ids(state) == set()
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_correction_recorded_after_spooling_survives_the_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), EditionFixtureHandler)
+    EditionFixtureHandler.hits = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    config_path = tmp_path / "publication.yaml"
+    _write_correction_publication(config_path, server.server_port)
+    configuration = load_config(config_path)
+    state = tmp_path / "state.sqlite3"
+    output = tmp_path / "editions"
+    diagnostics = tmp_path / "diagnostics"
+    run_id = "20260809T100000Z-CORRECTBB"
+    generated_at = datetime(2026, 8, 9, 10, tzinfo=UTC)
+    _record_correction_signal(state, "publisher-notice-early", generated_at)
+    original_delivery = application.deliver_local  # type: ignore[attr-defined]
+
+    def fail_final_delivery(
+        epub_bytes: bytes, *, output_directory: Path, filename: str
+    ) -> DeliveryReceipt:
+        if output_directory == output:
+            raise OSError("simulated unavailable final target")
+        return original_delivery(epub_bytes, output_directory=output_directory, filename=filename)
+
+    monkeypatch.setattr(application, "deliver_local", fail_final_delivery)
+    try:
+        with pytest.raises(RetryableGenerationError, match="Delivery remains pending"):
+            generate_edition(
+                configuration,
+                state_path=state,
+                output_directory=output,
+                diagnostics_directory=diagnostics,
+                run_id=run_id,
+                generated_at=generated_at,
+            )
+
+        _record_correction_signal(state, "publisher-notice-late", generated_at)
+        monkeypatch.setattr(application, "deliver_local", original_delivery)
+        generate_edition(
+            configuration,
+            state_path=state,
+            output_directory=output,
+            diagnostics_directory=diagnostics,
+            run_id=run_id,
+            generated_at=generated_at,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    # The late Correction Notice was never rendered into the spooled Edition, so the reader has
+    # not seen it and it must still be queued for the next one.
+    assert _pending_correction_ids(state) == {"publisher-notice-late"}
 
 
 class OneBriefFixtureHandler(BaseHTTPRequestHandler):

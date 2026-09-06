@@ -67,7 +67,7 @@ jobs:
           python-version: "3.13"
 
       - name: Set up Java (for EPUBCheck)
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"

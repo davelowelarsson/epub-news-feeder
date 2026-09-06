@@ -133,6 +133,28 @@ rejected and names the command that renews it; `STATE_RESTORE_FAILED` means the 
 could not be verified, which is a different investigation entirely. Reading one as the other costs
 an hour, which is why they are no longer the same code.
 
+One failure that looks like a Drive problem is not: the Kobo lists the folder fine, every
+download shows a warning, and the Edition never appears in the library, while the same Edition
+opens without complaint on a phone straight from Drive. This was chased down on a Kobo Libra
+Colour running firmware 5.18.270971 on 2026-09-06, and the fault sits entirely on the device.
+
+Drive downloads land under `.kobo/google_drive/<Drive path>/` on the eReader's own USB storage,
+and each failed file there was the complete, correct EPUB with a 507-byte Google API JSON error
+body prepended — HTTP 401, "Request had invalid authentication credentials", reason `authError`.
+The Kobo's first request used a stale token, wrote that error body straight into the `.epub`,
+refreshed the token, retried, and appended the real bytes afterward. The file no longer starts
+with the ZIP signature `PK`, so the reader rejects it, and the device's own analytics table logs
+it as `GoogleDriveParseFailed`. Mounting the Kobo over USB and looking at the first bytes of a
+file tells you which case you are in: `PK` is healthy, `{` is this failure. Every Drive copy
+matched the pipeline's recorded SHA-256 and passed `unzip -t`, and a third-party ebook in the
+same folder failed identically, so the pipeline, the filenames, and the folder layout were never
+the problem.
+
+The fix is on the device, not here: delete the corrupted copies from `.kobo/google_drive/` over
+USB, then on the Kobo unlink Google Drive (More > Settings > Accounts) and link it again.
+Downloads were clean afterwards. Nothing in this repository can work around this, because the
+credential that failed is the Kobo's own.
+
 Requests retry only what retrying can fix: connection failures and Google's own "try again"
 statuses, four attempts, one second doubling to eight. A 4xx is a settled answer and is raised on
 the first attempt. The one call that is never replayed after leaving the machine is a create-new
