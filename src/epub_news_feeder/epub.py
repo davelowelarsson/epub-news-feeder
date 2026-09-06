@@ -269,7 +269,9 @@ def _archive(members: list[tuple[str, bytes, int]]) -> bytes:
 
 def _container_document() -> bytes:
     root = etree.Element(
-        f"{{{_CONTAINER_NS}}}container", nsmap={"container": _CONTAINER_NS}, version="1.0"
+        f"{{{_CONTAINER_NS}}}container",
+        nsmap={None: _CONTAINER_NS},  # type: ignore[dict-item]
+        version="1.0",
     )
     rootfiles = etree.SubElement(root, f"{{{_CONTAINER_NS}}}rootfiles")
     etree.SubElement(
@@ -285,7 +287,9 @@ def _container_document() -> bytes:
 
 def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixPath]) -> bytes:
     package = etree.Element(
-        f"{{{_OPF_NS}}}package", nsmap={"opf": _OPF_NS, "dc": _DC_NS}, version="3.0"
+        f"{{{_OPF_NS}}}package",
+        nsmap={None: _OPF_NS, "dc": _DC_NS},  # type: ignore[dict-item]
+        version="3.0",
     )
     package.set("unique-identifier", "edition-id")
     metadata = etree.SubElement(package, f"{{{_OPF_NS}}}metadata")
@@ -461,7 +465,7 @@ def _navigation_document(edition: EditionInput, section_paths: dict[str, PurePos
         item = etree.SubElement(ordered, f"{{{_XHTML_NS}}}li")
         link = etree.SubElement(item, f"{{{_XHTML_NS}}}a", href="about-ai-summaries.xhtml")
         link.text = _localized(edition.language, "about_ai")
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _add_navigation_items(
@@ -681,7 +685,7 @@ def _notes_document(edition: EditionInput) -> bytes:
     for note in edition.notes:
         paragraph = etree.SubElement(main, f"{{{_XHTML_NS}}}p")
         paragraph.text = note
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _about_ai_document(edition: EditionInput) -> bytes:
@@ -707,7 +711,7 @@ def _about_ai_document(edition: EditionInput) -> bytes:
             "ai_excluded",
             sources=", ".join(edition.editorial_excluded_sources),
         )
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _in_brief_document(edition: EditionInput) -> bytes:
@@ -750,7 +754,7 @@ def _in_brief_document(edition: EditionInput) -> bytes:
         if brief.published_at:
             published = etree.SubElement(meta, f"{{{_XHTML_NS}}}time", datetime=brief.published_at)
             published.text = f" — {brief.published_at}"
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _corrections_document(edition: EditionInput) -> bytes:
@@ -775,7 +779,7 @@ def _corrections_document(edition: EditionInput) -> bytes:
         )
         link = etree.SubElement(notice, f"{{{_XHTML_NS}}}a", href=correction.canonical_url)
         link.text = _localized(edition.language, "correction_link")
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _section_document(
@@ -820,13 +824,13 @@ def _section_document(
         )
     colophon = etree.SubElement(body, f"{{{_XHTML_NS}}}footer", attrib={"class": "colophon"})
     colophon.text = f"Run ID: {edition.run_id}"
-    return _serialize(html)
+    return _serialize_xhtml(html)
 
 
 def _xhtml_document(title: str, language: str) -> tuple[etree._Element, etree._Element]:
     html = etree.Element(
         f"{{{_XHTML_NS}}}html",
-        nsmap={"xhtml": _XHTML_NS, "epub": _EPUB_NS},
+        nsmap={None: _XHTML_NS, "epub": _EPUB_NS},  # type: ignore[dict-item]
         attrib={"lang": language, f"{{{_XML_NS}}}lang": language},
     )
     head = etree.SubElement(html, f"{{{_XHTML_NS}}}head")
@@ -1147,6 +1151,16 @@ def _add_story_hub(
 
 def _serialize(element: etree._Element) -> bytes:
     return etree.tostring(element, encoding="utf-8", xml_declaration=True, pretty_print=True)
+
+
+def _serialize_xhtml(element: etree._Element) -> bytes:
+    return etree.tostring(
+        element,
+        encoding="utf-8",
+        xml_declaration=True,
+        pretty_print=True,
+        doctype="<!DOCTYPE html>",
+    )
 
 
 def _has_editorial_summaries(edition: EditionInput) -> bool:

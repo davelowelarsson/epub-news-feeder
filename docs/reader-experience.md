@@ -150,5 +150,10 @@ to be an image, and Kobo's SVG font handling is inconsistent. If the device reje
 converting text to paths is the identified fallback — it keeps determinism and removes the device
 font dependency without adding a rasteriser. See GitHub issue #39.
 
+Plain sideloaded `.epub` files render on Kobo through Adobe's RMSDK, not a Kobo-specific engine,
+and RMSDK requires every XML document to use a default namespace rather than a namespace prefix.
+That requirement was found when a namespace-prefixed serialization stalled pagination past a
+chapter end on a Kobo Libra Colour.
+
 Publisher images may not enter the cover unless a separate Source-specific media decision permits
 that exact use.
