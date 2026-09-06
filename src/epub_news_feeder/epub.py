@@ -164,6 +164,9 @@ class EditionInput:
     editorial_route: Literal["local", "remote"] = "local"
     edition_date: str = "1980-01-01"
     modified_at: str = "1980-01-01T00:00:00Z"
+    # The Kobo Collection name; falls back to title so every Publication groups its
+    # Editions even without an explicit override.
+    collection: str | None = None
 
 
 def build_epub(edition: EditionInput) -> bytes:
@@ -294,6 +297,38 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
     language.text = edition.language
     modified = etree.SubElement(metadata, f"{{{_OPF_NS}}}meta", property="dcterms:modified")
     modified.text = edition.modified_at
+
+    # EPUB 3 collection metadata: a named series, its type, and a sort position derived from
+    # the Edition date so Editions order themselves with no counter and no lookup. Whether the
+    # Kobo shelves plain sideloaded EPUBs by it is a device observation still to be made.
+    collection = etree.SubElement(
+        metadata, f"{{{_OPF_NS}}}meta", property="belongs-to-collection", id="edition-collection"
+    )
+    collection.text = edition.collection if edition.collection is not None else edition.title
+    collection_type = etree.SubElement(
+        metadata,
+        f"{{{_OPF_NS}}}meta",
+        attrib={"refines": "#edition-collection", "property": "collection-type"},
+    )
+    collection_type.text = "series"
+    group_position = etree.SubElement(
+        metadata,
+        f"{{{_OPF_NS}}}meta",
+        attrib={"refines": "#edition-collection", "property": "group-position"},
+    )
+    group_position.text = edition.edition_date.replace("-", "")
+
+    # The generator, under the non-authorial `bkp` (book producer) relator. A reader that
+    # ignores the role may still show it as the author; the name is chosen so that even then
+    # it cannot be mistaken for a journalist, and every Article carries its own attribution.
+    generator = etree.SubElement(metadata, f"{{{_DC_NS}}}creator", id="edition-generator")
+    generator.text = "EPUB News Feeder"
+    generator_role = etree.SubElement(
+        metadata,
+        f"{{{_OPF_NS}}}meta",
+        attrib={"refines": "#edition-generator", "property": "role", "scheme": "marc:relators"},
+    )
+    generator_role.text = "bkp"
 
     manifest = etree.SubElement(package, f"{{{_OPF_NS}}}manifest")
     etree.SubElement(

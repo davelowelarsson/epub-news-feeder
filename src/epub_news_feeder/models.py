@@ -191,6 +191,9 @@ class Publication(StrictModel):
     id: NonEmptyString
     title: NonEmptyString
     language: LanguageTag = "en"
+    # The Kobo Collection name Editions group under on-device. Defaults to title, so an
+    # operator names one only to diverge from it.
+    collection: NonEmptyString | None = None
     policies: dict[NonEmptyString, PolicyPreset] = Field(default_factory=dict)
     budget: Budget | None = None
     # Briefs are capped entirely outside the Article Budget: a Brief never consumes an
