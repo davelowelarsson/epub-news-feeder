@@ -93,6 +93,65 @@ def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
         assert section.xpath("//*[local-name()='a']/@href") == ["https://example.test/articles/1"]
 
 
+def test_kobo_default_namespaces_lets_rmsdk_page_past_a_chapter_end() -> None:
+    """On a Kobo Libra Colour, firmware 5.18.270971 (observed 2026-09-06), the Adobe RMSDK
+    engine that renders plain sideloaded .epub files could not advance past the end of any
+    chapter when the container, package and XHTML documents used namespace prefixes;
+    re-serializing every document with a default namespace fixed pagination on the device."""
+
+    # Every optional chapter is present, so a serializer reverted on any one of them fails here.
+    edition = replace(
+        _edition(),
+        notes=("One Source was temporarily unavailable.",),
+        corrections=(
+            CorrectionInput(
+                "A complete report",
+                "Example News",
+                "https://example.test/articles/1",
+                "correction",
+                "2026-08-09",
+            ),
+        ),
+        briefs=_briefs(),
+        sections=(
+            replace(_edition().sections[0], articles=(_summarised_article(),)),
+            SectionInput(identifier="science", title="Science", articles=()),
+        ),
+    )
+    epub_bytes = build_epub(edition)
+
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        names = set(archive.namelist())
+        assert {
+            "META-INF/container.xml",
+            "OEBPS/content.opf",
+            "OEBPS/nav.xhtml",
+            "OEBPS/edition-notes.xhtml",
+            "OEBPS/corrections.xhtml",
+            "OEBPS/in-brief.xhtml",
+            "OEBPS/about-ai-summaries.xhtml",
+        } <= names
+        assert sum(name.startswith("OEBPS/world-") for name in names) == 1
+        assert sum(name.startswith("OEBPS/science-") for name in names) == 1
+        for name in sorted(names):
+            if not name.endswith((".xml", ".opf", ".xhtml")):
+                continue
+            content = archive.read(name)
+            allowed_prefixes = {None, "dc"} if name.endswith(".opf") else {None}
+            prefixes = {element.prefix for element in etree.fromstring(content).iter()}
+            assert prefixes <= allowed_prefixes, (name, prefixes)
+            if name.endswith(".xhtml"):
+                assert b'<html xmlns="http://www.w3.org/1999/xhtml"' in content, name
+                assert content.split(b"\n")[1] == b"<!DOCTYPE html>", name
+            else:
+                assert b"<!DOCTYPE" not in content, name
+
+        package = archive.read("OEBPS/content.opf")
+        assert b'<package xmlns="http://www.idpf.org/2007/opf"' in package
+        container = archive.read("META-INF/container.xml")
+        assert b'<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container"' in container
+
+
 @pytest.mark.property
 @pytest.mark.epubcheck
 def test_issue_68_kobo_collection_metadata_is_present_and_deterministic() -> None:
@@ -305,7 +364,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "0effc4887b9916b6e3a7d12a78c373b0d2c0af86de850d7740fe307ef22730e6"
+    assert receipt.sha256 == "f855c8820805a1ccf2398b4bccea2015e0ada4ca96f77471dd414971e2aa5851"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
