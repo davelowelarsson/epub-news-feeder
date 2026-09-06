@@ -93,6 +93,70 @@ def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
         assert section.xpath("//*[local-name()='a']/@href") == ["https://example.test/articles/1"]
 
 
+@pytest.mark.property
+@pytest.mark.epubcheck
+def test_issue_68_kobo_collection_metadata_is_present_and_deterministic() -> None:
+    edition = replace(_edition(), collection="Custom Collection Name", edition_date="2026-08-09")
+
+    first = build_epub(edition)
+    second = build_epub(edition)
+
+    assert first == second
+    validate_epub(first)
+    with ZipFile(BytesIO(first)) as archive:
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+
+    metas = list(package.iter("{http://www.idpf.org/2007/opf}meta"))
+    belongs = next(meta for meta in metas if meta.get("property") == "belongs-to-collection")
+    assert belongs.text == "Custom Collection Name"
+    collection_id = belongs.get("id")
+    assert collection_id
+
+    collection_type = next(
+        meta
+        for meta in metas
+        if meta.get("refines") == f"#{collection_id}" and meta.get("property") == "collection-type"
+    )
+    assert collection_type.text == "series"
+
+    group_position = next(
+        meta
+        for meta in metas
+        if meta.get("refines") == f"#{collection_id}" and meta.get("property") == "group-position"
+    )
+    assert group_position.text == "20260809"
+
+    creators = list(package.iter("{http://purl.org/dc/elements/1.1/}creator"))
+    assert len(creators) == 1
+    creator = creators[0]
+    assert creator.text == "EPUB News Feeder"
+    creator_id = creator.get("id")
+    assert creator_id
+
+    creator_role = next(
+        meta
+        for meta in metas
+        if meta.get("refines") == f"#{creator_id}" and meta.get("property") == "role"
+    )
+    assert creator_role.text != "aut"
+    assert creator_role.text == "bkp"
+
+
+def test_issue_68_kobo_collection_defaults_to_the_edition_title() -> None:
+    edition = _edition()
+    assert edition.collection is None
+
+    with ZipFile(BytesIO(build_epub(edition))) as archive:
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+
+    belongs = next(
+        meta
+        for meta in package.iter("{http://www.idpf.org/2007/opf}meta")
+        if meta.get("property") == "belongs-to-collection"
+    )
+    assert belongs.text == edition.title
+
+
 def test_a_byline_that_is_not_a_person_falls_back_to_the_missing_label() -> None:
     """Observed live: bylines rendered as "Av tomas@specialnest.se", as a raw UUID, and as
     the source's own name repeated under the source line. None of those attribute anything
@@ -241,7 +305,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "ddc5111e1d9d882edbe5028f1bf7149b1d4f56715f968585cd9467d177d960f4"
+    assert receipt.sha256 == "0effc4887b9916b6e3a7d12a78c373b0d2c0af86de850d7740fe307ef22730e6"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 

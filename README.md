@@ -83,6 +83,11 @@ Sunday has none. It runs the `weekly` Publication: the same Sources and Sections
 twice the Budget, and — this is the whole of what makes it a weekly rather than a sixth daily —
 `reads_history_from: [daily]`.
 
+Each Publication also has an optional `collection` key, the series name written into every
+Edition's metadata so readers that honour EPUB collection metadata shelve them together. It
+defaults to the Publication `title`. Whether a Kobo does this for plain sideloaded EPUBs is not
+yet confirmed on the device.
+
 Suppression is otherwise per-Publication, deliberately, so a Saturday Edition built from the same
 feeds would carry precisely the reading the weekdays had already delivered. That reference is the
 one sanctioned way through the boundary: every Article *and every Brief* the daily delivered is

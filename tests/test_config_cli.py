@@ -66,6 +66,27 @@ def test_a_source_may_opt_in_to_short_as_published(tmp_path: Path) -> None:
     assert default_configuration.sources["source-one"].allow_short_as_published is False
 
 
+def test_issue_68_publication_collection_is_optional_and_configurable(tmp_path: Path) -> None:
+    """The Kobo Collection name defaults to unset (epub.py falls back to the Publication
+    title) and is otherwise configurable per Publication."""
+
+    default_configuration = load_config(_write_minimal(tmp_path))
+    assert default_configuration.publications[0].collection is None
+
+    config_path = tmp_path / "collection.yaml"
+    config_path.write_text(
+        MINIMAL_CONFIG.replace(
+            "    title: Publication one",
+            "    title: Publication one\n    collection: Custom Collection",
+        ),
+        encoding="utf-8",
+    )
+
+    configuration = load_config(config_path)
+
+    assert configuration.publications[0].collection == "Custom Collection"
+
+
 def _write_minimal(tmp_path: Path) -> Path:
     config_path = tmp_path / "minimal.yaml"
     config_path.write_text(MINIMAL_CONFIG, encoding="utf-8")

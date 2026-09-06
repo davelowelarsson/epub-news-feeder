@@ -744,6 +744,7 @@ def _run(
         ),
         edition_date=generated_at.astimezone(UTC).date().isoformat(),
         modified_at=generated_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        collection=publication.collection,
     )
     epub_bytes = build_epub(edition)
     try:
