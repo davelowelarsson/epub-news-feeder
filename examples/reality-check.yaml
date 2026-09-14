@@ -33,9 +33,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-44-david-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-david-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -57,9 +57,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-51-ars-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-ars-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -81,9 +81,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-15-svt-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -106,9 +106,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-15-ekot-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-ekot-20260914
       feed_acquisition: allow
       page_acquisition: deny
       retention: deny
@@ -132,9 +132,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-runnersworld-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-runnersworld-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -156,9 +156,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_kultur-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_kultur-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -179,9 +179,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-attention-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-attention-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -202,9 +202,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-forskning_skola-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-forskning_skola-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -225,9 +225,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-specialnest-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-specialnest-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -249,9 +249,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-elle-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-elle-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -272,9 +272,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_vetenskap-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_vetenskap-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -295,9 +295,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-nasa-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-nasa-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -318,9 +318,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-kubernetes-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-kubernetes-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -341,9 +341,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-krebs-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-krebs-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -365,9 +365,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-hackaday-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-hackaday-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -388,9 +388,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-prusa-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-prusa-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -411,9 +411,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-bleepingcomputer-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-bleepingcomputer-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -434,9 +434,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-cybersecuritynews-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-cybersecuritynews-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -457,9 +457,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-opensourcemalware-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-opensourcemalware-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -480,9 +480,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-githubblog-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-githubblog-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -503,9 +503,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-danstidningen-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-07
+      evidence_id: issue-112-danstidningen-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -526,9 +526,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-snexplores-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-snexplores-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -549,9 +549,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_damallsvenskan-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_damallsvenskan-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -573,9 +573,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_fotboll-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_fotboll-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -596,9 +596,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-wwf-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-wwf-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -619,9 +619,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-natgeokids-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-14
+      evidence_id: issue-112-natgeokids-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -643,9 +643,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_inrikes-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_inrikes-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow
@@ -667,9 +667,9 @@ sources:
       attribution_required: true
       media_reuse: false
     eligibility:
-      evidence_reviewed_at: 2026-08-09
-      review_expires_at: 2026-09-08
-      evidence_id: issue-73-svt_utrikes-20260809
+      evidence_reviewed_at: 2026-09-14
+      review_expires_at: 2026-12-21
+      evidence_id: issue-112-svt_utrikes-20260914
       feed_acquisition: allow
       page_acquisition: allow
       retention: allow

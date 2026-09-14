@@ -8,7 +8,7 @@ import sys
 import webbrowser
 from collections.abc import Sequence
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from epub_news_feeder import __version__
@@ -123,6 +123,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_health.add_argument("--state", required=True, type=Path)
     source_health.add_argument("--format", choices=["text", "markdown"], default="text")
+
+    rights_audit = commands.add_parser(
+        "rights-audit",
+        help="Report every Source's rights-review expiry horizon (a report, never a gate).",
+    )
+    rights_audit.add_argument("--config", required=True, type=Path)
+    rights_audit.add_argument("--format", choices=["text", "markdown"], default="text")
+    rights_audit.add_argument(
+        "--at", help="Audit relative to this ISO date instead of today (for reproducibility)."
+    )
+    rights_audit.add_argument(
+        "--within",
+        type=int,
+        help=(
+            "Print only the ids of Sources expired, unreviewed, or expiring within this many "
+            "days, one per line — the workflow's escalation branch."
+        ),
+    )
     return parser
 
 
@@ -370,6 +388,77 @@ def _source_health(state_path: Path, output_format: str) -> int:
     return 0
 
 
+# Inside this horizon a Source is marked urgent in the audit table. Matches the in-run
+# Publication Note window in application.py so every surface starts warning together.
+_AUDIT_WARNING_DAYS = 14
+
+
+def _rights_horizons(config: Path, as_of: date) -> list[tuple[str, str, int | None]] | None:
+    """Per Source: (source_id, expiry label, days left) — None days for a Source never reviewed.
+
+    Sorted most urgent first: never-reviewed and expired Sources lead (a Source without
+    evidence is already ineligible today), then the soonest expiry, then source_id.
+    """
+
+    try:
+        configuration = load_config(config)
+    except ConfigError as error:
+        print(f"code={error.code} message={error.safe_message}", file=sys.stderr)
+        return None
+    horizons: list[tuple[str, str, int | None]] = []
+    for source_id, source in configuration.sources.items():
+        if source.eligibility is None:
+            horizons.append((source_id, "never-reviewed", None))
+            continue
+        expires = source.eligibility.review_expires_at
+        horizons.append((source_id, expires.isoformat(), (expires - as_of).days))
+    horizons.sort(
+        key=lambda row: (row[2] if row[2] is not None else -(10**6), row[0]),
+    )
+    return horizons
+
+
+def _rights_audit(arguments: argparse.Namespace) -> int:
+    """Always exits 0 when the configuration loads: a report, never a gate.
+
+    Observed live (2026-09-09): every Source shared one review_expires_at, the whole fleet
+    fail-closed on a single morning, and nothing had warned. This surfaces the horizon on
+    the surfaces the operator already reads; the gate itself stays untouched.
+    """
+
+    try:
+        as_of = date.fromisoformat(arguments.at) if arguments.at else datetime.now(UTC).date()
+    except ValueError:
+        print("code=AUDIT_DATE_INVALID message=Audit date is invalid", file=sys.stderr)
+        return 2
+    horizons = _rights_horizons(arguments.config, as_of)
+    if horizons is None:
+        return 2
+    if arguments.within is not None:
+        for source_id, _expires, days_left in horizons:
+            if days_left is None or days_left <= arguments.within:
+                print(source_id)
+        return 0
+    if arguments.format == "markdown":
+        lines = [
+            "| Source | Review expires | Days left |",
+            "| --- | --- | --- |",
+        ]
+        for source_id, expires, days_left in horizons:
+            urgent = days_left is None or days_left <= _AUDIT_WARNING_DAYS
+            marker = "⚠️ " if urgent else ""
+            lines.append(
+                f"| {marker}{_markdown_cell(source_id)} | {expires} "
+                f"| {'—' if days_left is None else days_left} |"
+            )
+        print("\n".join(lines))
+        return 0
+    for source_id, expires, days_left in horizons:
+        rendered_days = "never" if days_left is None else str(days_left)
+        print(f"source_id={source_id} expires={expires} days_left={rendered_days}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
@@ -386,4 +475,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _state_push(arguments.state, arguments.state_folder, arguments.state_environment)
     if arguments.command == "source-health":
         return _source_health(arguments.state, arguments.format)
+    if arguments.command == "rights-audit":
+        return _rights_audit(arguments)
     raise AssertionError(f"Unhandled command: {arguments.command}")

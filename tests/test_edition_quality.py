@@ -130,6 +130,120 @@ def _diagnostic_codes(diagnostics_directory: Path) -> set[str]:
 
 @pytest.mark.acceptance
 @pytest.mark.epubcheck
+def test_an_expiring_rights_review_warns_in_the_edition_before_it_bites(tmp_path: Path) -> None:
+    """Observed live: every Source's review_expires_at was 2026-09-08, and from 2026-09-09
+    every scheduled run failed with 27 x SOURCE_RIGHTS_REVIEW_EXPIRED and delivered nothing
+    for six days. The gate worked; the surprise did the damage. From 14 days out, each run
+    must say so where the operator actually looks: a Publication Note in the Edition's end
+    matter, and a diagnostic the workflow summary can count."""
+
+    feed_xml = _feed(
+        _item(
+            title="An ordinary report",
+            slug="ordinary",
+            body_words=[f"word-{index}" for index in range(120)],
+            pub_date="Sat, 29 Aug 2026 06:00:00 GMT",
+        )
+    )
+    with _feed_server(feed_xml) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        # Nine days before the fixture evidence's 2026-09-08 expiry: inside the warning
+        # window, still fully eligible, so the Edition itself is ordinary.
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260830T040000Z-EXPIRAAA",
+            generated_at=datetime(2026, 8, 30, 4, tzinfo=UTC),
+        )
+
+    assert result.article_count == 1
+    rendered = _epub_text(result.receipt.path)
+    assert "An ordinary report" in rendered
+    assert "expires 2026-09-08" in rendered
+    assert "SOURCE_RIGHTS_REVIEW_EXPIRING" in _diagnostic_codes(tmp_path / "diagnostics")
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
+def test_a_distant_rights_review_expiry_stays_out_of_the_edition(tmp_path: Path) -> None:
+    """The warning must not become wallpaper: outside the window there is no note and no
+    diagnostic, so the note's first appearance actually means something."""
+
+    feed_xml = _feed(
+        _item(
+            title="An ordinary report",
+            slug="ordinary",
+            body_words=[f"word-{index}" for index in range(120)],
+            pub_date="Mon, 10 Aug 2026 06:00:00 GMT",
+        )
+    )
+    with _feed_server(feed_xml) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        # Twenty-eight days before expiry: outside the window.
+        result = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260811T040000Z-EXPIRBBB",
+            generated_at=datetime(2026, 8, 11, 4, tzinfo=UTC),
+        )
+
+    rendered = _epub_text(result.receipt.path)
+    assert "expires 2026-09-08" not in rendered
+    assert "SOURCE_RIGHTS_REVIEW_EXPIRING" not in _diagnostic_codes(tmp_path / "diagnostics")
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
 def test_one_headline_at_two_urls_is_one_article_in_the_edition(tmp_path: Path) -> None:
     """Observed live: a publisher re-published one piece at a second URL under another
     byline, and the same headline filled two slots of one Section on one morning."""

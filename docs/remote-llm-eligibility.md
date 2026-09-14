@@ -4,10 +4,12 @@
 for sending acquired Article text to a remote third-party LLM provider — for example OpenAI — for
 private, single-operator summarisation?
 
-**Reviewed:** 2026-08-09.
-**Suggested review expiry:** 2026-09-08 (30 days), and immediately on any change to a publisher's
+**Reviewed:** 2026-08-09; re-attested unchanged 2026-09-14 (issue #112) after the original
+window lapsed and fail-closed every Source at once.
+**Review expiry:** staggered per Source across 2026-12-07/14/21 (~90 days) so the fleet can
+never again expire on one calendar day, and immediately on any change to a publisher's
 terms, robots signal, or the provider's data-handling documentation. This matches the
-`review_expires_at` already recorded in `examples/reality-check.yaml`.
+`review_expires_at` recorded in `examples/reality-check.yaml`.
 
 **Fetch identity:** `epub-news-feeder research contact: https://github.com/davelowelarsson/epub-news-feeder`.
 Where that identity was refused, the page was read manually in an ordinary browser without changing
@@ -643,5 +645,8 @@ best, one of four Sources, and only after an OpenAI approval process. No field i
 
 11. **It does not survive its expiry.** Publisher terms, robots signals, and provider retention
     documentation all change without notice, and both SR and Condé Nast reserve the right to change
-    theirs. After 2026-09-08, or after any observed change, these verdicts are stale and the affected
-    route degrades to `local_only` or disabled until re-reviewed.
+    theirs. After each Source's recorded `review_expires_at`, or after any observed change, these
+    verdicts are stale and the affected route degrades to `local_only` or disabled until
+    re-reviewed. This clause fired for real on 2026-09-09 (issue #112): the whole fleet shared one
+    expiry and every Edition stopped, which is why expiries are now staggered and every generate
+    run warns from 14 days out.
