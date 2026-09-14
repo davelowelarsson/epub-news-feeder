@@ -13,6 +13,7 @@ import pytest
 
 from epub_news_feeder.acquisition import (
     AcquisitionMode,
+    AcquisitionOutcome,
     EligibilityEvidence,
     SourceClient,
     SourceRequest,
@@ -1214,6 +1215,121 @@ def test_a_sponsored_byline_is_not_an_article() -> None:
     assert outcome.omitted == 1
 
 
+def test_a_sponsored_body_label_is_not_an_article() -> None:
+    """Observed live: a Sézane advertorial in Elle Sverige ("French girl fall: Här ar
+    nyckelplaggen for att hitta stilen") filled an Article Slot. Elle carries no byline for
+    it; sponsorship is marked only by trailing body labels extracted as list items —
+    "creative-studio" and "annonssamarbete med sezane"."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Elle Sverige</title><item><title>French girl fall</title>
+    <link>https://publisher.example/sezane</link><guid>sezane-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>
+    <ul><li>creative-studio</li><li>annonssamarbete med sezane</li></ul>]]></content:encoded>
+    </item>
+    <item><title>A real report</title>
+    <link>https://publisher.example/real</link><guid>real-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="elle",
+                publisher_id="publisher.example",
+                title="Elle Sverige",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["A real report"]
+    assert outcome.omitted == 1
+
+
+def test_a_sponsored_body_label_in_swedish_is_not_an_article() -> None:
+    """The Swedish label "Sponsrat innehåll" marks sponsorship as plainly as the English
+    "Sponsored", and must be caught the same way."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Swedish Mag</title><item><title>A paid feature</title>
+    <link>https://publisher.example/paid</link><guid>paid-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p><p>Sponsrat innehåll</p>]]></content:encoded>
+    </item>
+    <item><title>A real report</title>
+    <link>https://publisher.example/real</link><guid>real-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="swedish-mag",
+                publisher_id="publisher.example",
+                title="Swedish Mag",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["A real report"]
+    assert outcome.omitted == 1
+
+
+def test_an_article_mentioning_annonssamarbete_mid_sentence_is_still_journalism() -> None:
+    """An article about advertising practices that merely mentions "annonssamarbete" inside
+    a sentence is journalism, not the sponsorship itself. Only a block whose entire trimmed
+    text is the label counts."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    sentence = "Den har artikeln handlar om hur annonssamarbete regleras i sociala medier just nu."
+    filler = " ".join(f"word-{index}" for index in range(80))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Media Watch</title><item><title>How influencer ads are regulated</title>
+    <link>https://publisher.example/regulation</link><guid>regulation-1</guid>
+    <content:encoded><![CDATA[<p>{sentence} {filler}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="media-watch",
+                publisher_id="publisher.example",
+                title="Media Watch",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_OK"
+    assert [article.title for article in outcome.articles] == ["How influencer ads are regulated"]
+    assert outcome.omitted == 0
+
+
 def test_a_body_cut_mid_sentence_is_demoted_to_a_teaser_link() -> None:
     """Observed live: a Special Nest page under 200 words ended "...har Philip Lindersten,
     som ar grundare av och verksamh" - cut mid-word. It cleared the 80-word full-body minimum
@@ -1555,3 +1671,357 @@ def test_a_teaser_and_boilerplate_stripping_do_not_collide() -> None:
         if article.title != "Paywalled report":
             assert article.body is not None
             assert "Integrate TI Lookup" not in article.body
+
+
+def test_a_paragraph_of_br_separated_paragraphs_splits_into_blocks() -> None:
+    fragment = "<p>First para.<br/><br/>Second para.</p>"
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("paragraph", "First para."),
+        ("paragraph", "Second para."),
+    ]
+
+
+def test_a_single_br_also_separates_and_empty_fragments_are_dropped() -> None:
+    fragment = "<p>Dansen bar hela verket.<br/>En kort bildtext under scenen.<br/></p>"
+    assert _blocks(fragment) == (
+        "Dansen bar hela verket.",
+        "En kort bildtext under scenen.",
+    )
+
+
+def test_a_br_inside_inline_markup_still_separates_paragraphs() -> None:
+    fragment = "<p><em>First para.<br/><br/>Second para.</em> Tail text.</p>"
+    assert _blocks(fragment) == ("First para.", "Second para. Tail text.")
+
+
+def test_a_wordpress_body_of_leaf_divs_splits_into_paragraphs() -> None:
+    fragment = (
+        '<div class=""></div>\n<div class="">Kaotiskt, dystopiskt. Eller hoppfullt?</div>\n'
+        '<div class=""></div>\n<div class="">Driscoll har skapat ett stycke för 15 dansare.</div>'
+    )
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("paragraph", "Kaotiskt, dystopiskt. Eller hoppfullt?"),
+        ("paragraph", "Driscoll har skapat ett stycke för 15 dansare."),
+    ]
+
+
+def test_a_div_wrapping_real_paragraphs_does_not_duplicate_them() -> None:
+    fragment = "<div><p>Prose the page already carries.</p></div>"
+    assert _blocks(fragment) == ("Prose the page already carries.",)
+
+
+def test_a_br_run_inside_a_leaf_div_also_separates_paragraphs() -> None:
+    fragment = "<div>First para.<br/><br/>Second para.</div>"
+    assert _blocks(fragment) == ("First para.", "Second para.")
+
+
+def test_bare_text_around_a_br_does_not_glue_words_together() -> None:
+    fragment = "Turnén fortsätter i höst<br/>Föreställningen ges igen i oktober."
+    assert _blocks(fragment) == (
+        "Turnén fortsätter i höst",
+        "Föreställningen ges igen i oktober.",
+    )
+
+
+def test_a_line_break_inside_a_quote_does_not_split_it() -> None:
+    fragment = "<blockquote>Rörelsen stannar aldrig,<br/>den bara byter riktning.</blockquote>"
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("quote", "Rörelsen stannar aldrig, den bara byter riktning."),
+    ]
+
+
+@pytest.mark.acceptance
+def test_a_page_body_of_br_separated_paragraphs_splits_the_same_way() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    first = " ".join(f"page-br-first-{index}" for index in range(80)) + "."
+    second = " ".join(f"page-br-second-{index}" for index in range(80)) + "."
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (
+                200,
+                "application/rss+xml",
+                b'<rss version="2.0"><channel><title>Page</title><item>'
+                b"<title>Break-separated report</title><link>REPLACE/article</link>"
+                b"<guid>page-br-1</guid></item></channel></rss>",
+            ),
+            "/article": (
+                200,
+                "text/html",
+                (
+                    f"<html><body><article><p>{first}<br/><br/>{second}</p></article></body></html>"
+                ).encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            site.routes["/feed.xml"][2].replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="page-br",
+                publisher_id="publisher",
+                title="Page",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    article = outcome.articles[0]
+    assert [block.kind for block in article.blocks] == ["paragraph", "paragraph"]
+    assert article.body == f"{first}\n\n{second}"
+
+
+def test_svt_video_widget_captions_are_not_body_text() -> None:
+    """Observed live (Edition 2026-09-14): SVT video players extract as list items mashing
+    a duration straight into the caption and a timestamp straight onto its end. The runs
+    survived because the short topic tags mixed in fail the headline word minimum."""
+
+    fragment = (
+        "<div><p>Socialdemokraterna gjorde sitt bästa val på tolv år.</p>"
+        "<ul><li>43 sekLiberalernas jubel: ”Hade jag aldrig kunnat drömma om”Idag 01:52</li>"
+        # The en dash is verbatim from the delivered Edition.
+        "<li>33 sekHär räknas rösterna – ”En viktig grej för Sverige”Igår 23:16</li></ul>"  # noqa: RUF001
+        "<p>Rösträkningen fortsatte under natten.</p></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Socialdemokraterna gjorde sitt bästa val på tolv år.",
+        "Rösträkningen fortsatte under natten.",
+    )
+
+
+def test_an_svt_widget_mixing_captions_tags_and_teaser_rows_is_not_body_text() -> None:
+    """Observed live: the sport widget mixes video captions, glued-timestamp teaser rows
+    and bare topic tags in one run, so no single-item rule condemns the whole of it."""
+
+    fragment = (
+        "<div><p>Häcken gjorde processen kort i Göteborg.</p>"
+        "<ul><li>37 sekMaja Bodin målskytt igen när Häcken krossade VittsjöIgår 14:52</li>"
+        "<li>14 sekHär blir AIK:s nyförvärv hjälte mot PiteåIgår 16:19</li>"
+        "<li>25 sekBayern München med kross i ligapremiären29 augusti 2026</li>"
+        "<li>Harry Kane</li><li>Bundesliga</li><li>Hammarby IF Fotboll</li>"
+        "<li>Tuff Champions League-lottning för Gyökeres Arsenal27 augusti 2026</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Häcken gjorde processen kort i Göteborg.",)
+
+
+def test_svt_teaser_rows_with_glued_dates_are_not_body_text() -> None:
+    """Observed live: non-video teaser rows in the same widgets glue a relative or absolute
+    date straight onto the headline, with a bare topic tag alongside."""
+
+    fragment = (
+        "<div><p>Utvecklingen inom AI går fort.</p>"
+        "<ul><li>Altman: Ingen börsnotering för Open AI i årIgår 07:00</li>"
+        "<li>AI-jättens vd: AI-utvecklingen borde bromsas12 september 2026</li>"
+        "<li>Generativ AI</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Utvecklingen inom AI går fort.",)
+
+
+def test_a_workout_list_with_durations_survives() -> None:
+    """A duration followed by a space is prose — only a duration glued straight into the
+    next word is a video caption."""
+
+    fragment = (
+        "<div><p>Passet ser ut så här.</p>"
+        "<ul><li>5 min uppvärmning i lugnt tempo</li>"
+        "<li>10 min intervaller i backe</li>"
+        "<li>5 min nedjogg</li></ul></div>"
+    )
+
+    assert len(_blocks(fragment)) == 4
+
+
+def test_one_short_headline_does_not_save_a_related_headline_run() -> None:
+    """Observed live: Special Nest's trailing widget survived because a single four-word
+    headline fell under the five-word minimum while six longer headlines sat around it."""
+
+    fragment = (
+        "<div><p>Autism är vanligare bland pojkar än flickor.</p>"
+        '<ul><li>"Många autistiska personer ställer frågor som ingen annan ställer"</li>'
+        "<li>Hård kritik mot psykiatrin i tv-inslag</li>"
+        "<li>Smart bollträning ger självförtroende</li>"
+        "<li>Larmet: Kraftig ökning av självskador bland unga flickor</li>"
+        '<li>"Går inte att säga att de som utreder gör ett dåligt jobb"</li>'
+        "<li>“Ge aldrig ge upp om att få eleven till skolan”</li>"
+        "<li>Samtalsträffar om npf: ”Frustrationen är bubblande”</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Autism är vanligare bland pojkar än flickor.",)
+
+
+def test_the_swedish_wordpress_trailer_is_not_body_text() -> None:
+    """Observed live: Runner's World bodies end in the Swedish twin of the WordPress
+    trailer — "Inlägget <title> dök först upp på <site>." — rendered as prose."""
+
+    fragment = (
+        "<div><p>Superskorna kapar minuter för eliten.</p>"
+        "<p>Inlägget Är superskor verkligen superbra? dök först upp på "
+        "Runner's World.</p></div>"
+    )
+
+    assert _blocks(fragment) == ("Superskorna kapar minuter för eliten.",)
+
+
+def test_prose_that_merely_mentions_inlagget_survives() -> None:
+    fragment = (
+        "<div><p>Inlägget delades tusentals gånger innan det togs bort från plattformen.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 1
+
+
+def test_a_lone_mid_article_related_headline_is_not_body_text() -> None:
+    """Observed live: an SVT election article carried a single related-article headline as
+    a lone list item mid-body, too short a run for the trailing-widget rule to see."""
+
+    fragment = (
+        "<div><p>Valnatten bjöd på flera överraskningar.</p>"
+        # The en dash is verbatim from the delivered Edition.
+        "<ul><li>Jubel och historiskt dåligt resultat – här är fem punkter "  # noqa: RUF001
+        "från valnatten</li></ul>"
+        "<p>Partiledaren möter pressen under måndagen.</p></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Valnatten bjöd på flera överraskningar.",
+        "Partiledaren möter pressen under måndagen.",
+    )
+
+
+def test_a_lone_short_list_item_mid_article_survives() -> None:
+    fragment = (
+        "<div><p>Pack this before anything else.</p>"
+        "<ul><li>Passport and visa</li></ul>"
+        "<p>Everything else can be bought on arrival.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 3
+
+
+def test_a_lone_sentence_list_item_mid_article_survives() -> None:
+    fragment = (
+        "<div><p>Gör så här inför loppet.</p>"
+        "<ul><li>Ladda med kolhydrater kvällen före loppet.</li></ul>"
+        "<p>Resten ordnar sig på tävlingsdagen.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 3
+
+
+# --- cross-rule integration: the three fixes must compose, not just coexist -----------
+
+
+def _acquire_single_item(
+    fragment: str, *, mode: AcquisitionMode = AcquisitionMode.FEED
+) -> AcquisitionOutcome:
+    now = datetime(2026, 9, 14, tzinfo=UTC)
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Composed</title><item><title>Composed item</title>
+    <link>https://publisher.example/composed</link><guid>composed-1</guid>
+    <content:encoded><![CDATA[{fragment}]]></content:encoded></item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed.encode()),
+        }
+    ) as site:
+        return SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="composed",
+                publisher_id="publisher.example",
+                title="Composed",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=mode,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+
+def test_a_sponsored_label_split_by_breaks_still_marks_the_advertorial() -> None:
+    """A <br> inside a sponsorship label must not launder the advertorial: split into
+    "Sponsrat" / "innehåll", neither fragment matches the anchored marker set."""
+
+    prose = " ".join(f"ad-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<p>{prose}</p><p>Sponsrat<br/>innehåll</p>")
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_leading_sponsored_label_survives_chrome_stripping_to_mark_the_advertorial() -> None:
+    """The label often leads the page, exactly where the navigation-chrome rule eats short
+    list runs. Furniture stripping must never remove sponsorship evidence before the
+    sponsored check has ruled on the article."""
+
+    prose = " ".join(f"ad-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<ul><li>annonssamarbete med sézane</li></ul><p>{prose}</p>")
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_div_only_page_shell_still_yields_no_body() -> None:
+    """The leaf-div paragraph rule exists for feed content, where a publisher wrote real
+    paragraphs as divs. On the page path, finding no ordinary shapes is a deliberate
+    omission signal - a div-only nav shell must not become article prose."""
+
+    now = datetime(2026, 9, 14, tzinfo=UTC)
+    banner = " ".join(f"cookie-consent-clause-{index}" for index in range(90))
+    shell = (
+        "<html><body><article><div>Home</div><div>World News</div>"
+        f"<div>{banner}</div></article></body></html>"
+    )
+    feed = """<rss version="2.0"><channel><title>Shell</title><item>
+    <title>A shell page</title><link>REPLACE/shell</link><guid>shell-1</guid>
+    </item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", b""),
+            "/shell": (200, "text/html", shell.encode()),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            feed.replace("REPLACE", site.base_url).encode(),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="shell",
+                publisher_id="publisher",
+                title="Shell",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_trailing_read_more_fragment_does_not_make_a_teaser() -> None:
+    """Break-splitting must not manufacture teasers: a complete punctuated article whose
+    paragraph ends "<br/>Läs mer" now splits into a trailing two-word fragment, and the
+    teaser rule judges the last block. The control fragment is furniture; the article is
+    whole."""
+
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<p>{prose}<br/>Läs mer</p>")
+
+    (article,) = outcome.articles
+    assert article.classification == "verified_feed_body"
+    assert article.body is not None
+    assert article.body.endswith("word-89.")
+    assert "Läs mer" not in article.body

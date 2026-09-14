@@ -182,6 +182,33 @@ def _block_kind(element: HtmlElement, text: str) -> str:
     return "paragraph"
 
 
+def _break_separated_texts(element: HtmlElement) -> list[str]:
+    """One element's normalized texts, with each run of <br> as a segment boundary.
+
+    Observed live: Danstidningen's WordPress feed separates a review's paragraphs with
+    <br/> runs inside a single <p>, so a 500-word article rendered as one wall-of-text
+    paragraph. Splitting on any run of breaks restores the shape the publisher wrote;
+    empty segments (a trailing <br/>, doubled runs) carry no text and are dropped.
+    """
+
+    segments: list[list[str]] = [[]]
+
+    def collect(node: HtmlElement) -> None:
+        if node.text:
+            segments[-1].append(node.text)
+        for child in node:
+            if child.tag == "br":
+                segments.append([])
+            elif isinstance(child.tag, str):
+                collect(child)
+            if child.tail:
+                segments[-1].append(child.tail)
+
+    collect(element)
+    texts = (" ".join("".join(parts).split()) for parts in segments)
+    return [text for text in texts if text]
+
+
 def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[BodyBlock, ...]:
     unwanted = cast(
         list[HtmlElement], root.xpath(".//script|.//style|.//nav|.//footer|.//aside|.//form")
@@ -204,13 +231,42 @@ def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[Bod
     )
     blocks: list[BodyBlock] = []
     for element in elements:
-        text = " ".join(element.text_content().split())
-        if text:
-            blocks.append(BodyBlock(_block_kind(element, text), text))
+        segments = _break_separated_texts(element)
+        if not segments:
+            continue
+        kind = _block_kind(element, segments[0])
+        # A paragraph split by breaks is several paragraphs; a quote, list item, or
+        # code block with line breaks stays one block with the break read as space.
+        # A sponsorship label is never split: "Sponsrat<br/>innehåll" cut into two
+        # innocent fragments would launder the advertorial past `_is_sponsored`.
+        if kind == "paragraph" and not _matches_sponsored_label(" ".join(segments)):
+            blocks.extend(BodyBlock(kind, segment) for segment in segments)
+        else:
+            blocks.append(BodyBlock(kind, " ".join(segments)))
+    if not blocks and fallback_to_root_text:
+        # Danstidningen's WordPress feed writes each paragraph as a <div class=""> with
+        # empty divs between them — no <p> anywhere — so the root-text fallback used to
+        # deliver a whole review as one wall-of-text paragraph. When the ordinary shapes
+        # find nothing, text-bearing leaf divs are that body's paragraphs. Only leaf divs:
+        # a div wrapping real blocks is layout, and its text is already counted above.
+        # And only on the fallback path — feed content a publisher authored as divs. On
+        # the page path (fallback_to_root_text=False), finding no ordinary shapes is a
+        # deliberate omission signal, and a div-only nav shell or cookie wall with enough
+        # words must not become article prose.
+        leaf_divs = cast(
+            list[HtmlElement],
+            root.xpath(
+                ".//div[not(.//div or .//p or .//blockquote or .//li or .//pre)"
+                " and not(ancestor::li or ancestor::blockquote or ancestor::pre)]"
+            ),
+        )
+        for element in leaf_divs:
+            blocks.extend(
+                BodyBlock("paragraph", segment) for segment in _break_separated_texts(element)
+            )
     if blocks or not fallback_to_root_text:
         return _without_furniture(tuple(blocks))
-    fallback = " ".join(root.text_content().split())
-    return (BodyBlock("paragraph", fallback),) if fallback else ()
+    return tuple(BodyBlock("paragraph", segment) for segment in _break_separated_texts(root))
 
 
 def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
@@ -238,6 +294,32 @@ def _has_full_article_cta(fragment: str) -> bool:
     )
 
 
+# Sponsorship markers, defined ahead of the furniture rules deliberately: furniture
+# stripping must never destroy sponsorship evidence before `_is_sponsored` has ruled on
+# the article, so every drop below exempts a matching block. Full-block anchored matches
+# only — journalism that merely mentions a marker mid-sentence survives. A bare "annons"
+# is deliberately absent: alone it labels an ad slot on the page, not the article, and
+# treating it as article-level evidence would kill real journalism around embedded ads.
+_SPONSORED_BODY_LABELS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^annonssamarbete( i samarbete)?( med .+)?$",
+        r"^i samarbete med .+$",
+        r"^sponsrat innehåll$",
+        r"^sponsored( content)?$",
+        r"^paid partnership( with .+)?$",
+    )
+)
+
+
+def _matches_sponsored_label(text: str) -> bool:
+    stripped = text.strip().casefold()
+    return any(label.match(stripped) for label in _SPONSORED_BODY_LABELS)
+
+
+# The longest a dangling link control gets: "Läs mer", "Dela artikeln", "Read more".
+_TRAILING_CONTROL_WORDS = 3
+
 _MAXIMUM_LIST_RUN = 12
 _SHORT_LIST_ITEM_WORDS = 8
 
@@ -245,9 +327,13 @@ _SHORT_LIST_ITEM_WORDS = 8
 # compressed response can exceed the response cap before the size check sees it.
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
-# WordPress appends this to every feed item's content; it is metadata about syndication,
-# never publisher prose, so the anchored full match cannot condemn a real sentence.
-_WORDPRESS_TRAILER = re.compile(r"^The post .+ appeared first on .+$")
+# WordPress appends this to every feed item's content — in English, and in Swedish on
+# sites like Runner's World ("Inlägget … dök först upp på …"). It is metadata about
+# syndication, never publisher prose, so the anchored full match cannot condemn a real
+# sentence.
+_WORDPRESS_TRAILER = re.compile(
+    r"^(?:The post .+ appeared first on .+|Inlägget .+ dök först upp på .+)$"
+)
 
 # The longest a navigation menu entry gets. "Om oss", "Logga in", "Prenumeration" are one
 # or two words; a real first sentence is not.
@@ -282,6 +368,14 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
     - **Related-headlines widgets.** Special Nest pages end in a list of other articles'
       headlines. Beyond being junk, the widget changes as the site publishes, so an
       unchanged article kept re-reading as materially updated and re-entering Editions.
+    - **Video-widget droppings.** SVT embeds video players whose extraction mashes a
+      duration into the caption and a timestamp onto its end ("43 sekLiberalernas
+      jubel…Idag 01:52"), with bare topic tags alongside. The gluing — no space between
+      duration or timestamp and the neighbouring word — is a signature no publisher
+      sentence carries, so glued items are furniture anywhere, and a run of nothing but
+      glued items and tiny tags is the whole widget.
+    - **Lone mid-body teasers.** The same SVT pages drop a single related headline as a
+      one-item list between two paragraphs, too short a run for the trailing-widget rule.
     """
 
     kept: list[BodyBlock] = []
@@ -289,6 +383,12 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
     seen_prose = False
     while index < len(blocks):
         block = blocks[index]
+        # A sponsorship label is exempt from every drop below: it must survive to
+        # `_is_sponsored`, which then omits the whole article — so it never renders.
+        if _matches_sponsored_label(block.text):
+            kept.append(block)
+            index += 1
+            continue
         if block.kind != "list":
             if (
                 not _is_bare_label(block)
@@ -302,17 +402,39 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
         run_end = index
         while run_end < len(blocks) and blocks[run_end].kind == "list":
             run_end += 1
-        run = blocks[index:run_end]
-        if (
+        full_run = blocks[index:run_end]
+        kept.extend(item for item in full_run if _matches_sponsored_label(item.text))
+        run = [item for item in full_run if not _matches_sponsored_label(item.text)]
+        if not run or (
             _is_tabular_run(run)
+            or _is_video_widget_run(run)
             or (not seen_prose and _is_chrome_run(run))
             or (seen_prose and run_end == len(blocks) and _is_related_headline_run(run))
+            or (
+                len(run) == 1
+                and index > 0
+                and run_end < len(blocks)
+                and blocks[index - 1].kind == "paragraph"
+                and blocks[run_end].kind == "paragraph"
+                and _is_lone_teaser(run[0])
+            )
         ):
             index = run_end
             continue
-        kept.extend(item for item in run if not _is_bare_label(item))
+        kept.extend(item for item in run if not (_is_bare_label(item) or _is_widget_dropping(item)))
         seen_prose = True
         index = run_end
+    # Trailing control fragments. Break-splitting turns "…hela stycket.<br/>Läs mer" into a
+    # dangling two-word paragraph, which is a link control, not prose — and left in place it
+    # would read as a mid-sentence cut and demote a complete article to a teaser.
+    while (
+        kept
+        and kept[-1].kind == "paragraph"
+        and len(kept[-1].text.split()) <= _TRAILING_CONTROL_WORDS
+        and not kept[-1].text.rstrip(_CLOSING_MARKS).endswith(tuple(_TERMINAL_MARKS))
+        and not _matches_sponsored_label(kept[-1].text)
+    ):
+        kept.pop()
     return tuple(kept)
 
 
@@ -323,7 +445,11 @@ def _is_chrome_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
 
 
 _RELATED_HEADLINE_MIN_ITEMS = 2
-_RELATED_HEADLINE_MIN_WORDS = 5
+_RELATED_HEADLINE_MIN_WORDS = 4
+# How long a typical headline runs. Unanimity at this length let a widget through when
+# one four-word headline ("Smart bollträning ger självförtroende") sat among six longer
+# ones, so the length test asks a two-thirds majority instead, over the four-word floor.
+_RELATED_HEADLINE_TYPICAL_WORDS = 5
 # Closing quotes and brackets a headline may end with, ahead of the punctuation test:
 # straight quotes, curly double and single closing quotes, guillemet, parenthesis, bracket.
 _CLOSING_MARKS = "\"'\u201d\u2019\u00bb)]"
@@ -335,17 +461,88 @@ def _is_related_headline_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bo
     Headline-shaped means every item is long enough to be a headline rather than a keyword,
     and no item ends in a full stop. Headlines end with question marks, exclamations and
     quotes but not periods; a how-to list writes sentences and a packing list writes short
-    noun phrases, so both survive while a widget of nothing but headlines does not.
+    noun phrases, so both survive while a widget of nothing but headlines does not. A
+    two-thirds majority of typical-length items condemns the run, so one short headline
+    cannot save a widget while a list of uniformly four-word items still survives.
     """
 
     if len(run) < _RELATED_HEADLINE_MIN_ITEMS:
         return False
+    typical = 0
     for item in run:
-        if len(item.text.split()) < _RELATED_HEADLINE_MIN_WORDS:
+        words = len(item.text.split())
+        if words < _RELATED_HEADLINE_MIN_WORDS:
             return False
         if item.text.rstrip(_CLOSING_MARKS).endswith("."):
             return False
-    return True
+        if words >= _RELATED_HEADLINE_TYPICAL_WORDS:
+            typical += 1
+    return 3 * typical >= 2 * len(run)
+
+
+# SVT video widgets extract as list items that mash a duration straight into the caption
+# ("43 sekLiberalernas jubel…") and a relative or absolute timestamp straight onto the
+# item's end ("…drömma om”Idag 01:52", "…ligapremiären29 augusti 2026"). The gluing is
+# the signature: no publisher sentence runs a duration or timestamp into a neighbouring word
+# without a space, so "5 min uppvärmning" and "den 29 augusti 2026" stay prose.
+_VIDEO_CAPTION = re.compile(r"^\d+ (?:sek|min)(?=[^\sa-zåäö])")
+_SWEDISH_MONTHS = (
+    "januari|februari|mars|april|maj|juni|juli|augusti|september|oktober|november|december"
+)
+_GLUED_TIMESTAMP = re.compile(
+    r"[^\s.!?](?:(?:Idag|Igår) \d{2}:\d{2}" + rf"|\d{{1,2}} (?:{_SWEDISH_MONTHS}) \d{{4}})$"
+)
+
+# The longest a bare topic tag gets ("Harry Kane", "Hammarby IF Fotboll", "Generativ AI").
+_BARE_TAG_WORDS = 3
+
+_HEADLINE_END_MARKS = (".", "!", "?", ":", "\u2026")
+
+
+def _is_widget_dropping(block: BodyBlock) -> bool:
+    """A list item with a glued duration or timestamp is video-player chrome, anywhere."""
+
+    return bool(_VIDEO_CAPTION.match(block.text)) or bool(_GLUED_TIMESTAMP.search(block.text))
+
+
+def _is_bare_tag(block: BodyBlock) -> bool:
+    """A tiny unpunctuated item is a topic tag when it travels with widget droppings."""
+
+    text = block.text.rstrip(_CLOSING_MARKS)
+    return len(text.split()) <= _BARE_TAG_WORDS and not text.endswith(_HEADLINE_END_MARKS)
+
+
+def _is_video_widget_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A run of nothing but widget droppings and bare topic tags is a whole video widget.
+
+    At least one glued item must anchor the run: tags alone also describe a legitimate
+    short list ("Passport and visa"), but no reader-facing list glues timestamps into its
+    text.
+    """
+
+    if not any(_is_widget_dropping(item) for item in run):
+        return False
+    return all(_is_widget_dropping(item) or _is_bare_tag(item) for item in run)
+
+
+_LONE_TEASER_MIN_WORDS = 4
+_LONE_TEASER_MAX_WORDS = 14
+
+
+def _is_lone_teaser(block: BodyBlock) -> bool:
+    """A single headline-shaped list item wedged between two paragraphs is a teaser.
+
+    Observed live in an SVT election article as one mid-body related headline — a run too
+    short for the trailing-widget rule. Scoped hard to stay conservative: exactly one item,
+    paragraphs on both sides (the caller checks both), headline length, and no terminal
+    punctuation — a one-item how-to writes a sentence and a one-item packing list is short,
+    so both survive.
+    """
+
+    text = block.text.rstrip(_CLOSING_MARKS)
+    if text.endswith(_HEADLINE_END_MARKS):
+        return False
+    return _LONE_TEASER_MIN_WORDS <= len(block.text.split()) <= _LONE_TEASER_MAX_WORDS
 
 
 def _is_credit_line(block: BodyBlock) -> bool:
@@ -474,6 +671,26 @@ def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
         return False
     trimmed = blocks[-1].text.rstrip(_CLOSING_MARKS)
     return not trimmed or trimmed[-1] not in _TERMINAL_MARKS
+
+
+_SPONSORED_BYLINE_PREFIX = "sponsored"
+
+
+# Full-block-anchored only: an article that merely mentions "annonssamarbete" mid-sentence
+# is journalism about advertising, not the sponsorship itself.
+def _is_sponsored(author: str | None, blocks: tuple[BodyBlock, ...]) -> bool:
+    """A publisher's own sponsorship label marks advertising, never journalism.
+
+    Observed live twice: an English "Sponsored by Material Security" byline, and — with no
+    byline at all — a Sézane advertorial in Elle Sverige labelled only by trailing body
+    blocks extracted as list items ("creative-studio", "annonssamarbete med sézane"). Either
+    signal is sufficient; a sponsored item is skipped entirely rather than becoming an
+    Article or a Brief.
+    """
+
+    if author is not None and author.casefold().startswith(_SPONSORED_BYLINE_PREFIX):
+        return True
+    return any(_matches_sponsored_label(block.text) for block in blocks)
 
 
 def _decoded_feed(payload: bytes) -> str | bytes:
@@ -825,11 +1042,6 @@ class SourceClient:
         guid = str(guid_value) if guid_value is not None else None
         author_value = entry.get("author")
         author = str(author_value).strip() if author_value else None
-        # A byline that opens with "Sponsored" is the publisher's own label for paid
-        # placement. Advertising is not journalism, so it never becomes an Article or a
-        # Brief — observed live as a 1,700-word advertorial filling a personal Section.
-        if author is not None and author.casefold().startswith("sponsored"):
-            return None
         published = _entry_datetime(entry.get("published") or entry.get("updated"))
         language = _article_language(entry.get("language"), request.default_article_language)
         tags: Sequence[Mapping[str, Any]] = entry.get("tags", ())
@@ -838,6 +1050,10 @@ class SourceClient:
         )
 
         if request.mode == AcquisitionMode.METADATA_ONLY:
+            # No body is ever fetched in this mode, so only the byline signal applies —
+            # body-label sponsorship is checked once a body resolves, below.
+            if _is_sponsored(author, ()):
+                return None
             return AcquiredArticle(
                 request.source_id,
                 request.publisher_id,
@@ -899,6 +1115,8 @@ class SourceClient:
             body, blocks, classification = page.body, page.blocks, page.classification
             link_url = page.url
         if body is None or classification is None:
+            return None
+        if _is_sponsored(author, blocks):
             return None
         # Teaser demotion happens in `acquire`, after feed-wide boilerplate stripping —
         # only the cleaned body is honest to classify. See `_demote_teasers`.
