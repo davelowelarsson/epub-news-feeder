@@ -1190,9 +1190,12 @@ _ENGLISH_LABELS = {
         "permits remote processing is sent. Citation links identify the reporting used for "
         "each sentence."
     ),
+    # Deliberately names both reasons a Source can be excluded: a publisher verdict, and
+    # the operator's own rights review having lapsed (issue #112). The old wording blamed
+    # the publisher for both, which after a lapse is simply untrue.
     "ai_excluded": (
-        "Summaries are not generated for reporting from {sources}, whose publishers do not "
-        "permit it."
+        "Summaries are not generated for reporting from {sources}: their publishers do not "
+        "permit it, or the rights review behind them is not current."
     ),
     "ai_summary": "AI-generated summary",
     "also_in_edition": "Also in this Edition",
@@ -1249,8 +1252,8 @@ _SWEDISH_LABELS = {
         "användes för varje mening."
     ),
     "ai_excluded": (
-        "Sammanfattningar skapas inte för rapportering från {sources}, vars publicister inte "
-        "tillåter det."
+        "Sammanfattningar skapas inte för rapportering från {sources}: deras publicister "
+        "tillåter det inte, eller så är rättighetsgranskningen bakom dem inte aktuell."
     ),
     "ai_summary": "AI-genererad sammanfattning",
     "also_in_edition": "Även i den här utgåvan",
