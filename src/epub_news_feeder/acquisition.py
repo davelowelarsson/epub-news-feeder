@@ -295,9 +295,13 @@ _SHORT_LIST_ITEM_WORDS = 8
 # compressed response can exceed the response cap before the size check sees it.
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
-# WordPress appends this to every feed item's content; it is metadata about syndication,
-# never publisher prose, so the anchored full match cannot condemn a real sentence.
-_WORDPRESS_TRAILER = re.compile(r"^The post .+ appeared first on .+$")
+# WordPress appends this to every feed item's content — in English, and in Swedish on
+# sites like Runner's World ("Inlägget … dök först upp på …"). It is metadata about
+# syndication, never publisher prose, so the anchored full match cannot condemn a real
+# sentence.
+_WORDPRESS_TRAILER = re.compile(
+    r"^(?:The post .+ appeared first on .+|Inlägget .+ dök först upp på .+)$"
+)
 
 # The longest a navigation menu entry gets. "Om oss", "Logga in", "Prenumeration" are one
 # or two words; a real first sentence is not.
@@ -332,6 +336,14 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
     - **Related-headlines widgets.** Special Nest pages end in a list of other articles'
       headlines. Beyond being junk, the widget changes as the site publishes, so an
       unchanged article kept re-reading as materially updated and re-entering Editions.
+    - **Video-widget droppings.** SVT embeds video players whose extraction mashes a
+      duration into the caption and a timestamp onto its end ("43 sekLiberalernas
+      jubel…Idag 01:52"), with bare topic tags alongside. The gluing — no space between
+      duration or timestamp and the neighbouring word — is a signature no publisher
+      sentence carries, so glued items are furniture anywhere, and a run of nothing but
+      glued items and tiny tags is the whole widget.
+    - **Lone mid-body teasers.** The same SVT pages drop a single related headline as a
+      one-item list between two paragraphs, too short a run for the trailing-widget rule.
     """
 
     kept: list[BodyBlock] = []
@@ -355,12 +367,21 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
         run = blocks[index:run_end]
         if (
             _is_tabular_run(run)
+            or _is_video_widget_run(run)
             or (not seen_prose and _is_chrome_run(run))
             or (seen_prose and run_end == len(blocks) and _is_related_headline_run(run))
+            or (
+                len(run) == 1
+                and index > 0
+                and run_end < len(blocks)
+                and blocks[index - 1].kind == "paragraph"
+                and blocks[run_end].kind == "paragraph"
+                and _is_lone_teaser(run[0])
+            )
         ):
             index = run_end
             continue
-        kept.extend(item for item in run if not _is_bare_label(item))
+        kept.extend(item for item in run if not (_is_bare_label(item) or _is_widget_dropping(item)))
         seen_prose = True
         index = run_end
     return tuple(kept)
@@ -373,7 +394,11 @@ def _is_chrome_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
 
 
 _RELATED_HEADLINE_MIN_ITEMS = 2
-_RELATED_HEADLINE_MIN_WORDS = 5
+_RELATED_HEADLINE_MIN_WORDS = 4
+# How long a typical headline runs. Unanimity at this length let a widget through when
+# one four-word headline ("Smart bollträning ger självförtroende") sat among six longer
+# ones, so the length test asks a two-thirds majority instead, over the four-word floor.
+_RELATED_HEADLINE_TYPICAL_WORDS = 5
 # Closing quotes and brackets a headline may end with, ahead of the punctuation test:
 # straight quotes, curly double and single closing quotes, guillemet, parenthesis, bracket.
 _CLOSING_MARKS = "\"'\u201d\u2019\u00bb)]"
@@ -385,17 +410,88 @@ def _is_related_headline_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bo
     Headline-shaped means every item is long enough to be a headline rather than a keyword,
     and no item ends in a full stop. Headlines end with question marks, exclamations and
     quotes but not periods; a how-to list writes sentences and a packing list writes short
-    noun phrases, so both survive while a widget of nothing but headlines does not.
+    noun phrases, so both survive while a widget of nothing but headlines does not. A
+    two-thirds majority of typical-length items condemns the run, so one short headline
+    cannot save a widget while a list of uniformly four-word items still survives.
     """
 
     if len(run) < _RELATED_HEADLINE_MIN_ITEMS:
         return False
+    typical = 0
     for item in run:
-        if len(item.text.split()) < _RELATED_HEADLINE_MIN_WORDS:
+        words = len(item.text.split())
+        if words < _RELATED_HEADLINE_MIN_WORDS:
             return False
         if item.text.rstrip(_CLOSING_MARKS).endswith("."):
             return False
-    return True
+        if words >= _RELATED_HEADLINE_TYPICAL_WORDS:
+            typical += 1
+    return 3 * typical >= 2 * len(run)
+
+
+# SVT video widgets extract as list items that mash a duration straight into the caption
+# ("43 sekLiberalernas jubel…") and a relative or absolute timestamp straight onto the
+# item's end ("…drömma om”Idag 01:52", "…ligapremiären29 augusti 2026"). The gluing is
+# the signature: no publisher sentence runs a duration or timestamp into a neighbouring word
+# without a space, so "5 min uppvärmning" and "den 29 augusti 2026" stay prose.
+_VIDEO_CAPTION = re.compile(r"^\d+ (?:sek|min)(?=[^\sa-zåäö])")
+_SWEDISH_MONTHS = (
+    "januari|februari|mars|april|maj|juni|juli|augusti|september|oktober|november|december"
+)
+_GLUED_TIMESTAMP = re.compile(
+    r"[^\s.!?](?:(?:Idag|Igår) \d{2}:\d{2}" + rf"|\d{{1,2}} (?:{_SWEDISH_MONTHS}) \d{{4}})$"
+)
+
+# The longest a bare topic tag gets ("Harry Kane", "Hammarby IF Fotboll", "Generativ AI").
+_BARE_TAG_WORDS = 3
+
+_HEADLINE_END_MARKS = (".", "!", "?", ":", "\u2026")
+
+
+def _is_widget_dropping(block: BodyBlock) -> bool:
+    """A list item with a glued duration or timestamp is video-player chrome, anywhere."""
+
+    return bool(_VIDEO_CAPTION.match(block.text)) or bool(_GLUED_TIMESTAMP.search(block.text))
+
+
+def _is_bare_tag(block: BodyBlock) -> bool:
+    """A tiny unpunctuated item is a topic tag when it travels with widget droppings."""
+
+    text = block.text.rstrip(_CLOSING_MARKS)
+    return len(text.split()) <= _BARE_TAG_WORDS and not text.endswith(_HEADLINE_END_MARKS)
+
+
+def _is_video_widget_run(run: tuple[BodyBlock, ...] | list[BodyBlock]) -> bool:
+    """A run of nothing but widget droppings and bare topic tags is a whole video widget.
+
+    At least one glued item must anchor the run: tags alone also describe a legitimate
+    short list ("Passport and visa"), but no reader-facing list glues timestamps into its
+    text.
+    """
+
+    if not any(_is_widget_dropping(item) for item in run):
+        return False
+    return all(_is_widget_dropping(item) or _is_bare_tag(item) for item in run)
+
+
+_LONE_TEASER_MIN_WORDS = 4
+_LONE_TEASER_MAX_WORDS = 14
+
+
+def _is_lone_teaser(block: BodyBlock) -> bool:
+    """A single headline-shaped list item wedged between two paragraphs is a teaser.
+
+    Observed live in an SVT election article as one mid-body related headline — a run too
+    short for the trailing-widget rule. Scoped hard to stay conservative: exactly one item,
+    paragraphs on both sides (the caller checks both), headline length, and no terminal
+    punctuation — a one-item how-to writes a sentence and a one-item packing list is short,
+    so both survive.
+    """
+
+    text = block.text.rstrip(_CLOSING_MARKS)
+    if text.endswith(_HEADLINE_END_MARKS):
+        return False
+    return _LONE_TEASER_MIN_WORDS <= len(block.text.split()) <= _LONE_TEASER_MAX_WORDS
 
 
 def _is_credit_line(block: BodyBlock) -> bool:

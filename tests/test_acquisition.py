@@ -1773,3 +1773,141 @@ def test_a_page_body_of_br_separated_paragraphs_splits_the_same_way() -> None:
     article = outcome.articles[0]
     assert [block.kind for block in article.blocks] == ["paragraph", "paragraph"]
     assert article.body == f"{first}\n\n{second}"
+def test_svt_video_widget_captions_are_not_body_text() -> None:
+    """Observed live (Edition 2026-09-14): SVT video players extract as list items mashing
+    a duration straight into the caption and a timestamp straight onto its end. The runs
+    survived because the short topic tags mixed in fail the headline word minimum."""
+
+    fragment = (
+        "<div><p>Socialdemokraterna gjorde sitt bästa val på tolv år.</p>"
+        "<ul><li>43 sekLiberalernas jubel: ”Hade jag aldrig kunnat drömma om”Idag 01:52</li>"
+        # The en dash is verbatim from the delivered Edition.
+        "<li>33 sekHär räknas rösterna – ”En viktig grej för Sverige”Igår 23:16</li></ul>"  # noqa: RUF001
+        "<p>Rösträkningen fortsatte under natten.</p></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Socialdemokraterna gjorde sitt bästa val på tolv år.",
+        "Rösträkningen fortsatte under natten.",
+    )
+
+
+def test_an_svt_widget_mixing_captions_tags_and_teaser_rows_is_not_body_text() -> None:
+    """Observed live: the sport widget mixes video captions, glued-timestamp teaser rows
+    and bare topic tags in one run, so no single-item rule condemns the whole of it."""
+
+    fragment = (
+        "<div><p>Häcken gjorde processen kort i Göteborg.</p>"
+        "<ul><li>37 sekMaja Bodin målskytt igen när Häcken krossade VittsjöIgår 14:52</li>"
+        "<li>14 sekHär blir AIK:s nyförvärv hjälte mot PiteåIgår 16:19</li>"
+        "<li>25 sekBayern München med kross i ligapremiären29 augusti 2026</li>"
+        "<li>Harry Kane</li><li>Bundesliga</li><li>Hammarby IF Fotboll</li>"
+        "<li>Tuff Champions League-lottning för Gyökeres Arsenal27 augusti 2026</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Häcken gjorde processen kort i Göteborg.",)
+
+
+def test_svt_teaser_rows_with_glued_dates_are_not_body_text() -> None:
+    """Observed live: non-video teaser rows in the same widgets glue a relative or absolute
+    date straight onto the headline, with a bare topic tag alongside."""
+
+    fragment = (
+        "<div><p>Utvecklingen inom AI går fort.</p>"
+        "<ul><li>Altman: Ingen börsnotering för Open AI i årIgår 07:00</li>"
+        "<li>AI-jättens vd: AI-utvecklingen borde bromsas12 september 2026</li>"
+        "<li>Generativ AI</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Utvecklingen inom AI går fort.",)
+
+
+def test_a_workout_list_with_durations_survives() -> None:
+    """A duration followed by a space is prose — only a duration glued straight into the
+    next word is a video caption."""
+
+    fragment = (
+        "<div><p>Passet ser ut så här.</p>"
+        "<ul><li>5 min uppvärmning i lugnt tempo</li>"
+        "<li>10 min intervaller i backe</li>"
+        "<li>5 min nedjogg</li></ul></div>"
+    )
+
+    assert len(_blocks(fragment)) == 4
+
+
+def test_one_short_headline_does_not_save_a_related_headline_run() -> None:
+    """Observed live: Special Nest's trailing widget survived because a single four-word
+    headline fell under the five-word minimum while six longer headlines sat around it."""
+
+    fragment = (
+        "<div><p>Autism är vanligare bland pojkar än flickor.</p>"
+        '<ul><li>"Många autistiska personer ställer frågor som ingen annan ställer"</li>'
+        "<li>Hård kritik mot psykiatrin i tv-inslag</li>"
+        "<li>Smart bollträning ger självförtroende</li>"
+        "<li>Larmet: Kraftig ökning av självskador bland unga flickor</li>"
+        '<li>"Går inte att säga att de som utreder gör ett dåligt jobb"</li>'
+        "<li>“Ge aldrig ge upp om att få eleven till skolan”</li>"
+        "<li>Samtalsträffar om npf: ”Frustrationen är bubblande”</li></ul></div>"
+    )
+
+    assert _blocks(fragment) == ("Autism är vanligare bland pojkar än flickor.",)
+
+
+def test_the_swedish_wordpress_trailer_is_not_body_text() -> None:
+    """Observed live: Runner's World bodies end in the Swedish twin of the WordPress
+    trailer — "Inlägget <title> dök först upp på <site>." — rendered as prose."""
+
+    fragment = (
+        "<div><p>Superskorna kapar minuter för eliten.</p>"
+        "<p>Inlägget Är superskor verkligen superbra? dök först upp på "
+        "Runner's World.</p></div>"
+    )
+
+    assert _blocks(fragment) == ("Superskorna kapar minuter för eliten.",)
+
+
+def test_prose_that_merely_mentions_inlagget_survives() -> None:
+    fragment = (
+        "<div><p>Inlägget delades tusentals gånger innan det togs bort från plattformen.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 1
+
+
+def test_a_lone_mid_article_related_headline_is_not_body_text() -> None:
+    """Observed live: an SVT election article carried a single related-article headline as
+    a lone list item mid-body, too short a run for the trailing-widget rule to see."""
+
+    fragment = (
+        "<div><p>Valnatten bjöd på flera överraskningar.</p>"
+        # The en dash is verbatim from the delivered Edition.
+        "<ul><li>Jubel och historiskt dåligt resultat – här är fem punkter "  # noqa: RUF001
+        "från valnatten</li></ul>"
+        "<p>Partiledaren möter pressen under måndagen.</p></div>"
+    )
+
+    assert _blocks(fragment) == (
+        "Valnatten bjöd på flera överraskningar.",
+        "Partiledaren möter pressen under måndagen.",
+    )
+
+
+def test_a_lone_short_list_item_mid_article_survives() -> None:
+    fragment = (
+        "<div><p>Pack this before anything else.</p>"
+        "<ul><li>Passport and visa</li></ul>"
+        "<p>Everything else can be bought on arrival.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 3
+
+
+def test_a_lone_sentence_list_item_mid_article_survives() -> None:
+    fragment = (
+        "<div><p>Gör så här inför loppet.</p>"
+        "<ul><li>Ladda med kolhydrater kvällen före loppet.</li></ul>"
+        "<p>Resten ordnar sig på tävlingsdagen.</p></div>"
+    )
+
+    assert len(_blocks(fragment)) == 3
