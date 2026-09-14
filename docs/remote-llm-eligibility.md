@@ -6,10 +6,15 @@ private, single-operator summarisation?
 
 **Reviewed:** 2026-08-09; re-attested unchanged 2026-09-14 (issue #112) after the original
 window lapsed and fail-closed every Source at once.
-**Review expiry:** staggered per Source across 2026-12-07/14/21 (~90 days) so the fleet can
-never again expire on one calendar day, and immediately on any change to a publisher's
-terms, robots signal, or the provider's data-handling documentation. This matches the
-`review_expires_at` recorded in `examples/reality-check.yaml`.
+**Review expiry:** staggered per Source across 2026-12-07/14/21 (~90 days), and immediately
+on any change to a publisher's terms, robots signal, or the provider's data-handling
+documentation. This matches the `review_expires_at` recorded in `examples/reality-check.yaml`.
+**What expiry gates (operator decision 2026-09-14, issue #112):** only the LLM routes. These
+dates are the operator's own review-freshness bookkeeping — no publisher requires them — and
+robots.txt is re-read live on every fetch, which is the publisher's actual, current consent
+signal for acquisition. A lapsed review therefore never blocks fetching, retention, or an
+Edition; it stops the Source's text from reaching any model, local or remote, until
+re-reviewed, and that exclusion is disclosed in the Edition's end matter.
 
 **Fetch identity:** `epub-news-feeder research contact: https://github.com/davelowelarsson/epub-news-feeder`.
 Where that identity was refused, the page was read manually in an ordinary browser without changing
@@ -646,7 +651,9 @@ best, one of four Sources, and only after an OpenAI approval process. No field i
 11. **It does not survive its expiry.** Publisher terms, robots signals, and provider retention
     documentation all change without notice, and both SR and Condé Nast reserve the right to change
     theirs. After each Source's recorded `review_expires_at`, or after any observed change, these
-    verdicts are stale and the affected route degrades to `local_only` or disabled until
-    re-reviewed. This clause fired for real on 2026-09-09 (issue #112): the whole fleet shared one
-    expiry and every Edition stopped, which is why expiries are now staggered and every generate
-    run warns from 14 days out.
+    verdicts are stale and every LLM route for that Source is disabled until re-reviewed —
+    acquisition continues, because robots.txt is re-read on every fetch and carries the
+    publisher's current signal. The original all-gating version of this clause fired for real on
+    2026-09-09 (issue #112): the whole fleet shared one expiry and every Edition stopped, which is
+    why expiries are now staggered, every generate run warns from 14 days out, and expiry was
+    rescoped to the LLM routes it was written for.

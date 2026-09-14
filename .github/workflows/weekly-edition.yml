@@ -35,9 +35,6 @@ on:
 
 permissions:
   contents: read
-  # For the rights-review horizon step only: it keeps one tracking issue open while any
-  # Source's review is within seven days of expiry (issue #112).
-  issues: write
 
 # Deliberately the same group as daily-edition.yml, not a group of its own. The State Store is a
 # single mutable archive shared by every Publication, so two overlapping runs would silently lose
@@ -172,15 +169,12 @@ jobs:
           uv run epub-news-feeder source-health --state "$state" --format markdown \
             >> "$GITHUB_STEP_SUMMARY"
 
-      # The rights gate stays fail-closed; this step is its notice period. On 2026-09-09
-      # one shared review expiry silently stopped every Edition for six days (issue #112).
-      # The horizon table lands in the job summary on every run, and within seven days of
-      # any Source's expiry the step emits a workflow warning and keeps one tracking issue
-      # open. Ids and dates only — this log is world-readable.
+      # A lapsed rights review costs a Source its LLM routes, never its place in the
+      # Edition (issue #112) — but the horizon still belongs in the job summary, and a
+      # review within seven days of lapsing earns a workflow warning. Ids and dates only:
+      # this log is world-readable.
       - name: Rights review horizon
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           echo "## Rights review horizon" >> "$GITHUB_STEP_SUMMARY"
@@ -188,20 +182,7 @@ jobs:
             --format markdown >> "$GITHUB_STEP_SUMMARY"
           urgent="$(uv run epub-news-feeder rights-audit \
             --config examples/reality-check.yaml --within 7)"
-          if [ -z "$urgent" ]; then
-            exit 0
-          fi
-          ids="$(echo "$urgent" | tr '\n' ' ')"
-          echo "::warning::Rights reviews expired or expiring within 7 days: ${ids}"
-          title="Rights reviews expiring within 7 days"
-          body="Sources expired or expiring within 7 days as of $(date -u +%F): ${ids}
-
-          Renew the eligibility evidence in examples/reality-check.yaml before the gate
-          fail-closes them (see issue #112 for the renewal convention)."
-          number="$(gh issue list --state open --search "in:title \"$title\"" \
-            --json number --jq '.[0].number // empty')"
-          if [ -z "$number" ]; then
-            gh issue create --title "$title" --body "$body"
-          else
-            gh issue edit "$number" --body "$body"
+          if [ -n "$urgent" ]; then
+            ids="$(echo "$urgent" | tr '\n' ' ')"
+            echo "::warning::Rights reviews lapsed or lapsing within 7 days (AI summaries stop for): ${ids}"
           fi

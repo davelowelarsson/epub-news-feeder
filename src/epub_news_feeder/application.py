@@ -120,11 +120,11 @@ _NOTE_TEMPLATES: dict[str, dict[str, str]] = {
         "unavailable": "Some reporting from {title} was unavailable for this Edition.",
         "rights_expiring_one": (
             "The rights review behind one source expires {date}; without renewal its "
-            "reporting stops."
+            "AI summaries stop."
         ),
         "rights_expiring_many": (
             "The rights reviews behind {count} sources expire {date}; without renewal "
-            "that reporting stops."
+            "their AI summaries stop."
         ),
     },
     "sv": {
@@ -132,11 +132,11 @@ _NOTE_TEMPLATES: dict[str, dict[str, str]] = {
         "unavailable": "Viss rapportering från {title} var inte tillgänglig i den här utgåvan.",
         "rights_expiring_one": (
             "Rättighetsgranskningen bakom en källa löper ut {date}; utan förnyelse upphör "
-            "dess rapportering."
+            "dess AI-sammanfattningar."
         ),
         "rights_expiring_many": (
             "Rättighetsgranskningarna bakom {count} källor löper ut {date}; utan förnyelse "
-            "upphör den rapporteringen."
+            "upphör deras AI-sammanfattningar."
         ),
     },
 }
@@ -149,8 +149,9 @@ def _note(language: str, key: str, **fields: str) -> str:
 
 # How many days before a Source's rights review expires the warning starts. Two weeks:
 # observed live (2026-09-09), one shared expiry date silently took every Source down and
-# six mornings delivered nothing. The gate stays fail-closed; this is the notice period
-# during which the operator reads about the coming expiry in the Edition itself.
+# six mornings delivered nothing. Expiry now costs only the LLM routes (issue #112), but
+# the notice period stays — the operator reads about the coming lapse in the Edition
+# itself, with time to re-review before summaries quietly stop.
 _RIGHTS_REVIEW_WARNING_DAYS = 14
 
 
@@ -463,9 +464,9 @@ def _run(
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
-            # The gate below stays fail-closed; this is only the notice period before it
-            # closes. Observed live (2026-09-09): one shared review_expires_at silently
-            # took every Source down at once, and six mornings delivered nothing.
+            # Notice period for a review about to lapse. Expiry costs this Source its LLM
+            # routes, never its place in the Edition (issue #112) — but the operator still
+            # deserves two weeks of warning before summaries quietly stop.
             days_left = (
                 datetime.combine(evidence.review_expires_at, time.max, tzinfo=UTC) - generated_at
             ).days
@@ -1861,16 +1862,19 @@ def _allows_editorial(
     source = configuration.sources[source_id]
     if source.llm_processing == "disabled" or source.eligibility is None:
         return False
+    # Review expiry gates exactly this — both limbs, and nothing else (issue #112). Text
+    # keeps flowing into the Edition after a review lapses, because robots.txt is re-read
+    # on every fetch; it does not go to any model under a stale reading of the publisher's
+    # AI policy, and the exclusion is disclosed in the Edition's end matter.
+    expires_at = datetime.combine(source.eligibility.review_expires_at, time.max, tzinfo=UTC)
+    if expires_at <= generated_at:
+        return False
     if not remote:
         return source.eligibility.local_llm == "allow"
-    # Acquisition already refuses an expired Source, so this can only fire as defence in
-    # depth — which is exactly what the one route that leaves the machine should have.
-    expires_at = datetime.combine(source.eligibility.review_expires_at, time.max, tzinfo=UTC)
     return (
         source.llm_processing == "remote_allowed"
         and source.eligibility.remote_llm == "allow"
         and source.rights is not None
-        and expires_at > generated_at
     )
 
 
