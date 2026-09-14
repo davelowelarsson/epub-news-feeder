@@ -182,6 +182,33 @@ def _block_kind(element: HtmlElement, text: str) -> str:
     return "paragraph"
 
 
+def _break_separated_texts(element: HtmlElement) -> list[str]:
+    """One element's normalized texts, with each run of <br> as a segment boundary.
+
+    Observed live: Danstidningen's WordPress feed separates a review's paragraphs with
+    <br/> runs inside a single <p>, so a 500-word article rendered as one wall-of-text
+    paragraph. Splitting on any run of breaks restores the shape the publisher wrote;
+    empty segments (a trailing <br/>, doubled runs) carry no text and are dropped.
+    """
+
+    segments: list[list[str]] = [[]]
+
+    def collect(node: HtmlElement) -> None:
+        if node.text:
+            segments[-1].append(node.text)
+        for child in node:
+            if child.tag == "br":
+                segments.append([])
+            elif isinstance(child.tag, str):
+                collect(child)
+            if child.tail:
+                segments[-1].append(child.tail)
+
+    collect(element)
+    texts = (" ".join("".join(parts).split()) for parts in segments)
+    return [text for text in texts if text]
+
+
 def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[BodyBlock, ...]:
     unwanted = cast(
         list[HtmlElement], root.xpath(".//script|.//style|.//nav|.//footer|.//aside|.//form")
@@ -204,13 +231,36 @@ def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[Bod
     )
     blocks: list[BodyBlock] = []
     for element in elements:
-        text = " ".join(element.text_content().split())
-        if text:
-            blocks.append(BodyBlock(_block_kind(element, text), text))
+        segments = _break_separated_texts(element)
+        if not segments:
+            continue
+        kind = _block_kind(element, segments[0])
+        # A paragraph split by breaks is several paragraphs; a quote, list item, or
+        # code block with line breaks stays one block with the break read as space.
+        if kind == "paragraph":
+            blocks.extend(BodyBlock(kind, segment) for segment in segments)
+        else:
+            blocks.append(BodyBlock(kind, " ".join(segments)))
+    if not blocks:
+        # Danstidningen's WordPress feed writes each paragraph as a <div class=""> with
+        # empty divs between them — no <p> anywhere — so the root-text fallback used to
+        # deliver a whole review as one wall-of-text paragraph. When the ordinary shapes
+        # find nothing, text-bearing leaf divs are that body's paragraphs. Only leaf divs:
+        # a div wrapping real blocks is layout, and its text is already counted above.
+        leaf_divs = cast(
+            list[HtmlElement],
+            root.xpath(
+                ".//div[not(.//div or .//p or .//blockquote or .//li or .//pre)"
+                " and not(ancestor::li or ancestor::blockquote or ancestor::pre)]"
+            ),
+        )
+        for element in leaf_divs:
+            blocks.extend(
+                BodyBlock("paragraph", segment) for segment in _break_separated_texts(element)
+            )
     if blocks or not fallback_to_root_text:
         return _without_furniture(tuple(blocks))
-    fallback = " ".join(root.text_content().split())
-    return (BodyBlock("paragraph", fallback),) if fallback else ()
+    return tuple(BodyBlock("paragraph", segment) for segment in _break_separated_texts(root))
 
 
 def _html_blocks(fragment: str) -> tuple[BodyBlock, ...]:
