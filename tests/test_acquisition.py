@@ -1773,6 +1773,8 @@ def test_a_page_body_of_br_separated_paragraphs_splits_the_same_way() -> None:
     article = outcome.articles[0]
     assert [block.kind for block in article.blocks] == ["paragraph", "paragraph"]
     assert article.body == f"{first}\n\n{second}"
+
+
 def test_svt_video_widget_captions_are_not_body_text() -> None:
     """Observed live (Edition 2026-09-14): SVT video players extract as list items mashing
     a duration straight into the caption and a timestamp straight onto its end. The runs
