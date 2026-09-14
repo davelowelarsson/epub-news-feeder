@@ -194,6 +194,9 @@ class _BriefRecord:
     categories: tuple[str, ...]
     published_at: datetime
     source_id: str
+    # The feed GUID, kept only for delivered-story suppression: a moved URL changes the
+    # Brief's own id, but the GUID still names the Article identity the reader already has.
+    guid: str | None = None
 
 
 type _SelectableRecord = _ArticleRecord
@@ -485,6 +488,7 @@ def _run(
                         categories=acquired.categories,
                         published_at=acquired.published_at or generated_at,
                         source_id=source_id,
+                        guid=acquired.guid,
                     )
                     continue
                 observation = state.observe_article(
@@ -552,7 +556,18 @@ def _run(
     briefs = {
         brief_id: record
         for brief_id, record in briefs.items()
-        if brief_id not in delivered_brief_ids and record.published_at >= brief_cutoff
+        if brief_id not in delivered_brief_ids
+        and record.published_at >= brief_cutoff
+        # A Brief's own id hashes its *current* URL; the alias lookup catches a delivered
+        # story that moved URLs before it was paywalled, which the id alone cannot.
+        and (
+            state.article_id_for(
+                canonical_url=record.brief.canonical_url,
+                source_id=record.source_id,
+                guid=record.guid,
+            )
+            not in delivered_brief_ids
+        )
     }
 
     # The same suppression across Publications, for a Publication that names one. Deliberately

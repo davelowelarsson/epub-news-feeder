@@ -727,6 +727,93 @@ publications:
 
 @pytest.mark.acceptance
 @pytest.mark.epubcheck
+def test_a_delivered_story_republished_at_a_new_url_never_returns_as_a_brief(
+    tmp_path: Path,
+) -> None:
+    """Two independent reviews flagged the same gap: Brief identity is the hash of the
+    *current* URL, while a delivered Article keeps the identity of its *first* URL — the
+    feed GUID reassigns later observations to it. A publisher that moves a delivered story
+    to a new URL and then paywalls it would slip its Brief past the delivered-article
+    suppression. The GUID alias is the identity machinery Articles already use, so Brief
+    candidacy resolves through it too."""
+
+    holder = {
+        "xml": _feed(
+            _item(
+                title="A story that will move",
+                slug="story-a",
+                body_words=[f"story-{index}" for index in range(220)],
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            ).replace("<guid>story-a</guid>", "<guid>shared-guid-1</guid>")
+        )
+    }
+    with _mutable_feed_server(holder) as server:
+        configuration = _configuration(
+            tmp_path,
+            f"""
+version: 1
+sources:
+  fixture:
+    title: Fixture News
+    publisher_id: fixture-publisher
+    allowed_publisher_origins: [https://publisher.example]
+    feed_url: http://127.0.0.1:{server.server_port}/feed.xml
+    acquisition: feed
+    llm_processing: local_only
+{_EVIDENCE}
+publications:
+  - id: morning
+    title: Morning Briefing
+    language: en
+    budget: {{max_articles: 3, min_articles: 1}}
+    max_briefs: 6
+    sections:
+      - id: world
+        title: World
+        sources: [fixture]
+""".lstrip(),
+        )
+        generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260819T040000Z-MOVEAAAA",
+            generated_at=datetime(2026, 8, 19, 4, tzinfo=UTC),
+        )
+
+        # The publisher moves the delivered story to a new URL (same feed GUID) and
+        # paywalls it: the teaser arrives as a Brief candidate under a fresh URL hash.
+        holder["xml"] = _feed(
+            _teaser_item(
+                title="A story that will move",
+                slug="story-b",
+                body_words=[f"stub-{index}" for index in range(100)],
+                pub_date="Wed, 19 Aug 2026 06:00:00 GMT",
+            ).replace("<guid>story-b</guid>", "<guid>shared-guid-1</guid>")
+            + _item(
+                title="An unrelated fresh report",
+                slug="unrelated",
+                body_words=[f"other-{index}" for index in range(90)],
+                pub_date="Thu, 20 Aug 2026 06:00:00 GMT",
+            )
+        )
+        second = generate_edition(
+            configuration,
+            state_path=tmp_path / "state.sqlite3",
+            output_directory=tmp_path / "editions",
+            diagnostics_directory=tmp_path / "diagnostics",
+            run_id="20260820T040000Z-MOVEBBBB",
+            generated_at=datetime(2026, 8, 20, 4, tzinfo=UTC),
+        )
+
+    assert second.brief_count == 0, "the GUID names a story the reader already has"
+    rendered = _epub_text(second.receipt.path)
+    assert "A story that will move" not in rendered
+
+
+@pytest.mark.acceptance
+@pytest.mark.epubcheck
 def test_the_briefing_roll_carries_no_stale_headlines(tmp_path: Path) -> None:
     """Observed live (weekly of 2026-08-22): a 43-day-old headline made the Briefing Roll,
     because round-robin selection reached deep into a slow Source. Articles have age

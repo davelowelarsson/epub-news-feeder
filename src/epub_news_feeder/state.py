@@ -706,6 +706,21 @@ class StateStore:
                 return str(row["article_id"])
         return None
 
+    def article_id_for(self, *, canonical_url: str, source_id: str, guid: str | None) -> str | None:
+        """The durable Article identity this URL or feed GUID already names, if any.
+
+        Exists for Brief candidacy: a Brief's own id is the hash of its *current* URL,
+        while a delivered Article keeps the identity of its *first* URL — the GUID alias
+        reassigns later observations to it. A publisher that moves a delivered story to a
+        new URL and then paywalls it would otherwise slip its Brief past delivered-article
+        suppression.
+        """
+
+        aliases = [f"url:{normalize_url(canonical_url)}"]
+        if guid:
+            aliases.append(f"guid:{source_id}:{guid}")
+        return self._find_article(aliases)
+
     def _revision_eligibility(
         self,
         publication_id: str,
