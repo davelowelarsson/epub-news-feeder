@@ -539,10 +539,20 @@ def _run(
     delivered_brief_ids: set[str] = set()
     for history_id in (publication.id, *publication.reads_history_from):
         delivered_brief_ids |= state.delivered_brief_ids(history_id)
+    # Delivered Articles suppress the same story's Brief too. A Brief and an Article derive
+    # identity from the same canonical URL hash, so when a delivered story's page later
+    # shrinks into a teaser, its Brief candidate carries the id of the Article the reader
+    # already has — observed live as four of twelve Briefs reprinting the week's reading.
+    delivered_brief_ids |= state.delivered_article_ids(
+        (publication.id, *publication.reads_history_from)
+    )
+    # And a Brief owes the reader freshness: it is two seconds of reading, and round-robin
+    # selection was observed reaching a 43-day-old headline out of a slow Source.
+    brief_cutoff = generated_at - timedelta(days=publication.max_brief_age_days)
     briefs = {
         brief_id: record
         for brief_id, record in briefs.items()
-        if brief_id not in delivered_brief_ids
+        if brief_id not in delivered_brief_ids and record.published_at >= brief_cutoff
     }
 
     # The same suppression across Publications, for a Publication that names one. Deliberately
