@@ -497,6 +497,10 @@ sources:
     feed_url: https://www.danstidningen.se/feed/
     acquisition: auto
     llm_processing: local_only
+    # Danstidningen's short dance notices (operator decision 2026-09-14): 120-220 words is
+    # the whole piece, not a paywall stub, so they stay full Articles in Alice's Section
+    # rather than being demoted to the Briefing Roll.
+    allow_short_as_published: true
     rights:
       basis: published_private_offline_reprint_guidance
       audience: single_operator

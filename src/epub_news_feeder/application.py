@@ -218,6 +218,9 @@ class _BriefRecord:
     categories: tuple[str, ...]
     published_at: datetime
     source_id: str
+    # The feed GUID, kept only for delivered-story suppression: a moved URL changes the
+    # Brief's own id, but the GUID still names the Article identity the reader already has.
+    guid: str | None = None
 
 
 type _SelectableRecord = _ArticleRecord
@@ -526,6 +529,7 @@ def _run(
                         categories=acquired.categories,
                         published_at=acquired.published_at or generated_at,
                         source_id=source_id,
+                        guid=acquired.guid,
                     )
                     continue
                 observation = state.observe_article(
@@ -594,10 +598,31 @@ def _run(
     delivered_brief_ids: set[str] = set()
     for history_id in (publication.id, *publication.reads_history_from):
         delivered_brief_ids |= state.delivered_brief_ids(history_id)
+    # Delivered Articles suppress the same story's Brief too. A Brief and an Article derive
+    # identity from the same canonical URL hash, so when a delivered story's page later
+    # shrinks into a teaser, its Brief candidate carries the id of the Article the reader
+    # already has — observed live as four of twelve Briefs reprinting the week's reading.
+    delivered_brief_ids |= state.delivered_article_ids(
+        (publication.id, *publication.reads_history_from)
+    )
+    # And a Brief owes the reader freshness: it is two seconds of reading, and round-robin
+    # selection was observed reaching a 43-day-old headline out of a slow Source.
+    brief_cutoff = generated_at - timedelta(days=publication.max_brief_age_days)
     briefs = {
         brief_id: record
         for brief_id, record in briefs.items()
         if brief_id not in delivered_brief_ids
+        and record.published_at >= brief_cutoff
+        # A Brief's own id hashes its *current* URL; the alias lookup catches a delivered
+        # story that moved URLs before it was paywalled, which the id alone cannot.
+        and (
+            state.article_id_for(
+                canonical_url=record.brief.canonical_url,
+                source_id=record.source_id,
+                guid=record.guid,
+            )
+            not in delivered_brief_ids
+        )
     }
 
     # The same suppression across Publications, for a Publication that names one. Deliberately
