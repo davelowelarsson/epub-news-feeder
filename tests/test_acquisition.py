@@ -1214,6 +1214,121 @@ def test_a_sponsored_byline_is_not_an_article() -> None:
     assert outcome.omitted == 1
 
 
+def test_a_sponsored_body_label_is_not_an_article() -> None:
+    """Observed live: a Sézane advertorial in Elle Sverige ("French girl fall: Här ar
+    nyckelplaggen for att hitta stilen") filled an Article Slot. Elle carries no byline for
+    it; sponsorship is marked only by trailing body labels extracted as list items —
+    "creative-studio" and "annonssamarbete med sezane"."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Elle Sverige</title><item><title>French girl fall</title>
+    <link>https://publisher.example/sezane</link><guid>sezane-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>
+    <ul><li>creative-studio</li><li>annonssamarbete med sezane</li></ul>]]></content:encoded>
+    </item>
+    <item><title>A real report</title>
+    <link>https://publisher.example/real</link><guid>real-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="elle",
+                publisher_id="publisher.example",
+                title="Elle Sverige",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["A real report"]
+    assert outcome.omitted == 1
+
+
+def test_a_sponsored_body_label_in_swedish_is_not_an_article() -> None:
+    """The Swedish label "Sponsrat innehåll" marks sponsorship as plainly as the English
+    "Sponsored", and must be caught the same way."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Swedish Mag</title><item><title>A paid feature</title>
+    <link>https://publisher.example/paid</link><guid>paid-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p><p>Sponsrat innehåll</p>]]></content:encoded>
+    </item>
+    <item><title>A real report</title>
+    <link>https://publisher.example/real</link><guid>real-1</guid>
+    <content:encoded><![CDATA[<p>{prose}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="swedish-mag",
+                publisher_id="publisher.example",
+                title="Swedish Mag",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_PARTIAL"
+    assert [article.title for article in outcome.articles] == ["A real report"]
+    assert outcome.omitted == 1
+
+
+def test_an_article_mentioning_annonssamarbete_mid_sentence_is_still_journalism() -> None:
+    """An article about advertising practices that merely mentions "annonssamarbete" inside
+    a sentence is journalism, not the sponsorship itself. Only a block whose entire trimmed
+    text is the label counts."""
+
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    sentence = "Den har artikeln handlar om hur annonssamarbete regleras i sociala medier just nu."
+    filler = " ".join(f"word-{index}" for index in range(80))
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Media Watch</title><item><title>How influencer ads are regulated</title>
+    <link>https://publisher.example/regulation</link><guid>regulation-1</guid>
+    <content:encoded><![CDATA[<p>{sentence} {filler}</p>]]></content:encoded></item>
+    </channel></rss>""".encode()
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed),
+        }
+    ) as site:
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="media-watch",
+                publisher_id="publisher.example",
+                title="Media Watch",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.FEED,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.code == "SOURCE_OK"
+    assert [article.title for article in outcome.articles] == ["How influencer ads are regulated"]
+    assert outcome.omitted == 0
+
+
 def test_a_body_cut_mid_sentence_is_demoted_to_a_teaser_link() -> None:
     """Observed live: a Special Nest page under 200 words ended "...har Philip Lindersten,
     som ar grundare av och verksamh" - cut mid-word. It cleared the 80-word full-body minimum

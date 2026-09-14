@@ -476,6 +476,42 @@ def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
     return not trimmed or trimmed[-1] not in _TERMINAL_MARKS
 
 
+_SPONSORED_BYLINE_PREFIX = "sponsored"
+
+# Full-block-anchored only: an article that merely mentions "annonssamarbete" mid-sentence
+# is journalism about advertising, not the sponsorship itself.
+_SPONSORED_BODY_LABELS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^annonssamarbete( i samarbete)?( med .+)?$",
+        r"^i samarbete med .+$",
+        r"^annons$",
+        r"^sponsrat innehåll$",
+        r"^sponsored( content)?$",
+        r"^paid partnership( with .+)?$",
+    )
+)
+
+
+def _is_sponsored(author: str | None, blocks: tuple[BodyBlock, ...]) -> bool:
+    """A publisher's own sponsorship label marks advertising, never journalism.
+
+    Observed live twice: an English "Sponsored by Material Security" byline, and — with no
+    byline at all — a Sézane advertorial in Elle Sverige labelled only by trailing body
+    blocks extracted as list items ("creative-studio", "annonssamarbete med sézane"). Either
+    signal is sufficient; a sponsored item is skipped entirely rather than becoming an
+    Article or a Brief.
+    """
+
+    if author is not None and author.casefold().startswith(_SPONSORED_BYLINE_PREFIX):
+        return True
+    return any(
+        label.match(block.text.strip().casefold())
+        for block in blocks
+        for label in _SPONSORED_BODY_LABELS
+    )
+
+
 def _decoded_feed(payload: bytes) -> str | bytes:
     """Decode a feed as UTF-8, degrading one bad byte rather than the whole document.
 
@@ -825,11 +861,6 @@ class SourceClient:
         guid = str(guid_value) if guid_value is not None else None
         author_value = entry.get("author")
         author = str(author_value).strip() if author_value else None
-        # A byline that opens with "Sponsored" is the publisher's own label for paid
-        # placement. Advertising is not journalism, so it never becomes an Article or a
-        # Brief — observed live as a 1,700-word advertorial filling a personal Section.
-        if author is not None and author.casefold().startswith("sponsored"):
-            return None
         published = _entry_datetime(entry.get("published") or entry.get("updated"))
         language = _article_language(entry.get("language"), request.default_article_language)
         tags: Sequence[Mapping[str, Any]] = entry.get("tags", ())
@@ -838,6 +869,10 @@ class SourceClient:
         )
 
         if request.mode == AcquisitionMode.METADATA_ONLY:
+            # No body is ever fetched in this mode, so only the byline signal applies —
+            # body-label sponsorship is checked once a body resolves, below.
+            if _is_sponsored(author, ()):
+                return None
             return AcquiredArticle(
                 request.source_id,
                 request.publisher_id,
@@ -899,6 +934,8 @@ class SourceClient:
             body, blocks, classification = page.body, page.blocks, page.classification
             link_url = page.url
         if body is None or classification is None:
+            return None
+        if _is_sponsored(author, blocks):
             return None
         # Teaser demotion happens in `acquire`, after feed-wide boilerplate stripping —
         # only the cleaned body is honest to classify. See `_demote_teasers`.
