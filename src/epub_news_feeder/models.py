@@ -199,6 +199,13 @@ class Publication(StrictModel):
     # Briefs are capped entirely outside the Article Budget: a Brief never consumes an
     # Article Slot, so it has no business inside a structure scoped to Article content.
     max_briefs: NonNegativeInt = 6
+    # The oldest headline the Briefing Roll may carry, counted back from generation time.
+    # Seven days covers both a daily and a weekly; a Brief is two seconds of reading and
+    # owes the reader at least the freshness an Article's age window guarantees. An undated
+    # Brief is deliberately treated as fresh on every run — the same choice Articles make
+    # for max_age_days, and self-limiting: once selected and delivered it is suppressed
+    # permanently.
+    max_brief_age_days: PositiveInt = 7
     # Named Publications whose delivery history this one may read. Suppression is
     # per-Publication by design, and that boundary is load-bearing, so widening it is opt-in
     # and explicit. Mutual references are legitimate — one reader reading both a daily and a
