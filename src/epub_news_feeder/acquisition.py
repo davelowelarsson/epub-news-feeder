@@ -237,16 +237,22 @@ def _root_blocks(root: HtmlElement, *, fallback_to_root_text: bool) -> tuple[Bod
         kind = _block_kind(element, segments[0])
         # A paragraph split by breaks is several paragraphs; a quote, list item, or
         # code block with line breaks stays one block with the break read as space.
-        if kind == "paragraph":
+        # A sponsorship label is never split: "Sponsrat<br/>innehåll" cut into two
+        # innocent fragments would launder the advertorial past `_is_sponsored`.
+        if kind == "paragraph" and not _matches_sponsored_label(" ".join(segments)):
             blocks.extend(BodyBlock(kind, segment) for segment in segments)
         else:
             blocks.append(BodyBlock(kind, " ".join(segments)))
-    if not blocks:
+    if not blocks and fallback_to_root_text:
         # Danstidningen's WordPress feed writes each paragraph as a <div class=""> with
         # empty divs between them — no <p> anywhere — so the root-text fallback used to
         # deliver a whole review as one wall-of-text paragraph. When the ordinary shapes
         # find nothing, text-bearing leaf divs are that body's paragraphs. Only leaf divs:
         # a div wrapping real blocks is layout, and its text is already counted above.
+        # And only on the fallback path — feed content a publisher authored as divs. On
+        # the page path (fallback_to_root_text=False), finding no ordinary shapes is a
+        # deliberate omission signal, and a div-only nav shell or cookie wall with enough
+        # words must not become article prose.
         leaf_divs = cast(
             list[HtmlElement],
             root.xpath(
@@ -287,6 +293,32 @@ def _has_full_article_cta(fragment: str) -> bool:
         for paragraph in paragraphs
     )
 
+
+# Sponsorship markers, defined ahead of the furniture rules deliberately: furniture
+# stripping must never destroy sponsorship evidence before `_is_sponsored` has ruled on
+# the article, so every drop below exempts a matching block. Full-block anchored matches
+# only — journalism that merely mentions a marker mid-sentence survives. A bare "annons"
+# is deliberately absent: alone it labels an ad slot on the page, not the article, and
+# treating it as article-level evidence would kill real journalism around embedded ads.
+_SPONSORED_BODY_LABELS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^annonssamarbete( i samarbete)?( med .+)?$",
+        r"^i samarbete med .+$",
+        r"^sponsrat innehåll$",
+        r"^sponsored( content)?$",
+        r"^paid partnership( with .+)?$",
+    )
+)
+
+
+def _matches_sponsored_label(text: str) -> bool:
+    stripped = text.strip().casefold()
+    return any(label.match(stripped) for label in _SPONSORED_BODY_LABELS)
+
+
+# The longest a dangling link control gets: "Läs mer", "Dela artikeln", "Read more".
+_TRAILING_CONTROL_WORDS = 3
 
 _MAXIMUM_LIST_RUN = 12
 _SHORT_LIST_ITEM_WORDS = 8
@@ -351,6 +383,12 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
     seen_prose = False
     while index < len(blocks):
         block = blocks[index]
+        # A sponsorship label is exempt from every drop below: it must survive to
+        # `_is_sponsored`, which then omits the whole article — so it never renders.
+        if _matches_sponsored_label(block.text):
+            kept.append(block)
+            index += 1
+            continue
         if block.kind != "list":
             if (
                 not _is_bare_label(block)
@@ -364,8 +402,10 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
         run_end = index
         while run_end < len(blocks) and blocks[run_end].kind == "list":
             run_end += 1
-        run = blocks[index:run_end]
-        if (
+        full_run = blocks[index:run_end]
+        kept.extend(item for item in full_run if _matches_sponsored_label(item.text))
+        run = [item for item in full_run if not _matches_sponsored_label(item.text)]
+        if not run or (
             _is_tabular_run(run)
             or _is_video_widget_run(run)
             or (not seen_prose and _is_chrome_run(run))
@@ -384,6 +424,17 @@ def _without_furniture(blocks: tuple[BodyBlock, ...]) -> tuple[BodyBlock, ...]:
         kept.extend(item for item in run if not (_is_bare_label(item) or _is_widget_dropping(item)))
         seen_prose = True
         index = run_end
+    # Trailing control fragments. Break-splitting turns "…hela stycket.<br/>Läs mer" into a
+    # dangling two-word paragraph, which is a link control, not prose — and left in place it
+    # would read as a mid-sentence cut and demote a complete article to a teaser.
+    while (
+        kept
+        and kept[-1].kind == "paragraph"
+        and len(kept[-1].text.split()) <= _TRAILING_CONTROL_WORDS
+        and not kept[-1].text.rstrip(_CLOSING_MARKS).endswith(tuple(_TERMINAL_MARKS))
+        and not _matches_sponsored_label(kept[-1].text)
+    ):
+        kept.pop()
     return tuple(kept)
 
 
@@ -624,21 +675,9 @@ def _is_teaser(blocks: tuple[BodyBlock, ...], word_count: int) -> bool:
 
 _SPONSORED_BYLINE_PREFIX = "sponsored"
 
+
 # Full-block-anchored only: an article that merely mentions "annonssamarbete" mid-sentence
 # is journalism about advertising, not the sponsorship itself.
-_SPONSORED_BODY_LABELS = tuple(
-    re.compile(pattern)
-    for pattern in (
-        r"^annonssamarbete( i samarbete)?( med .+)?$",
-        r"^i samarbete med .+$",
-        r"^annons$",
-        r"^sponsrat innehåll$",
-        r"^sponsored( content)?$",
-        r"^paid partnership( with .+)?$",
-    )
-)
-
-
 def _is_sponsored(author: str | None, blocks: tuple[BodyBlock, ...]) -> bool:
     """A publisher's own sponsorship label marks advertising, never journalism.
 
@@ -651,11 +690,7 @@ def _is_sponsored(author: str | None, blocks: tuple[BodyBlock, ...]) -> bool:
 
     if author is not None and author.casefold().startswith(_SPONSORED_BYLINE_PREFIX):
         return True
-    return any(
-        label.match(block.text.strip().casefold())
-        for block in blocks
-        for label in _SPONSORED_BODY_LABELS
-    )
+    return any(_matches_sponsored_label(block.text) for block in blocks)
 
 
 def _decoded_feed(payload: bytes) -> str | bytes:

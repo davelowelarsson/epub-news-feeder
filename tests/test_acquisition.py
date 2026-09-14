@@ -13,6 +13,7 @@ import pytest
 
 from epub_news_feeder.acquisition import (
     AcquisitionMode,
+    AcquisitionOutcome,
     EligibilityEvidence,
     SourceClient,
     SourceRequest,
@@ -1913,3 +1914,114 @@ def test_a_lone_sentence_list_item_mid_article_survives() -> None:
     )
 
     assert len(_blocks(fragment)) == 3
+
+
+# --- cross-rule integration: the three fixes must compose, not just coexist -----------
+
+
+def _acquire_single_item(
+    fragment: str, *, mode: AcquisitionMode = AcquisitionMode.FEED
+) -> AcquisitionOutcome:
+    now = datetime(2026, 9, 14, tzinfo=UTC)
+    feed = f"""<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+    <channel><title>Composed</title><item><title>Composed item</title>
+    <link>https://publisher.example/composed</link><guid>composed-1</guid>
+    <content:encoded><![CDATA[{fragment}]]></content:encoded></item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", feed.encode()),
+        }
+    ) as site:
+        return SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="composed",
+                publisher_id="publisher.example",
+                title="Composed",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=mode,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+
+def test_a_sponsored_label_split_by_breaks_still_marks_the_advertorial() -> None:
+    """A <br> inside a sponsorship label must not launder the advertorial: split into
+    "Sponsrat" / "innehåll", neither fragment matches the anchored marker set."""
+
+    prose = " ".join(f"ad-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<p>{prose}</p><p>Sponsrat<br/>innehåll</p>")
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_leading_sponsored_label_survives_chrome_stripping_to_mark_the_advertorial() -> None:
+    """The label often leads the page, exactly where the navigation-chrome rule eats short
+    list runs. Furniture stripping must never remove sponsorship evidence before the
+    sponsored check has ruled on the article."""
+
+    prose = " ".join(f"ad-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<ul><li>annonssamarbete med sézane</li></ul><p>{prose}</p>")
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_div_only_page_shell_still_yields_no_body() -> None:
+    """The leaf-div paragraph rule exists for feed content, where a publisher wrote real
+    paragraphs as divs. On the page path, finding no ordinary shapes is a deliberate
+    omission signal - a div-only nav shell must not become article prose."""
+
+    now = datetime(2026, 9, 14, tzinfo=UTC)
+    banner = " ".join(f"cookie-consent-clause-{index}" for index in range(90))
+    shell = (
+        "<html><body><article><div>Home</div><div>World News</div>"
+        f"<div>{banner}</div></article></body></html>"
+    )
+    feed = """<rss version="2.0"><channel><title>Shell</title><item>
+    <title>A shell page</title><link>REPLACE/shell</link><guid>shell-1</guid>
+    </item></channel></rss>"""
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (200, "application/rss+xml", b""),
+            "/shell": (200, "text/html", shell.encode()),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            feed.replace("REPLACE", site.base_url).encode(),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="shell",
+                publisher_id="publisher",
+                title="Shell",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    assert outcome.articles == ()
+    assert outcome.omitted == 1
+
+
+def test_a_trailing_read_more_fragment_does_not_make_a_teaser() -> None:
+    """Break-splitting must not manufacture teasers: a complete punctuated article whose
+    paragraph ends "<br/>Läs mer" now splits into a trailing two-word fragment, and the
+    teaser rule judges the last block. The control fragment is furniture; the article is
+    whole."""
+
+    prose = " ".join(f"word-{index}" for index in range(90)) + "."
+    outcome = _acquire_single_item(f"<p>{prose}<br/>Läs mer</p>")
+
+    (article,) = outcome.articles
+    assert article.classification == "verified_feed_body"
+    assert article.body is not None
+    assert article.body.endswith("word-89.")
+    assert "Läs mer" not in article.body
