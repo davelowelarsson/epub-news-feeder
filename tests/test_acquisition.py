@@ -1670,3 +1670,106 @@ def test_a_teaser_and_boilerplate_stripping_do_not_collide() -> None:
         if article.title != "Paywalled report":
             assert article.body is not None
             assert "Integrate TI Lookup" not in article.body
+
+
+def test_a_paragraph_of_br_separated_paragraphs_splits_into_blocks() -> None:
+    fragment = "<p>First para.<br/><br/>Second para.</p>"
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("paragraph", "First para."),
+        ("paragraph", "Second para."),
+    ]
+
+
+def test_a_single_br_also_separates_and_empty_fragments_are_dropped() -> None:
+    fragment = "<p>Dansen bar hela verket.<br/>En kort bildtext under scenen.<br/></p>"
+    assert _blocks(fragment) == (
+        "Dansen bar hela verket.",
+        "En kort bildtext under scenen.",
+    )
+
+
+def test_a_br_inside_inline_markup_still_separates_paragraphs() -> None:
+    fragment = "<p><em>First para.<br/><br/>Second para.</em> Tail text.</p>"
+    assert _blocks(fragment) == ("First para.", "Second para. Tail text.")
+
+
+def test_a_wordpress_body_of_leaf_divs_splits_into_paragraphs() -> None:
+    fragment = (
+        '<div class=""></div>\n<div class="">Kaotiskt, dystopiskt. Eller hoppfullt?</div>\n'
+        '<div class=""></div>\n<div class="">Driscoll har skapat ett stycke för 15 dansare.</div>'
+    )
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("paragraph", "Kaotiskt, dystopiskt. Eller hoppfullt?"),
+        ("paragraph", "Driscoll har skapat ett stycke för 15 dansare."),
+    ]
+
+
+def test_a_div_wrapping_real_paragraphs_does_not_duplicate_them() -> None:
+    fragment = "<div><p>Prose the page already carries.</p></div>"
+    assert _blocks(fragment) == ("Prose the page already carries.",)
+
+
+def test_a_br_run_inside_a_leaf_div_also_separates_paragraphs() -> None:
+    fragment = "<div>First para.<br/><br/>Second para.</div>"
+    assert _blocks(fragment) == ("First para.", "Second para.")
+
+
+def test_bare_text_around_a_br_does_not_glue_words_together() -> None:
+    fragment = "Turnén fortsätter i höst<br/>Föreställningen ges igen i oktober."
+    assert _blocks(fragment) == (
+        "Turnén fortsätter i höst",
+        "Föreställningen ges igen i oktober.",
+    )
+
+
+def test_a_line_break_inside_a_quote_does_not_split_it() -> None:
+    fragment = "<blockquote>Rörelsen stannar aldrig,<br/>den bara byter riktning.</blockquote>"
+    assert [(block.kind, block.text) for block in _html_blocks(fragment)] == [
+        ("quote", "Rörelsen stannar aldrig, den bara byter riktning."),
+    ]
+
+
+@pytest.mark.acceptance
+def test_a_page_body_of_br_separated_paragraphs_splits_the_same_way() -> None:
+    now = datetime(2026, 8, 9, tzinfo=UTC)
+    first = " ".join(f"page-br-first-{index}" for index in range(80)) + "."
+    second = " ".join(f"page-br-second-{index}" for index in range(80)) + "."
+    with fixture_site(
+        {
+            "/robots.txt": (200, "text/plain", b"User-agent: *\nAllow: /\n"),
+            "/feed.xml": (
+                200,
+                "application/rss+xml",
+                b'<rss version="2.0"><channel><title>Page</title><item>'
+                b"<title>Break-separated report</title><link>REPLACE/article</link>"
+                b"<guid>page-br-1</guid></item></channel></rss>",
+            ),
+            "/article": (
+                200,
+                "text/html",
+                (
+                    f"<html><body><article><p>{first}<br/><br/>{second}</p></article></body></html>"
+                ).encode(),
+            ),
+        }
+    ) as site:
+        site.routes["/feed.xml"] = (
+            200,
+            "application/rss+xml",
+            site.routes["/feed.xml"][2].replace(b"REPLACE", site.base_url.encode()),
+        )
+        outcome = SourceClient(now=lambda: now).acquire(
+            SourceRequest(
+                source_id="page-br",
+                publisher_id="publisher",
+                title="Page",
+                feed_url=f"{site.base_url}/feed.xml",
+                mode=AcquisitionMode.WEB,
+                llm_processing="local_only",
+                evidence=evidence(now),
+            )
+        )
+
+    article = outcome.articles[0]
+    assert [block.kind for block in article.blocks] == ["paragraph", "paragraph"]
+    assert article.body == f"{first}\n\n{second}"
