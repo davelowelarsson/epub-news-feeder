@@ -8,7 +8,7 @@ import sqlite3
 import unicodedata
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
 
@@ -118,17 +118,41 @@ _NOTE_TEMPLATES: dict[str, dict[str, str]] = {
     "en": {
         "evidence_missing": "{title} was omitted because eligibility evidence is missing.",
         "unavailable": "Some reporting from {title} was unavailable for this Edition.",
+        "rights_expiring_one": (
+            "The rights review behind one source expires {date}; without renewal its "
+            "AI summaries stop."
+        ),
+        "rights_expiring_many": (
+            "The rights reviews behind {count} sources expire {date}; without renewal "
+            "their AI summaries stop."
+        ),
     },
     "sv": {
         "evidence_missing": "{title} utelämnades eftersom rättighetsunderlag saknas.",
         "unavailable": "Viss rapportering från {title} var inte tillgänglig i den här utgåvan.",
+        "rights_expiring_one": (
+            "Rättighetsgranskningen bakom en källa löper ut {date}; utan förnyelse upphör "
+            "dess AI-sammanfattningar."
+        ),
+        "rights_expiring_many": (
+            "Rättighetsgranskningarna bakom {count} källor löper ut {date}; utan förnyelse "
+            "upphör deras AI-sammanfattningar."
+        ),
     },
 }
 
 
-def _note(language: str, key: str, *, title: str) -> str:
+def _note(language: str, key: str, **fields: str) -> str:
     table = _NOTE_TEMPLATES.get(language.split("-", 1)[0].casefold(), _NOTE_TEMPLATES["en"])
-    return table[key].format(title=title)
+    return table[key].format(**fields)
+
+
+# How many days before a Source's rights review expires the warning starts. Two weeks:
+# observed live (2026-09-09), one shared expiry date silently took every Source down and
+# six mornings delivered nothing. Expiry now costs only the LLM routes (issue #112), but
+# the notice period stays — the operator reads about the coming lapse in the Edition
+# itself, with time to re-review before summaries quietly stop.
+_RIGHTS_REVIEW_WARNING_DAYS = 14
 
 
 class GenerationError(Exception):
@@ -426,6 +450,7 @@ def _run(
     briefs: dict[str, _BriefRecord] = {}
     source_records: dict[str, list[str]] = {source_id: [] for source_id in source_ids}
     notes: list[str] = []
+    expiring_reviews: dict[date, int] = {}
     degraded_source_ids: set[str] = set()
 
     client = SourceClient(now=lambda: generated_at)
@@ -442,6 +467,22 @@ def _run(
                 degraded_source_ids.add(source_id)
                 continue
             evidence = source.eligibility
+            # Notice period for a review about to lapse. Expiry costs this Source its LLM
+            # routes, never its place in the Edition (issue #112) — but the operator still
+            # deserves two weeks of warning before summaries quietly stop.
+            days_left = (
+                datetime.combine(evidence.review_expires_at, time.max, tzinfo=UTC) - generated_at
+            ).days
+            if 0 <= days_left <= _RIGHTS_REVIEW_WARNING_DAYS:
+                expiring_reviews[evidence.review_expires_at] = (
+                    expiring_reviews.get(evidence.review_expires_at, 0) + 1
+                )
+                diagnostics.emit(
+                    "SOURCE_RIGHTS_REVIEW_EXPIRING",
+                    phase="acquisition",
+                    source_id=source_id,
+                    days_left=days_left,
+                )
             outcome = client.acquire(_source_request(source_id, source))
             succeeded = outcome.code in {"SOURCE_OK", "SOURCE_PARTIAL"}
             state.record_source_health(
@@ -524,6 +565,20 @@ def _run(
             )
     finally:
         client.close()
+
+    # One aggregated Publication Note per expiry date, not one per Source: the reviews were
+    # batched, so their expiries batch too, and the reader is the operator — the Edition's
+    # own end matter is the one place a warning is guaranteed to be read before the cliff.
+    for expiry_date in sorted(expiring_reviews):
+        count = expiring_reviews[expiry_date]
+        notes.append(
+            _note(
+                publication.language,
+                "rights_expiring_one" if count == 1 else "rights_expiring_many",
+                date=expiry_date.isoformat(),
+                count=str(count),
+            )
+        )
 
     _suppress_title_twins(records, source_records, diagnostics)
     _suppress_recently_delivered_titles(
@@ -1832,16 +1887,19 @@ def _allows_editorial(
     source = configuration.sources[source_id]
     if source.llm_processing == "disabled" or source.eligibility is None:
         return False
+    # Review expiry gates exactly this — both limbs, and nothing else (issue #112). Text
+    # keeps flowing into the Edition after a review lapses, because robots.txt is re-read
+    # on every fetch; it does not go to any model under a stale reading of the publisher's
+    # AI policy, and the exclusion is disclosed in the Edition's end matter.
+    expires_at = datetime.combine(source.eligibility.review_expires_at, time.max, tzinfo=UTC)
+    if expires_at <= generated_at:
+        return False
     if not remote:
         return source.eligibility.local_llm == "allow"
-    # Acquisition already refuses an expired Source, so this can only fire as defence in
-    # depth — which is exactly what the one route that leaves the machine should have.
-    expires_at = datetime.combine(source.eligibility.review_expires_at, time.max, tzinfo=UTC)
     return (
         source.llm_processing == "remote_allowed"
         and source.eligibility.remote_llm == "allow"
         and source.rights is not None
-        and expires_at > generated_at
     )
 
 

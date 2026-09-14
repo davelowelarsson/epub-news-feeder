@@ -767,9 +767,17 @@ class SourceClient:
         return AcquisitionOutcome(request.source_id, code, tuple(articles), omitted)
 
     def _evidence_denial(self, request: SourceRequest) -> str | None:
+        """The recorded verdicts gate acquisition; the review's age deliberately does not.
+
+        Review expiry once denied here too, and on 2026-09-09 one shared expiry date
+        silenced every Edition for six days (issue #112). The operator's decision: these
+        dates are the operator's own review-freshness bookkeeping — no publisher asked for
+        them — and robots.txt is re-checked live on every fetch, which is the publisher's
+        actual, current consent signal. A stale review now gates only the LLM routes
+        (``_allows_editorial``), where reading a publisher's AI policy freshly does matter.
+        """
+
         evidence = request.evidence
-        if evidence.expires_at.astimezone(UTC) <= self._now().astimezone(UTC):
-            return "SOURCE_RIGHTS_REVIEW_EXPIRED"
         if evidence.feed_acquisition != "allow":
             return "SOURCE_FEED_NOT_ALLOWED"
         if request.mode != AcquisitionMode.METADATA_ONLY and (

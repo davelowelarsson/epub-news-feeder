@@ -168,3 +168,21 @@ jobs:
           fi
           uv run epub-news-feeder source-health --state "$state" --format markdown \
             >> "$GITHUB_STEP_SUMMARY"
+
+      # A lapsed rights review costs a Source its LLM routes, never its place in the
+      # Edition (issue #112) — but the horizon still belongs in the job summary, and a
+      # review within seven days of lapsing earns a workflow warning. Ids and dates only:
+      # this log is world-readable.
+      - name: Rights review horizon
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "## Rights review horizon" >> "$GITHUB_STEP_SUMMARY"
+          uv run epub-news-feeder rights-audit --config examples/reality-check.yaml \
+            --format markdown >> "$GITHUB_STEP_SUMMARY"
+          urgent="$(uv run epub-news-feeder rights-audit \
+            --config examples/reality-check.yaml --within 7)"
+          if [ -n "$urgent" ]; then
+            ids="$(echo "$urgent" | tr '\n' ' ')"
+            echo "::warning::Rights reviews lapsed or lapsing within 7 days (AI summaries stop for): ${ids}"
+          fi
