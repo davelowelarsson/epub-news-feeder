@@ -6,9 +6,10 @@ import re
 import sqlite3
 import sys
 import webbrowser
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from datetime import UTC, date, datetime
+from hashlib import sha256
 from pathlib import Path
 
 from epub_news_feeder import __version__
@@ -29,6 +30,12 @@ from epub_news_feeder.drive_oauth import (
     authorize,
     find_client_secret,
     load_client_secret,
+)
+from epub_news_feeder.kobo import (
+    KoboRepairError,
+    damaged_downloads,
+    drive_download_root,
+    repair_downloads,
 )
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
@@ -133,6 +140,37 @@ def _parser() -> argparse.ArgumentParser:
     rights_audit.add_argument(
         "--at", help="Audit relative to this ISO date instead of today (for reproducibility)."
     )
+    kobo_repair = commands.add_parser(
+        "kobo-repair",
+        help=(
+            "Repair Google Drive downloads a Kobo damaged on arrival (reports only unless "
+            "--apply is given)."
+        ),
+    )
+    kobo_repair.add_argument(
+        "--volume", type=Path, default=Path("/Volumes/KOBOeReader"), help="The mounted Kobo."
+    )
+    kobo_repair.add_argument(
+        "--apply",
+        action="store_true",
+        help="Strip the error body from every download Drive vouches for, byte for byte.",
+    )
+    kobo_repair.add_argument(
+        "--drive-folder",
+        action="append",
+        default=None,
+        help=(
+            "A Drive folder whose files are the repair's source of truth; repeat it to cover "
+            "the archive as well as the delivery folder."
+        ),
+    )
+    kobo_repair.add_argument(
+        "--backup",
+        type=Path,
+        default=Path(".local/kobo-backups"),
+        help="Where the damaged originals are copied before anything is rewritten.",
+    )
+
     rights_audit.add_argument(
         "--within",
         type=int,
@@ -459,6 +497,82 @@ def _rights_audit(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def _kobo_repair(arguments: argparse.Namespace) -> int:
+    """Report, and on request repair, Drive downloads a Kobo prefixed with an error body.
+
+    Reporting is the default because the repair writes to the device. Nothing is rewritten
+    until Drive has confirmed the payload digest, so the command cannot invent bytes.
+    """
+
+    try:
+        root = drive_download_root(arguments.volume)
+    except KoboRepairError as error:
+        print(f"code=KOBO_VOLUME_INVALID message={error}", file=sys.stderr)
+        return 2
+    damaged = damaged_downloads(root)
+    if not damaged:
+        print(f"code=KOBO_DOWNLOADS_INTACT volume={arguments.volume}")
+        return 0
+    for download in damaged:
+        print(
+            f"code=KOBO_DOWNLOAD_DAMAGED name={download.name} "
+            f"prefix_bytes={download.prefix_bytes} sha256={download.payload_sha256}"
+        )
+    if not arguments.apply:
+        print(f"code=KOBO_REPAIR_AVAILABLE damaged={len(damaged)} hint=--apply")
+        return 0
+    folders = arguments.drive_folder or [
+        folder
+        for folder in (
+            os.environ.get("GOOGLE_DRIVE_FOLDER_ID"),
+            os.environ.get("GOOGLE_DRIVE_FOLDER_ARCHIVE"),
+        )
+        if folder
+    ]
+    if not folders:
+        print(
+            "code=KOBO_REPAIR_UNVERIFIABLE message=--drive-folder is required to apply a repair",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        credentials = credentials_from_environment()
+    except DriveConfigurationError as error:
+        print(f"code=DRIVE_CONFIGURATION_INVALID message={error}", file=sys.stderr)
+        return 2
+    client = HttpDriveClient(credentials=credentials)
+    outcomes = repair_downloads(
+        damaged,
+        expected_sha256=_drive_digest(client, folders),
+        backup_directory=arguments.backup,
+    )
+    for outcome in outcomes:
+        code = "KOBO_DOWNLOAD_REPAIRED" if outcome.repaired else "KOBO_DOWNLOAD_UNCHANGED"
+        print(f"code={code} name={outcome.name} reason={outcome.reason}")
+    return 0 if all(outcome.repaired for outcome in outcomes) else 3
+
+
+def _drive_digest(
+    client: HttpDriveClient, folder_ids: Sequence[str]
+) -> Callable[[str], str | None]:
+    """Answer with the digest of the delivered Edition of that name, downloading it to be sure.
+
+    Folders are searched in order, because an Edition old enough to have been archived is no
+    longer in the delivery folder yet is still the file that was delivered. Drive's own
+    ``md5Checksum`` is not used: the repair has to prove the on-device payload is the Edition
+    that was delivered, and only the bytes themselves prove that.
+    """
+
+    def digest(name: str) -> str | None:
+        for folder_id in folder_ids:
+            found = client.find_file(folder_id=folder_id, filename=name)
+            if found is not None:
+                return sha256(client.download(file_id=found.file_id)).hexdigest()
+        return None
+
+    return digest
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if arguments.command == "generate":
@@ -477,4 +591,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _source_health(arguments.state, arguments.format)
     if arguments.command == "rights-audit":
         return _rights_audit(arguments)
+    if arguments.command == "kobo-repair":
+        return _kobo_repair(arguments)
     raise AssertionError(f"Unhandled command: {arguments.command}")
