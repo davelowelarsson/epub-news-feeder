@@ -354,7 +354,7 @@ def test_kobo_repair_reports_damage_without_writing_unless_asked(
     damaged_body = _ERROR_BODY + _epub()
     path = _write(root, "edition.epub", damaged_body)
 
-    code = main(["kobo-repair", "--volume", str(root)])
+    code = main(["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "scans")])
 
     assert code == 0
     assert path.read_bytes() == damaged_body
@@ -385,6 +385,8 @@ def test_kobo_repair_applies_the_repair_against_drive(
             "delivery",
             "--backup",
             str(tmp_path / "backups"),
+            "--log-dir",
+            str(tmp_path / "scans"),
         ]
     )
 
@@ -401,7 +403,8 @@ def test_kobo_repair_reports_a_healthy_device(
     root = _device(tmp_path)
     _write(root, "good.epub", _epub())
 
-    assert main(["kobo-repair", "--volume", str(root)]) == 0
+    arguments = ["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "scans")]
+    assert main(arguments) == 0
     assert "code=KOBO_DOWNLOADS_INTACT" in capsys.readouterr().out
 
 
@@ -798,3 +801,24 @@ def test_logging_can_be_turned_off(tmp_path: Path) -> None:
 
     assert main(["kobo-repair", "--volume", str(root), "--log-dir", str(logs), "--no-log"]) == 0
     assert not logs.exists()
+
+
+def test_the_suite_never_writes_to_the_real_scan_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The log directory defaults to a path inside the repository, so a CLI test that forgets
+    to redirect it appends fixture data to a record meant to measure a real device."""
+
+    from epub_news_feeder.cli import _parser, main
+
+    default = Path(_parser().parse_args(["kobo-repair", "--volume", "/x"]).log_dir)
+    before = sorted(default.glob("*.jsonl")) if default.exists() else []
+
+    root = _device(tmp_path)
+    _write(root, "good.epub", _epub())
+    monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_DB", raising=False)
+    main(["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "scans")])
+
+    after = sorted(default.glob("*.jsonl")) if default.exists() else []
+    assert after == before
+    assert (tmp_path / "scans").exists()
