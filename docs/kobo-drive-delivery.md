@@ -115,9 +115,14 @@ The device serial is deliberately not recorded, though the firmware version is: 
 are meant to be shareable, including with the upstream report, and a serial identifies the
 hardware rather than the fault.
 
-This exists because **nobody has a measured failure rate for this bug, including Kobo**. The
-evidence so far is a handful of dated observations. Enough of these records answers how often
-downloads actually fail, and whether re-linking the account decays the way it appears to.
+This exists because **nobody has measured how often this bug bites, including Kobo**. The
+evidence so far is a handful of dated observations.
+
+Be precise about what the records measure: how much damage is *present on the device* at each
+visit, not how often a download attempt fails. A damaged file that is scanned ten times without
+being touched appears in ten records; it was one bad download. Reading a failure rate out of
+this needs the dates and what happened between them — when the account was re-linked, when
+Editions were opened — which is why the timestamp matters as much as the counts.
 
 ## Options that were investigated and rejected
 

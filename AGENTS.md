@@ -53,8 +53,9 @@ unavailable.
 
 This has been misdiagnosed twice. Before changing `epub.py`, read the first four bytes of the
 file on the device: `PK\x03\x04` is healthy, `{` is a Google error body the device prepended.
-Run `uv run --env-file .env epub-news-feeder kobo-repair` — it reports without writing, and
-`--env-file` is what lets it reach Drive to verify and to store the scan record.
+Run `uv run --env-file .env epub-news-feeder kobo-repair` — it never modifies the device
+without `--apply`, though it does append a scan record locally and upload it unless `--no-log`.
+`--env-file` is what lets it reach Drive, both to verify payloads and to store that record.
 
 See [docs/kobo-drive-delivery.md](docs/kobo-drive-delivery.md) for the full diagnosis. The short
 version: a book that opens with a working cover and table of contents but blank pages is a

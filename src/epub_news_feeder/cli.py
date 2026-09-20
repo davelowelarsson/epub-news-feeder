@@ -592,15 +592,15 @@ def _record_scan(
 
     if arguments.no_log:
         return
-    record = scan_record(
-        volume=arguments.volume,
-        damaged=cast(Any, damaged),
-        outcomes=cast(Any, outcomes),
-        at=datetime.now(UTC),
-    )
     try:
+        record = scan_record(
+            volume=arguments.volume,
+            damaged=cast(Any, damaged),
+            outcomes=cast(Any, outcomes),
+            at=datetime.now(UTC),
+        )
         path = append_scan(record, log_directory=arguments.log_dir)
-    except OSError as error:
+    except Exception as error:
         print(f"code=KOBO_SCAN_LOG_FAILED message={error}", file=sys.stderr)
         return
     print(f"code=KOBO_SCAN_LOGGED path={path}")

@@ -31,6 +31,14 @@ _ERROR_BODY = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_drive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The log folder defaults to an environment variable. On a machine where it is exported,
+    a CLI test would upload fixture records to the real state folder."""
+
+    monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_DB", raising=False)
+
+
 def _device(tmp_path: Path) -> Path:
     root = tmp_path / "KOBOeReader"
     (root / ".kobo" / "google_drive" / "01_daily_news").mkdir(parents=True)
@@ -673,6 +681,7 @@ def test_a_scan_record_summarises_what_a_repair_did(tmp_path: Path) -> None:
     assert record["outcomes"] == [
         {
             "name": "edition.epub",
+            "folder": "01_daily_news",
             "status": "repaired",
             "reason": f"stripped {len(_ERROR_BODY)} bytes",
         }
@@ -841,3 +850,80 @@ def test_a_scan_that_cannot_be_uploaded_says_so(
     output = capsys.readouterr().out
     assert "code=KOBO_SCAN_NOT_UPLOADED" in output
     assert "--env-file" in output
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "SERIAL_A,4.9.77,\nSERIAL_B,x,y",  # a second line's serial landed in field 2
+        "SERIAL_A,4.9.77,not a version",
+        "SERIAL_A,4.9.77,../../etc/passwd",
+        "SERIAL_A",
+        "",
+    ],
+)
+def test_firmware_is_none_rather_than_whatever_was_in_that_field(
+    tmp_path: Path, content: str
+) -> None:
+    """The record is meant to be publishable. A field that is not a firmware version is not
+    reported as one — the serial sits one field away."""
+
+    from epub_news_feeder.kobo import device_firmware
+
+    root = _device(tmp_path)
+    (root / ".kobo" / "version").write_text(content)
+
+    assert device_firmware(root) is None
+
+
+def test_firmware_reads_only_the_first_line(tmp_path: Path) -> None:
+    from epub_news_feeder.kobo import device_firmware
+
+    root = _device(tmp_path)
+    (root / ".kobo" / "version").write_text("N4286,4.9.77,5.18.270971,4.9.77\nSERIAL_B,1,2\n")
+
+    assert device_firmware(root) == "5.18.270971"
+
+
+def test_outcomes_for_the_same_name_in_two_folders_stay_distinct(tmp_path: Path) -> None:
+    """The delivery folder and the archive can hold one name, and on the real device they do.
+    Collapsing them loses a repair and labels it as if nothing happened."""
+
+    from epub_news_feeder.kobo import scan_record
+
+    root = _device(tmp_path)
+    current, archived = _epub(b"current"), _epub(b"archived")
+    _write(root, "same.epub", _ERROR_BODY + current)
+    _write(root, "same.epub", _ERROR_BODY + archived, folder="01_daily_news/archive")
+    damaged = damaged_downloads(drive_download_root(root))
+    outcomes = repair_downloads(
+        damaged,
+        drive_digests=lambda name: (sha256(current).hexdigest(),),  # only the delivery copy
+        backup_directory=tmp_path / "b",
+    )
+
+    record = scan_record(volume=root, damaged=damaged, outcomes=outcomes, at=_AT)
+
+    assert record["counts"]["repaired"] == 1
+    assert record["counts"]["unchanged"] == 1
+    # Scanning sorts by path, so the archive copy is reported first.
+    assert [(o["folder"], o["status"]) for o in record["outcomes"]] == [
+        ("01_daily_news/archive", "unchanged"),
+        ("01_daily_news", "repaired"),
+    ]
+
+
+def test_an_unreadable_version_file_does_not_break_the_scan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Logging is bookkeeping. It must not change what the command reports about the device."""
+
+    from epub_news_feeder.cli import main
+
+    root = _device(tmp_path)
+    _write(root, "good.epub", _epub())
+    (root / ".kobo" / "version").write_bytes(b"\xff\xfe not utf-8 at all")
+    monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_DB", raising=False)
+
+    assert main(["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "s")]) == 0
+    assert "code=KOBO_DOWNLOADS_INTACT" in capsys.readouterr().out
