@@ -95,6 +95,29 @@ fetch again rather than truncated into a plausible-looking ruin.
 
 Treat it as a diagnostic that also repairs, not a cure: opening an Edition re-downloads it.
 
+## The scan log
+
+Every run records what it found, whether or not anything was damaged — a clean scan is a data
+point too. Records append to one file per month under `--log-dir` (`.local/kobo-scans` by
+default, gitignored) and are copied to the Drive state folder named by `--log-folder`, which
+defaults to `GOOGLE_DRIVE_FOLDER_DB`, so the record accumulates centrally rather than on one
+machine. A failed upload is reported and never fails the scan; `--no-log` skips both.
+
+```json
+{"at": "2026-09-21T07:14:02Z", "firmware": "5.18.270971",
+ "counts": {"downloads": 25, "damaged": 2, "repaired": 2, "uncertain": 0, "unchanged": 0},
+ "damaged": [{"name": "2026-09-22-daily-….epub", "folder": "01_daily_news", "prefix_bytes": 507}],
+ "outcomes": [{"name": "2026-09-22-daily-….epub", "status": "repaired", "reason": "stripped 507 bytes"}]}
+```
+
+The device serial is deliberately not recorded, though the firmware version is: these records
+are meant to be shareable, including with the upstream report, and a serial identifies the
+hardware rather than the fault.
+
+This exists because **nobody has a measured failure rate for this bug, including Kobo**. The
+evidence so far is a handful of dated observations. Enough of these records answers how often
+downloads actually fail, and whether re-linking the account decays the way it appears to.
+
 ## Options that were investigated and rejected
 
 | Option | Why not |

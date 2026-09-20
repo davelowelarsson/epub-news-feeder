@@ -147,6 +147,9 @@ epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader            # report o
 epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply    # repair
 ```
 
+Every run appends a record to `.local/kobo-scans/` and copies it to the Drive state folder, so
+the failure rate accumulates centrally instead of being re-guessed each time.
+
 Blank pages are always this and never a markup fault. Before touching `epub.py`, read the first
 four bytes of the file on the device: `PK` is healthy, `{` is this. The full diagnosis, what was
 ruled out, and the options that were investigated and rejected are in

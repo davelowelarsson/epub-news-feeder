@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, date, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, cast
 
 from epub_news_feeder import __version__
 from epub_news_feeder.application import (
@@ -33,9 +34,11 @@ from epub_news_feeder.drive_oauth import (
 )
 from epub_news_feeder.kobo import (
     KoboRepairError,
+    append_scan,
     damaged_downloads,
     drive_download_root,
     repair_downloads,
+    scan_record,
 )
 from epub_news_feeder.ollama import OllamaError, check_ollama
 from epub_news_feeder.run_id import create_run_id
@@ -163,6 +166,20 @@ def _parser() -> argparse.ArgumentParser:
             "A Drive folder whose files are the repair's source of truth; repeat it to cover "
             "the archive as well as the delivery folder."
         ),
+    )
+    kobo_repair.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path(".local/kobo-scans"),
+        help="Where each scan is recorded, one appendable file per month.",
+    )
+    kobo_repair.add_argument(
+        "--log-folder",
+        default=os.environ.get("GOOGLE_DRIVE_FOLDER_DB", ""),
+        help="Drive folder the scan log is copied to, so the record is not only local.",
+    )
+    kobo_repair.add_argument(
+        "--no-log", action="store_true", help="Scan without recording anything."
     )
     kobo_repair.add_argument(
         "--backup",
@@ -512,6 +529,7 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
     damaged = damaged_downloads(root)
     if not damaged:
         print(f"code=KOBO_DOWNLOADS_INTACT volume={arguments.volume}")
+        _record_scan(arguments, damaged, ())
         return 0
     for download in damaged:
         print(
@@ -520,6 +538,7 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
         )
     if not arguments.apply:
         print(f"code=KOBO_REPAIR_AVAILABLE damaged={len(damaged)} hint=--apply")
+        _record_scan(arguments, damaged, ())
         return 0
     folders = arguments.drive_folder or [
         folder
@@ -555,7 +574,57 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
             code = "KOBO_DOWNLOAD_UNCHANGED"
         backup = f" backup={outcome.backup}" if outcome.backup else ""
         print(f"code={code} name={outcome.name} reason={outcome.reason}{backup}")
+    _record_scan(arguments, damaged, outcomes)
     return 0 if all(outcome.repaired for outcome in outcomes) else 3
+
+
+def _record_scan(
+    arguments: argparse.Namespace,
+    damaged: Sequence[object],
+    outcomes: Sequence[object],
+) -> None:
+    """Append this scan to the local log and copy it to Drive, never failing the scan.
+
+    Nobody has a measured failure rate for the Kobo download corruption, including Kobo. One
+    record per visit is what turns "it seems intermittent" into an answer, so the log is written
+    whether or not anything was damaged — a clean scan is a data point too.
+    """
+
+    if arguments.no_log:
+        return
+    record = scan_record(
+        volume=arguments.volume,
+        damaged=cast(Any, damaged),
+        outcomes=cast(Any, outcomes),
+        at=datetime.now(UTC),
+    )
+    try:
+        path = append_scan(record, log_directory=arguments.log_dir)
+    except OSError as error:
+        print(f"code=KOBO_SCAN_LOG_FAILED message={error}", file=sys.stderr)
+        return
+    print(f"code=KOBO_SCAN_LOGGED path={path}")
+    if not arguments.log_folder:
+        return
+    try:
+        client = HttpDriveClient(credentials=credentials_from_environment())
+        existing = client.find_file(folder_id=arguments.log_folder, filename=path.name)
+        body = path.read_bytes()
+        if existing is None:
+            client.upload(
+                folder_id=arguments.log_folder,
+                filename=path.name,
+                content=body,
+                content_type="application/x-ndjson",
+            )
+        else:
+            client.update(
+                file_id=existing.file_id, content=body, content_type="application/x-ndjson"
+            )
+    except Exception as error:  # the scan happened and the local record stands
+        print(f"code=KOBO_SCAN_UPLOAD_FAILED message={error}", file=sys.stderr)
+        return
+    print(f"code=KOBO_SCAN_UPLOADED folder={arguments.log_folder} name={path.name}")
 
 
 def _drive_digests(
