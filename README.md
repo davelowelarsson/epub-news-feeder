@@ -140,11 +140,16 @@ from Drive on a phone. The device writes the body of a failed request into the f
 the real bytes instead of truncating, so the EPUB arrives intact behind a 507-byte Google `401`
 error body and is no longer a valid container.
 
-`kobo-repair` reports and, with `--apply`, repairs those downloads against what Drive holds:
+`kobo-repair` reports and, with `--apply`, repairs those downloads against what Drive holds.
+`--env-file .env` is what lets it reach Drive; without it the scan still runs and still logs
+locally, but the copy to Drive is skipped and the run says so.
 
-```
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader            # report only
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply    # repair
+```bash
+# report only; --volume defaults to /Volumes/KOBOeReader
+uv run --env-file .env epub-news-feeder kobo-repair
+
+# repair what Drive vouches for, byte for byte
+uv run --env-file .env epub-news-feeder kobo-repair --apply
 ```
 
 Every run appends a record to `.local/kobo-scans/` and copies it to the Drive state folder, so

@@ -76,9 +76,10 @@ before a rewrite, in two different subsystems.
 
 ## `kobo-repair`
 
-```
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader            # report only
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply    # repair
+```bash
+# --volume defaults to /Volumes/KOBOeReader; --env-file is what reaches Drive
+uv run --env-file .env epub-news-feeder kobo-repair            # report only
+uv run --env-file .env epub-news-feeder kobo-repair --apply    # repair
 ```
 
 It reports every Drive download that opens with an error body instead of its own signature, and

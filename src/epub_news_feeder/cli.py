@@ -605,6 +605,10 @@ def _record_scan(
         return
     print(f"code=KOBO_SCAN_LOGGED path={path}")
     if not arguments.log_folder:
+        print(
+            "code=KOBO_SCAN_NOT_UPLOADED reason=no Drive folder configured "
+            "hint=run with --env-file .env, or pass --log-folder"
+        )
         return
     try:
         client = HttpDriveClient(credentials=credentials_from_environment())

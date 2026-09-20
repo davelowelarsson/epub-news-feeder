@@ -822,3 +822,22 @@ def test_the_suite_never_writes_to_the_real_scan_log(
     after = sorted(default.glob("*.jsonl")) if default.exists() else []
     assert after == before
     assert (tmp_path / "scans").exists()
+
+
+def test_a_scan_that_cannot_be_uploaded_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Silence here reads as success. Without a Drive folder the record is local only, which
+    is worth one line rather than an absent one the reader has to notice."""
+
+    from epub_news_feeder.cli import main
+
+    root = _device(tmp_path)
+    _write(root, "good.epub", _epub())
+    monkeypatch.delenv("GOOGLE_DRIVE_FOLDER_DB", raising=False)
+
+    assert main(["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "s")]) == 0
+
+    output = capsys.readouterr().out
+    assert "code=KOBO_SCAN_NOT_UPLOADED" in output
+    assert "--env-file" in output
