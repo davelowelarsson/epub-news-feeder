@@ -14,7 +14,9 @@ written, the replacement is atomic, and a backup never overwrites another backup
 from __future__ import annotations
 
 import os
+import tempfile
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -49,11 +51,18 @@ class DamagedDownload:
 
 @dataclass(frozen=True, slots=True)
 class RepairOutcome:
-    """What happened to one damaged download."""
+    """What happened to one damaged download.
+
+    ``uncertain`` separates the case where the device was modified but the result could not be
+    confirmed from the case where nothing was touched. Reporting the two alike would send the
+    reader looking in the wrong place; the backup is named so they can recover by hand.
+    """
 
     name: str
     repaired: bool
     reason: str
+    uncertain: bool = False
+    backup: Path | None = None
 
 
 def drive_download_root(volume: Path) -> Path:
@@ -78,12 +87,15 @@ def damaged_downloads(root: Path) -> tuple[DamagedDownload, ...]:
     for path in sorted(path for path in root.rglob("*") if path.is_file()):
         if path.is_symlink():
             continue
-        body = path.read_bytes()
-        if body.startswith(_SIGNATURES) or not body.startswith(_ERROR_SENTINEL):
+        with path.open("rb") as stream:
+            header = stream.read(_MAX_PREFIX_BYTES)
+        if header.startswith(_SIGNATURES) or not header.startswith(_ERROR_SENTINEL):
             continue
-        offset = _payload_offset(body)
+        offset = _payload_offset(header)
         if offset is None:
             continue
+        # Only a download that is actually damaged is worth pulling into memory whole.
+        body = path.read_bytes()
         damaged.append(
             DamagedDownload(
                 path=path,
@@ -121,6 +133,7 @@ def _repair_one(
     drive_digests: Callable[[str], Sequence[str]],
     backup_directory: Path,
 ) -> RepairOutcome:
+    # Up to and including the backup, every failure leaves the device exactly as it was.
     try:
         body = download.path.read_bytes()
         if sha256(body).hexdigest() != download.source_sha256:
@@ -132,20 +145,35 @@ def _repair_one(
             return RepairOutcome(download.name, False, "not on Drive under that name")
         if digest not in known:
             return RepairOutcome(download.name, False, "payload does not match any file on Drive")
-        _backup(download, body, backup_directory)
+        backup = _backup(download, body, backup_directory)
+        # The Drive lookup is a network round trip, so re-read rather than trust the snapshot
+        # taken before it. This narrows the window to the rename below; it cannot close it,
+        # because check-and-rename is not atomic on any filesystem we run on.
+        if sha256(download.path.read_bytes()).hexdigest() != download.source_sha256:
+            return RepairOutcome(download.name, False, "changed while it was being repaired")
         _replace_atomically(download.path, payload)
-        if sha256(download.path.read_bytes()).hexdigest() != digest:
-            return RepairOutcome(
-                download.name, False, "what landed on the device does not match what was sent"
-            )
-    # Any failure here — Drive, filesystem, a yanked cable — must report what happened to
-    # this download rather than abandon the ones already repaired without a word.
     except Exception as error:
         return RepairOutcome(download.name, False, f"left untouched: {error}")
+
+    # Past the rename the device has changed, so a failure here is uncertainty, not inaction.
+    try:
+        landed = sha256(download.path.read_bytes()).hexdigest()
+    except Exception as error:
+        return RepairOutcome(
+            download.name, False, f"replaced but could not be read back: {error}", True, backup
+        )
+    if landed != digest:
+        return RepairOutcome(
+            download.name,
+            False,
+            "what landed on the device does not match what was sent",
+            True,
+            backup,
+        )
     return RepairOutcome(download.name, True, f"stripped {download.prefix_bytes} bytes")
 
 
-def _backup(download: DamagedDownload, body: bytes, backup_directory: Path) -> None:
+def _backup(download: DamagedDownload, body: bytes, backup_directory: Path) -> Path:
     """Preserve the original under its source-relative path, never overwriting another backup."""
 
     target = backup_directory / download.relative_path
@@ -162,25 +190,51 @@ def _backup(download: DamagedDownload, body: bytes, backup_directory: Path) -> N
             stream.write(body)
             stream.flush()
             os.fsync(stream.fileno())
-        return
+        _sync_directory(candidate.parent)
+        return candidate
 
 
 def _replace_atomically(path: Path, payload: bytes) -> None:
     """Write the payload beside the original, then swap it in with a single rename.
 
     A truncating write to the device would leave a destroyed book behind a disconnected cable.
+    The temporary name is unique per run so that two repairs of the same Edition cannot truncate
+    one another's half-written replacement. Note the limit of the guarantee: ``os.replace`` is
+    atomic against other processes, but FAT keeps no journal, so a power loss mid-rename can
+    still leave the directory inconsistent. The backup is the answer to that, not this function.
     """
 
-    temporary = path.with_name(f".{path.name}.repair-tmp")
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.repair-")
+    temporary = Path(name)
     try:
-        with open(temporary, "wb") as stream:
+        with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        # Cleanup must never displace the exception that brought us here — losing a
+        # KeyboardInterrupt to an unlink error would make the outcome a lie.
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
         raise
+    _sync_directory(path.parent)
+
+
+def _sync_directory(directory: Path) -> None:
+    """Best-effort durability for the directory entry itself.
+
+    Filesystems differ on whether a directory can be opened and synced at all, and msdos
+    volumes generally cannot, so this narrows the window where it is supported and is silent
+    where it is not rather than failing a repair that otherwise succeeded.
+    """
+
+    with suppress(OSError):
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _payload_offset(body: bytes) -> int | None:

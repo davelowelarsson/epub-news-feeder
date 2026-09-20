@@ -547,8 +547,14 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
         backup_directory=arguments.backup,
     )
     for outcome in outcomes:
-        code = "KOBO_DOWNLOAD_REPAIRED" if outcome.repaired else "KOBO_DOWNLOAD_UNCHANGED"
-        print(f"code={code} name={outcome.name} reason={outcome.reason}")
+        if outcome.repaired:
+            code = "KOBO_DOWNLOAD_REPAIRED"
+        elif outcome.uncertain:
+            code = "KOBO_DOWNLOAD_UNCERTAIN"
+        else:
+            code = "KOBO_DOWNLOAD_UNCHANGED"
+        backup = f" backup={outcome.backup}" if outcome.backup else ""
+        print(f"code={code} name={outcome.name} reason={outcome.reason}{backup}")
     return 0 if all(outcome.repaired for outcome in outcomes) else 3
 
 
@@ -565,11 +571,19 @@ def _drive_digests(
     """
 
     def digests(name: str) -> tuple[str, ...]:
-        found = []
+        found: list[str] = []
+        failures: list[Exception] = []
         for folder_id in folder_ids:
-            match = client.find_file(folder_id=folder_id, filename=name)
-            if match is not None:
-                found.append(sha256(client.download(file_id=match.file_id)).hexdigest())
+            try:
+                match = client.find_file(folder_id=folder_id, filename=name)
+                if match is not None:
+                    found.append(sha256(client.download(file_id=match.file_id)).hexdigest())
+            except Exception as error:  # a folder we cannot reach must not veto one we can
+                failures.append(error)
+        if not found and failures:
+            # An outage is not the same answer as "Drive does not hold it"; reporting it as
+            # absence would read as a mismatch and hide the real problem.
+            raise failures[0]
         return tuple(found)
 
     return digests

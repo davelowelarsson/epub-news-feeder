@@ -231,7 +231,7 @@ def test_an_interrupted_write_leaves_the_original_intact(
 
     assert outcome.repaired is False
     assert path.read_bytes() == damaged_body  # untouched, not truncated
-    assert list(path.parent.glob("*.tmp*")) == []  # no debris left behind
+    assert list(path.parent.glob(".*repair*")) == []  # no debris left behind
 
 
 def test_a_write_the_device_did_not_store_faithfully_is_reported_as_a_failure(
@@ -444,3 +444,159 @@ def test_drive_digests_declines_a_name_no_folder_holds() -> None:
             raise AssertionError("a missing file must never be downloaded")
 
     assert _drive_digests(cast(Any, _Client()), ["delivery"])("gone.epub") == ()
+
+
+# --- second review round -----------------------------------------------------------------
+
+
+def test_a_replaced_file_that_cannot_be_read_back_is_reported_as_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once the rename lands the device has changed. Saying "left untouched" because the
+    read-back failed would send the reader looking in the wrong place."""
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    damaged = damaged_downloads(drive_download_root(root))
+    real_read = Path.read_bytes
+    calls = {"n": 0}
+
+    def flaky(self: Path) -> bytes:
+        calls["n"] += 1
+        if calls["n"] > 2 and self == path:
+            raise OSError("device disconnected")
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", flaky)
+    (outcome,) = repair_downloads(
+        damaged, drive_digests=_digests(_epub()), backup_directory=tmp_path / "backups"
+    )
+    monkeypatch.setattr(Path, "read_bytes", real_read)
+
+    assert outcome.repaired is False
+    assert outcome.uncertain is True
+    assert "read back" in outcome.reason
+    assert path.read_bytes() == _epub()  # it really was replaced
+
+
+def test_a_mismatched_read_back_is_uncertain_not_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _device(tmp_path)
+    _write(root, "edition.epub", _ERROR_BODY + _epub())
+    real_replace = os.replace
+
+    def replace_then_rot(source: object, target: object) -> None:
+        real_replace(cast(Any, source), cast(Any, target))
+        Path(cast(Any, target)).write_bytes(b"PK\x03\x04 something else")
+
+    monkeypatch.setattr(os, "replace", replace_then_rot)
+    (outcome,) = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "backups",
+    )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert outcome.repaired is False
+    assert outcome.uncertain is True
+
+
+def test_a_source_changed_during_the_drive_lookup_is_not_overwritten(tmp_path: Path) -> None:
+    """The Drive lookup is a network round trip. A file that changed during it must not be
+    replaced by a payload verified against what was there beforehand."""
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    damaged = damaged_downloads(drive_download_root(root))
+
+    def digests_then_meddle(name: str) -> tuple[str, ...]:
+        path.write_bytes(_epub(b"someone else got here first"))
+        return (sha256(_epub()).hexdigest(),)
+
+    (outcome,) = repair_downloads(
+        damaged, drive_digests=digests_then_meddle, backup_directory=tmp_path / "backups"
+    )
+
+    assert outcome.repaired is False
+    assert "changed" in outcome.reason
+    assert path.read_bytes() == _epub(b"someone else got here first")
+
+
+def test_the_temporary_file_is_unique_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fixed temp name lets one run truncate another's half-written replacement."""
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def record(source: Any, target: Any, *, src_dir_fd: Any = None, dst_dir_fd: Any = None) -> None:
+        seen.append(Path(source).name)
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "replace", record)
+    for _ in range(2):
+        path.write_bytes(_ERROR_BODY + _epub())
+        repair_downloads(
+            damaged_downloads(drive_download_root(root)),
+            drive_digests=_digests(_epub()),
+            backup_directory=tmp_path / "backups",
+        )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert len(seen) == 2
+    assert seen[0] != seen[1]
+    assert list(path.parent.glob(".*repair*")) == []
+
+
+def test_healthy_downloads_are_not_read_in_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scanning must not pull every healthy book into memory to decide it is healthy."""
+
+    root = _device(tmp_path)
+    _write(root, "good.epub", _epub(b"x" * 100_000))
+
+    def refuse(self: Path) -> bytes:
+        raise AssertionError(f"{self.name} was read in full during detection")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    assert damaged_downloads(drive_download_root(root)) == ()
+
+
+def test_drive_digests_ignores_a_folder_it_cannot_reach(tmp_path: Path) -> None:
+    from epub_news_feeder.cli import _drive_digests
+
+    class _Client:
+        def find_file(self, *, folder_id: str, filename: str) -> object | None:
+            if folder_id == "broken":
+                raise RuntimeError("Drive folder unreachable")
+            return SimpleNamespace(file_id="ok", sha256=None)
+
+        def download(self, *, file_id: str) -> bytes:
+            return _epub()
+
+    got = _drive_digests(cast(Any, _Client()), ["broken", "delivery"])("edition.epub")
+
+    assert got == (sha256(_epub()).hexdigest(),)
+
+
+def test_drive_digests_raises_when_every_folder_failed() -> None:
+    """No answer is not the same as "Drive does not have it"; refusing on an outage would
+    read as a mismatch and hide a real problem."""
+
+    from epub_news_feeder.cli import _drive_digests
+
+    class _Client:
+        def find_file(self, *, folder_id: str, filename: str) -> object | None:
+            raise RuntimeError("Drive unreachable")
+
+        def download(self, *, file_id: str) -> bytes:  # pragma: no cover
+            raise AssertionError("never reached")
+
+    with pytest.raises(RuntimeError, match="Drive unreachable"):
+        _drive_digests(cast(Any, _Client()), ["a", "b"])("edition.epub")
