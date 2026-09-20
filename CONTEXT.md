@@ -34,7 +34,11 @@ _Avoid_: Upload retry, Article Reservation
 
 **Delivery Copy**:
 An immutable EPUB acknowledged by a Delivery Target. It is reader-facing output, not the authoritative State Store.
-_Avoid_: Backup, state database
+_Avoid_: Backup, state database, Device Copy
+
+**Device Copy**:
+The bytes a reading device holds for a Delivery Copy, written by that device rather than by this pipeline. It may differ from the Delivery Copy without any Delivery Target having failed, so it is never evidence about what was published.
+_Avoid_: Delivery Copy, Pending Delivery
 
 **Main Section**:
 A top-level, ordered content placement within a Publication. Its label may name a person, subject, or any operator-chosen grouping.

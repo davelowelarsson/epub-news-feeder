@@ -133,62 +133,25 @@ rejected and names the command that renews it; `STATE_RESTORE_FAILED` means the 
 could not be verified, which is a different investigation entirely. Reading one as the other costs
 an hour, which is why they are no longer the same code.
 
-One failure that looks like a Drive problem is not: the Kobo lists the folder fine, every
-download shows a warning, and the Edition never appears in the library, while the same Edition
-opens without complaint on a phone straight from Drive. This was chased down on a Kobo Libra
-Colour running firmware 5.18.270971 on 2026-09-06, and the fault sits entirely on the device.
+One failure that looks like a Drive problem is not, and it is not this pipeline's either: the
+Kobo lists the folder fine, downloads warn, and Editions either never appear or open with a
+working cover and table of contents over blank pages — while the same Edition reads perfectly
+from Drive on a phone. The device writes the body of a failed request into the file and appends
+the real bytes instead of truncating, so the EPUB arrives intact behind a 507-byte Google `401`
+error body and is no longer a valid container.
 
-Drive downloads land under `.kobo/google_drive/<Drive path>/` on the eReader's own USB storage,
-and each failed file there was the complete, correct EPUB with a 507-byte Google API JSON error
-body prepended — HTTP 401, "Request had invalid authentication credentials", reason `authError`.
-The Kobo's first request used a stale token, wrote that error body straight into the `.epub`,
-refreshed the token, retried, and appended the real bytes afterward. The file no longer starts
-with the ZIP signature `PK`, so the reader rejects it, and the device's own analytics table logs
-it as `GoogleDriveParseFailed`. Mounting the Kobo over USB and looking at the first bytes of a
-file tells you which case you are in: `PK` is healthy, `{` is this failure. Every Drive copy
-matched the pipeline's recorded SHA-256 and passed `unzip -t`, and a third-party ebook in the
-same folder failed identically, so the pipeline, the filenames, and the folder layout were never
-the problem.
-
-Unlinking and re-linking Google Drive on the Kobo (More > Settings > Accounts) resets the token
-and downloads are clean again, but it does not hold: the same damage recurred on 2026-09-20,
-across every Edition delivered from 2026-09-07 onward, on the same firmware. Re-linking buys a
-few clean fetches rather than a fix, so the device needs repairing as well as re-linking.
-
-`kobo-repair` does the repairing. It walks a mounted Kobo, reports every Drive download that
-opens with an error body instead of its own signature, and with `--apply` strips the prefix. It
-rewrites a file only after downloading what Drive holds under that name and finding the digests
-identical, so it cannot write bytes that differ from the Edition that was delivered; Drive's own
-`md5Checksum` is not trusted for this, because only the bytes prove it. Give `--drive-folder`
-twice to cover the archive as well as the delivery folder, since an Edition old enough to have
-been archived is still the file that was delivered. Originals are copied to `--backup` first, and
-a download with no recoverable payload behind the prefix is left alone for the device to fetch
-again rather than truncated into a plausible-looking ruin.
+`kobo-repair` reports and, with `--apply`, repairs those downloads against what Drive holds:
 
 ```
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader              # report only
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply      # repair
+epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader            # report only
+epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply    # repair
 ```
 
-**Repairing is not a cure, because opening a Drive book re-downloads it.** On 2026-09-20 five
-repaired Editions that were never opened stayed clean, while the two that were opened came back
-with the prefix again and a device-written 1980 timestamp. Nickel re-fetches on open, and every
-fetch damages the file, so a repair survives exactly until you read the Edition. The symptom this
-produces is a book whose cover and table of contents display perfectly — those are cached in
-`KoboReader.sqlite` and `.kobo-images` at index time — while every page is blank, because page
-content is read live from a container that is no longer valid. Calibre shows the same file
-correctly, because a ZIP index lives at the end of the file and tolerant readers simply absorb
-the prefix; EPUB requires `mimetype` to be the first entry at offset 0, and RMSDK enforces it.
-
-The Editions themselves are not implicated. On 2026-09-20 four variants built from a delivered
-Edition — the shipped markup unchanged, `<main>` replaced by `<div>`, `<main>` unwrapped, and
-explicit `display: block` for the HTML5 elements — were sideloaded over USB and all four read
-normally on a Kobo Libra Colour. The shipped markup is the one that matters and it renders. Two
-sideloaded default-namespace test builds from 2026-09-06 had already been read to 25% and 16% on
-the same device. Blank pages mean a damaged container, never the markup.
-
-Nothing in this repository can prevent the damage, because the credential that failed is the
-Kobo's own and the file on Drive was already correct.
+Blank pages are always this and never a markup fault. Before touching `epub.py`, read the first
+four bytes of the file on the device: `PK` is healthy, `{` is this. The full diagnosis, what was
+ruled out, and the options that were investigated and rejected are in
+[docs/kobo-drive-delivery.md](docs/kobo-drive-delivery.md); it is reported upstream as
+[kobolabs/epub-spec#75](https://github.com/kobolabs/epub-spec/issues/75).
 
 Requests retry only what retrying can fix: connection failures and Google's own "try again"
 statuses, four attempts, one second doubling to eight. A 4xx is a settled answer and is raised on
