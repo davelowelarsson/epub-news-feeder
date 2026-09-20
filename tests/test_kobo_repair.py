@@ -1,7 +1,12 @@
-"""Repairing Google Drive downloads that a Kobo device damaged on arrival."""
+"""Repairing Google Drive downloads that a Kobo device damaged on arrival.
+
+The device is removable, so an interrupted write is an ordinary event rather than an edge
+case, and the tests below treat destroying a reader's book as the failure that matters most.
+"""
 
 from __future__ import annotations
 
+import os
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,14 +33,24 @@ def _device(tmp_path: Path) -> Path:
     return root
 
 
-def _write(root: Path, name: str, body: bytes) -> Path:
-    path = root / ".kobo" / "google_drive" / "01_daily_news" / name
+def _write(root: Path, name: str, body: bytes, *, folder: str = "01_daily_news") -> Path:
+    directory = root / ".kobo" / "google_drive" / folder
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
     path.write_bytes(body)
     return path
 
 
 def _epub(marker: bytes = b"payload") -> bytes:
     return b"PK\x03\x04" + marker
+
+
+def _digests(*bodies: bytes) -> Any:
+    known = tuple(sha256(body).hexdigest() for body in bodies)
+    return lambda name: known
+
+
+# --- detection -------------------------------------------------------------------------
 
 
 def test_drive_download_root_rejects_a_volume_that_is_not_a_kobo(tmp_path: Path) -> None:
@@ -53,14 +68,17 @@ def test_intact_downloads_are_not_reported_as_damaged(tmp_path: Path) -> None:
 
 def test_a_prefixed_download_is_reported_with_its_payload(tmp_path: Path) -> None:
     root = _device(tmp_path)
-    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    body = _ERROR_BODY + _epub()
+    path = _write(root, "edition.epub", body)
 
     (damaged,) = damaged_downloads(drive_download_root(root))
 
     assert damaged.path == path
     assert damaged.prefix_bytes == len(_ERROR_BODY)
     assert damaged.payload_sha256 == sha256(_epub()).hexdigest()
+    assert damaged.source_sha256 == sha256(body).hexdigest()
     assert damaged.name == "edition.epub"
+    assert damaged.relative_path == Path("01_daily_news/edition.epub")
 
 
 def test_a_download_with_no_recoverable_payload_is_left_alone(tmp_path: Path) -> None:
@@ -72,20 +90,42 @@ def test_a_download_with_no_recoverable_payload_is_left_alone(tmp_path: Path) ->
     assert path.read_bytes() == body
 
 
+def test_symlinks_are_never_reported_or_followed(tmp_path: Path) -> None:
+    root = _device(tmp_path)
+    real = tmp_path / "outside.epub"
+    real.write_bytes(_ERROR_BODY + _epub())
+    link = root / ".kobo" / "google_drive" / "01_daily_news" / "link.epub"
+    link.symlink_to(real)
+
+    assert damaged_downloads(drive_download_root(root)) == ()
+
+
+def test_damaged_downloads_are_found_at_any_depth(tmp_path: Path) -> None:
+    root = _device(tmp_path)
+    _write(root, "old.epub", _ERROR_BODY + _epub(), folder="01_daily_news/archive")
+
+    (damaged,) = damaged_downloads(drive_download_root(root))
+
+    assert damaged.relative_path == Path("01_daily_news/archive/old.epub")
+
+
+# --- the repair itself -----------------------------------------------------------------
+
+
 def test_repair_strips_the_prefix_once_drive_confirms_the_payload(tmp_path: Path) -> None:
     root = _device(tmp_path)
     path = _write(root, "edition.epub", _ERROR_BODY + _epub())
     backups = tmp_path / "backups"
 
-    outcomes = repair_downloads(
+    (outcome,) = repair_downloads(
         damaged_downloads(drive_download_root(root)),
-        expected_sha256=lambda name: sha256(_epub()).hexdigest(),
+        drive_digests=_digests(_epub()),
         backup_directory=backups,
     )
 
-    assert [outcome.repaired for outcome in outcomes] == [True]
+    assert outcome.repaired is True
     assert path.read_bytes() == _epub()
-    assert (backups / "edition.epub").read_bytes() == _ERROR_BODY + _epub()
+    assert (backups / "01_daily_news" / "edition.epub").read_bytes() == _ERROR_BODY + _epub()
 
 
 def test_repair_refuses_a_payload_drive_does_not_vouch_for(tmp_path: Path) -> None:
@@ -95,7 +135,7 @@ def test_repair_refuses_a_payload_drive_does_not_vouch_for(tmp_path: Path) -> No
 
     (outcome,) = repair_downloads(
         damaged_downloads(drive_download_root(root)),
-        expected_sha256=lambda name: sha256(_epub(b"different")).hexdigest(),
+        drive_digests=_digests(_epub(b"different")),
         backup_directory=tmp_path / "backups",
     )
 
@@ -111,7 +151,7 @@ def test_repair_refuses_a_download_drive_no_longer_holds(tmp_path: Path) -> None
 
     (outcome,) = repair_downloads(
         damaged_downloads(drive_download_root(root)),
-        expected_sha256=lambda name: None,
+        drive_digests=lambda name: (),
         backup_directory=tmp_path / "backups",
     )
 
@@ -120,15 +160,185 @@ def test_repair_refuses_a_download_drive_no_longer_holds(tmp_path: Path) -> None
     assert path.read_bytes() == damaged_body
 
 
-def test_damaged_downloads_are_found_at_any_depth(tmp_path: Path) -> None:
+def test_a_name_held_twice_on_drive_is_repaired_against_the_matching_copy(
+    tmp_path: Path,
+) -> None:
+    """Delivery and archive can hold the same name with different bytes; the device copy
+    belongs to whichever one it matches, so a repair must not be refused by the other."""
+
     root = _device(tmp_path)
-    archive = root / ".kobo" / "google_drive" / "01_daily_news" / "archive"
-    archive.mkdir()
-    (archive / "old.epub").write_bytes(_ERROR_BODY + _epub())
+    archived = _epub(b"the archived edition")
+    path = _write(root, "edition.epub", _ERROR_BODY + archived)
 
-    names = [damaged.name for damaged in damaged_downloads(drive_download_root(root))]
+    (outcome,) = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub(b"a different edition"), archived),
+        backup_directory=tmp_path / "backups",
+    )
 
-    assert names == ["old.epub"]
+    assert outcome.repaired is True
+    assert path.read_bytes() == archived
+
+
+# --- finding 1: the verified bytes must be the written bytes ----------------------------
+
+
+def test_a_file_changed_since_the_scan_is_never_rewritten(tmp_path: Path) -> None:
+    """The digest is taken at scan time. If the bytes on disk change before the write, the
+    stale digest must not authorise slicing the scan-time prefix off whatever is there now."""
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    damaged = damaged_downloads(drive_download_root(root))
+
+    # Something else repairs it first — a second run of this very command would do this.
+    path.write_bytes(_epub())
+
+    (outcome,) = repair_downloads(
+        damaged,
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "backups",
+    )
+
+    assert outcome.repaired is False
+    assert "changed" in outcome.reason
+    assert path.read_bytes() == _epub()  # still a valid EPUB, header intact
+
+
+# --- finding 2: an interrupted write must not destroy the book --------------------------
+
+
+def test_an_interrupted_write_leaves_the_original_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _device(tmp_path)
+    damaged_body = _ERROR_BODY + _epub()
+    path = _write(root, "edition.epub", damaged_body)
+
+    real_replace = os.replace
+
+    def die(*args: object, **kwargs: object) -> None:
+        raise OSError("device disconnected")
+
+    monkeypatch.setattr(os, "replace", die)
+
+    (outcome,) = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "backups",
+    )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert outcome.repaired is False
+    assert path.read_bytes() == damaged_body  # untouched, not truncated
+    assert list(path.parent.glob("*.tmp*")) == []  # no debris left behind
+
+
+def test_a_write_the_device_did_not_store_faithfully_is_reported_as_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """USB storage can accept a write and hold something else. Read it back before claiming
+    the Edition was repaired; the backup is the reader's way out if it was not."""
+
+    root = _device(tmp_path)
+    _write(root, "edition.epub", _ERROR_BODY + _epub())
+    real_replace = os.replace
+
+    def replace_then_rot(source: object, target: object) -> None:
+        real_replace(cast(Any, source), cast(Any, target))
+        Path(cast(Any, target)).write_bytes(b"PK\x03\x04 something else entirely")
+
+    monkeypatch.setattr(os, "replace", replace_then_rot)
+    (outcome,) = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "backups",
+    )
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert outcome.repaired is False
+    assert "does not match what was sent" in outcome.reason
+    assert (tmp_path / "backups" / "01_daily_news" / "edition.epub").exists()
+
+
+# --- finding 3: backups must never overwrite each other ---------------------------------
+
+
+def test_same_named_downloads_in_different_folders_get_separate_backups(
+    tmp_path: Path,
+) -> None:
+    root = _device(tmp_path)
+    current, archived = _epub(b"current"), _epub(b"archived")
+    _write(root, "edition.epub", _ERROR_BODY + current)
+    _write(root, "edition.epub", _ERROR_BODY + archived, folder="01_daily_news/archive")
+    backups = tmp_path / "backups"
+
+    outcomes = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(current, archived),
+        backup_directory=backups,
+    )
+
+    assert [o.repaired for o in outcomes] == [True, True]
+    assert (backups / "01_daily_news" / "edition.epub").read_bytes() == _ERROR_BODY + current
+    assert (
+        backups / "01_daily_news" / "archive" / "edition.epub"
+    ).read_bytes() == _ERROR_BODY + archived
+
+
+def test_a_second_run_never_overwrites_an_earlier_backup(tmp_path: Path) -> None:
+    root = _device(tmp_path)
+    first = _ERROR_BODY + _epub(b"first")
+    path = _write(root, "edition.epub", first)
+    backups = tmp_path / "backups"
+
+    repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub(b"first")),
+        backup_directory=backups,
+    )
+    # The device damages it again, and the tool runs a second time.
+    second = _ERROR_BODY + _epub(b"second")
+    path.write_bytes(second)
+    repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub(b"second")),
+        backup_directory=backups,
+    )
+
+    kept = sorted(p.read_bytes() for p in (backups / "01_daily_news").iterdir())
+    assert kept == sorted([first, second])
+
+
+# --- finding 4: a failure must not hide repairs already made ----------------------------
+
+
+def test_a_drive_failure_still_reports_what_was_already_repaired(tmp_path: Path) -> None:
+    root = _device(tmp_path)
+    good = _epub(b"first")
+    first = _write(root, "a-edition.epub", _ERROR_BODY + good)
+    _write(root, "b-edition.epub", _ERROR_BODY + _epub(b"second"))
+
+    def digests(name: str) -> tuple[str, ...]:
+        if name.startswith("b-"):
+            raise RuntimeError("Drive lookup failed")
+        return (sha256(good).hexdigest(),)
+
+    outcomes = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=digests,
+        backup_directory=tmp_path / "backups",
+    )
+
+    assert [(o.name, o.repaired) for o in outcomes] == [
+        ("a-edition.epub", True),
+        ("b-edition.epub", False),
+    ]
+    assert "Drive lookup failed" in outcomes[1].reason
+    assert first.read_bytes() == good
+
+
+# --- CLI --------------------------------------------------------------------------------
 
 
 def test_kobo_repair_reports_damage_without_writing_unless_asked(
@@ -148,6 +358,35 @@ def test_kobo_repair_reports_damage_without_writing_unless_asked(
     assert "code=KOBO_DOWNLOAD_DAMAGED" in output
     assert "name=edition.epub" in output
     assert f"prefix_bytes={len(_ERROR_BODY)}" in output
+
+
+def test_kobo_repair_applies_the_repair_against_drive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import epub_news_feeder.cli as cli
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    monkeypatch.setattr(cli, "credentials_from_environment", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli, "HttpDriveClient", lambda **kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli, "_drive_digests", lambda client, folders: _digests(_epub()))
+
+    code = cli.main(
+        [
+            "kobo-repair",
+            "--volume",
+            str(root),
+            "--apply",
+            "--drive-folder",
+            "delivery",
+            "--backup",
+            str(tmp_path / "backups"),
+        ]
+    )
+
+    assert code == 0
+    assert path.read_bytes() == _epub()
+    assert "code=KOBO_DOWNLOAD_REPAIRED" in capsys.readouterr().out
 
 
 def test_kobo_repair_reports_a_healthy_device(
@@ -171,8 +410,10 @@ def test_kobo_repair_rejects_a_volume_that_is_not_a_kobo(
     assert "code=KOBO_VOLUME_INVALID" in capsys.readouterr().err
 
 
-def test_drive_digest_falls_back_to_the_archive_folder() -> None:
-    from epub_news_feeder.cli import _drive_digest
+def test_drive_digests_collects_every_folder_holding_the_name() -> None:
+    from epub_news_feeder.cli import _drive_digests
+
+    bodies = {"delivery": _epub(b"current"), "archive": _epub(b"archived")}
 
     class _Client:
         def __init__(self) -> None:
@@ -180,22 +421,20 @@ def test_drive_digest_falls_back_to_the_archive_folder() -> None:
 
         def find_file(self, *, folder_id: str, filename: str) -> object | None:
             self.looked_in.append(folder_id)
-            if folder_id != "archive":
-                return None
-            return SimpleNamespace(file_id="archived", sha256=None)
+            return SimpleNamespace(file_id=folder_id, sha256=None)
 
         def download(self, *, file_id: str) -> bytes:
-            return _epub()
+            return bodies[file_id]
 
     client = _Client()
-    digest = _drive_digest(cast(Any, client), ["delivery", "archive"])
+    got = _drive_digests(cast(Any, client), ["delivery", "archive"])("edition.epub")
 
-    assert digest("edition.epub") == sha256(_epub()).hexdigest()
     assert client.looked_in == ["delivery", "archive"]
+    assert set(got) == {sha256(b).hexdigest() for b in bodies.values()}
 
 
-def test_drive_digest_declines_a_name_no_folder_holds() -> None:
-    from epub_news_feeder.cli import _drive_digest
+def test_drive_digests_declines_a_name_no_folder_holds() -> None:
+    from epub_news_feeder.cli import _drive_digests
 
     class _Client:
         def find_file(self, *, folder_id: str, filename: str) -> object | None:
@@ -204,4 +443,4 @@ def test_drive_digest_declines_a_name_no_folder_holds() -> None:
         def download(self, *, file_id: str) -> bytes:  # pragma: no cover - never reached
             raise AssertionError("a missing file must never be downloaded")
 
-    assert _drive_digest(cast(Any, _Client()), ["delivery"])("gone.epub") is None
+    assert _drive_digests(cast(Any, _Client()), ["delivery"])("gone.epub") == ()

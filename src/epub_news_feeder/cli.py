@@ -543,7 +543,7 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
     client = HttpDriveClient(credentials=credentials)
     outcomes = repair_downloads(
         damaged,
-        expected_sha256=_drive_digest(client, folders),
+        drive_digests=_drive_digests(client, folders),
         backup_directory=arguments.backup,
     )
     for outcome in outcomes:
@@ -552,25 +552,27 @@ def _kobo_repair(arguments: argparse.Namespace) -> int:
     return 0 if all(outcome.repaired for outcome in outcomes) else 3
 
 
-def _drive_digest(
+def _drive_digests(
     client: HttpDriveClient, folder_ids: Sequence[str]
-) -> Callable[[str], str | None]:
-    """Answer with the digest of the delivered Edition of that name, downloading it to be sure.
+) -> Callable[[str], tuple[str, ...]]:
+    """Answer with the digest of every file Drive holds under that name, across all folders.
 
-    Folders are searched in order, because an Edition old enough to have been archived is no
-    longer in the delivery folder yet is still the file that was delivered. Drive's own
-    ``md5Checksum`` is not used: the repair has to prove the on-device payload is the Edition
-    that was delivered, and only the bytes themselves prove that.
+    Every configured folder is consulted rather than stopping at the first hit, because the
+    delivery folder and the archive can hold the same name with different bytes; stopping early
+    would refuse a legitimate repair of the archived Edition. Drive's own ``md5Checksum`` is not
+    used: the repair has to prove the on-device payload is the Edition that was delivered, and
+    only the bytes themselves prove that.
     """
 
-    def digest(name: str) -> str | None:
+    def digests(name: str) -> tuple[str, ...]:
+        found = []
         for folder_id in folder_ids:
-            found = client.find_file(folder_id=folder_id, filename=name)
-            if found is not None:
-                return sha256(client.download(file_id=found.file_id)).hexdigest()
-        return None
+            match = client.find_file(folder_id=folder_id, filename=name)
+            if match is not None:
+                found.append(sha256(client.download(file_id=match.file_id)).hexdigest())
+        return tuple(found)
 
-    return digest
+    return digests
 
 
 def main(argv: Sequence[str] | None = None) -> int:
