@@ -143,12 +143,22 @@ Constraints the cover holds to:
 - No imagery, no publisher media, no generative or date-derived mark, no embedded font, and no
   fetchable reference of any kind.
 - Useful accessibility text as an SVG title and description with an image role, and the EPUB 3
-  `cover-image` manifest property. The cover is an image item, never a reading document.
+  `cover-image` manifest property. The cover image is an image item, never a reading document.
 
 SVG is chosen knowingly: `cover-image` applies to an image item, so a typographic cover still has
 to be an image, and Kobo's SVG font handling is inconsistent. If the device rejects SVG text,
 converting text to paths is the identified fallback — it keeps determinism and removes the device
-font dependency without adding a rasteriser. See GitHub issue #39.
+font dependency without adding a rasteriser. See GitHub issue #39. A Kobo Libra Colour on
+firmware 5.18.270971 did not reject it: on 2026-09-20 the device held rasterised library
+thumbnails for delivered Editions at the same sizes as its commercial books, so the typographic
+SVG survives the path the fallback was drafted against.
+
+The image alone yields a thumbnail but no page, which would open every Edition on its table of
+contents. So `cover.xhtml` opens the spine, holding the cover image and nothing else. It holds
+nothing else on purpose: Kobo switches to its Fixed Layout reader for whichever document carries
+the cover, which would trap any reading content beside it at a size the reader cannot adjust.
+Kobo's own EPUB guidelines require the cover to sit in its own XHTML file, and this satisfies
+that in plain EPUB 3.3 rather than with anything Kobo-specific.
 
 Plain sideloaded `.epub` files render on Kobo through Adobe's RMSDK, not a Kobo-specific engine,
 and RMSDK requires every XML document to use a default namespace rather than a namespace prefix.

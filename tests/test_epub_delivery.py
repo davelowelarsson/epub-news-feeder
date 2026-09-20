@@ -79,7 +79,8 @@ def test_ticket_11_build_epub_creates_a_readable_attributed_epub() -> None:
             item.get("href") == "nav.xhtml" and item.get("properties") == "nav"
             for item in manifest_items
         )
-        assert len(spine_items) == 2
+        assert [item.get("idref") for item in spine_items][:2] == ["cover", "nav"]
+        assert len(spine_items) == 3
         nav = etree.fromstring(archive.read("OEBPS/nav.xhtml"))
         assert "Contents" in " ".join(text for text in nav.itertext() if isinstance(text, str))
         section_path = next(path for path in archive.namelist() if path.startswith("OEBPS/world-"))
@@ -364,7 +365,7 @@ def test_ticket_02_ticket_06_local_delivery_acknowledges_verified_copy(tmp_path:
 
     assert receipt.path == tmp_path / "morning.epub"
     assert receipt.path.read_bytes() == epub_bytes
-    assert receipt.sha256 == "f855c8820805a1ccf2398b4bccea2015e0ada4ca96f77471dd414971e2aa5851"
+    assert receipt.sha256 == "9af3d1ac5897fd137ed1940e5757760f73591811a788a533aae5ed35c68d5260"
     assert receipt.size_bytes == len(epub_bytes)
     assert list(tmp_path.iterdir()) == [receipt.path]
 
@@ -1362,3 +1363,37 @@ def test_exclusion_line_follows_the_publication_language() -> None:
 
     assert "Sammanfattningar" in rendered
     assert "Ars Technica" in rendered
+
+
+@pytest.mark.epubcheck
+def test_cover_image_is_shown_by_its_own_spine_document() -> None:
+    """Kobo activates its Fixed Layout reader for whatever document holds the cover, so the
+    cover lives alone in the first spine document rather than beside any reading content."""
+
+    epub_bytes = build_epub(replace(_edition(), briefs=_briefs()))
+    validate_epub(epub_bytes)
+
+    with ZipFile(BytesIO(epub_bytes)) as archive:
+        package = etree.fromstring(archive.read("OEBPS/content.opf"))
+        cover_document = etree.fromstring(archive.read("OEBPS/cover.xhtml"))
+
+    manifest = [
+        item
+        for item in package.iter("{http://www.idpf.org/2007/opf}item")
+        if item.get("href") == "cover.xhtml"
+    ]
+    assert len(manifest) == 1
+    assert manifest[0].get("media-type") == "application/xhtml+xml"
+
+    spine = cast(
+        list[str], package.xpath("//*[local-name()='spine']/*[local-name()='itemref']/@idref")
+    )
+    assert spine[0] == manifest[0].get("id")
+
+    body = cast(list[etree._Element], cover_document.xpath("//*[local-name()='body']"))[0]
+    children = list(body)
+    assert len(children) == 1
+    image = children[0]
+    assert etree.QName(image).localname == "img"
+    assert image.get("src") == "cover.svg"
+    assert image.get("alt")
