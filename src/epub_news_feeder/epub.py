@@ -197,6 +197,7 @@ def build_epub(edition: EditionInput) -> bytes:
         ("OEBPS/nav.xhtml", _navigation_document(edition, section_paths), ZIP_DEFLATED),
         ("OEBPS/styles.css", _STYLESHEET, ZIP_DEFLATED),
         ("OEBPS/cover.svg", _cover_image(edition), ZIP_DEFLATED),
+        ("OEBPS/cover.xhtml", _cover_document(edition), ZIP_DEFLATED),
     ]
     if edition.notes:
         members.append(("OEBPS/edition-notes.xhtml", _notes_document(edition), ZIP_DEFLATED))
@@ -356,6 +357,13 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
         href="cover.svg",
         attrib={"media-type": "image/svg+xml", "properties": "cover-image"},
     )
+    etree.SubElement(
+        manifest,
+        f"{{{_OPF_NS}}}item",
+        id="cover",
+        href="cover.xhtml",
+        attrib={"media-type": "application/xhtml+xml"},
+    )
     if edition.notes:
         etree.SubElement(
             manifest,
@@ -398,6 +406,7 @@ def _package_document(edition: EditionInput, section_paths: dict[str, PurePosixP
             attrib={"media-type": "application/xhtml+xml"},
         )
     spine = etree.SubElement(package, f"{{{_OPF_NS}}}spine")
+    etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="cover")
     etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="nav")
     if edition.notes:
         etree.SubElement(spine, f"{{{_OPF_NS}}}itemref", idref="edition-notes")
@@ -527,6 +536,33 @@ def _navigation_leaf_ids(entries: tuple[NavigationInput, ...]) -> list[str]:
 _SVG_NS = "http://www.w3.org/2000/svg"
 _COVER_WIDTH = 1200
 _COVER_HEIGHT = 1600
+
+
+def _cover_document(edition: EditionInput) -> bytes:
+    """Wrap the cover image in the spine document that reading systems open first.
+
+    A ``cover-image`` manifest item alone yields a library thumbnail but no page, so the Edition
+    would open on its table of contents. The document carries the image and nothing else: Kobo
+    switches to its Fixed Layout reader for whichever document holds the cover, which would trap
+    any reading content placed beside it at a size the reader cannot adjust.
+    """
+
+    html, body = _xhtml_document(edition.title, edition.language)
+    etree.SubElement(
+        body,
+        f"{{{_XHTML_NS}}}img",
+        attrib={
+            "class": "cover",
+            "src": "cover.svg",
+            "alt": _localized(
+                edition.language,
+                "cover_label",
+                title=edition.title,
+                edition_date=edition.edition_date,
+            ),
+        },
+    )
+    return _serialize_xhtml(html)
 
 
 def _cover_image(edition: EditionInput) -> bytes:
@@ -1376,6 +1412,7 @@ _STYLESHEET = (
     b"nav li { margin: 0.4em 0; }\n"
     b"nav ol ol { margin: 0.35em 0 0.8em; }\n"
     b"article { border-top: 0.08em solid; margin: 2.5em 0; padding-top: 0.4em; }\n"
+    b"img.cover { display: block; width: 100%; height: auto; }\n"
     b".edition-overview { border-bottom: 0.12em solid; margin-bottom: 1.5em; "
     b"padding-bottom: 0.8em; }\n"
     b".article-metadata, .canonical-link, .colophon, .item-kind, .source { "
