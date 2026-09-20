@@ -76,9 +76,10 @@ before a rewrite, in two different subsystems.
 
 ## `kobo-repair`
 
-```
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader            # report only
-epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader --apply    # repair
+```bash
+# --volume defaults to /Volumes/KOBOeReader; --env-file is what reaches Drive
+uv run --env-file .env epub-news-feeder kobo-repair            # report only
+uv run --env-file .env epub-news-feeder kobo-repair --apply    # repair
 ```
 
 It reports every Drive download that opens with an error body instead of its own signature, and
@@ -94,6 +95,34 @@ read back. A download with no recoverable payload behind the prefix is left for 
 fetch again rather than truncated into a plausible-looking ruin.
 
 Treat it as a diagnostic that also repairs, not a cure: opening an Edition re-downloads it.
+
+## The scan log
+
+Every run records what it found, whether or not anything was damaged — a clean scan is a data
+point too. Records append to one file per month under `--log-dir` (`.local/kobo-scans` by
+default, gitignored) and are copied to the Drive state folder named by `--log-folder`, which
+defaults to `GOOGLE_DRIVE_FOLDER_DB`, so the record accumulates centrally rather than on one
+machine. A failed upload is reported and never fails the scan; `--no-log` skips both.
+
+```json
+{"at": "2026-09-21T07:14:02Z", "firmware": "5.18.270971",
+ "counts": {"downloads": 25, "damaged": 2, "repaired": 2, "uncertain": 0, "unchanged": 0},
+ "damaged": [{"name": "2026-09-22-daily-….epub", "folder": "01_daily_news", "prefix_bytes": 507}],
+ "outcomes": [{"name": "2026-09-22-daily-….epub", "status": "repaired", "reason": "stripped 507 bytes"}]}
+```
+
+The device serial is deliberately not recorded, though the firmware version is: these records
+are meant to be shareable, including with the upstream report, and a serial identifies the
+hardware rather than the fault.
+
+This exists because **nobody has measured how often this bug bites, including Kobo**. The
+evidence so far is a handful of dated observations.
+
+Be precise about what the records measure: how much damage is *present on the device* at each
+visit, not how often a download attempt fails. A damaged file that is scanned ten times without
+being touched appears in ten records; it was one bad download. Reading a failure rate out of
+this needs the dates and what happened between them — when the account was re-linked, when
+Editions were opened — which is why the timestamp matters as much as the counts.
 
 ## Options that were investigated and rejected
 

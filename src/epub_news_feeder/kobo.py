@@ -13,13 +13,17 @@ written, the replacement is atomic, and a backup never overwrites another backup
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import tempfile
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 # A damaged download opens with a JSON error object rather than the format's own signature.
 _ERROR_SENTINEL = b"{"
@@ -28,6 +32,9 @@ _SIGNATURES = (b"PK\x03\x04", b"%PDF-")
 # Far beyond the 507-byte body observed in practice, yet small enough that a signature found
 # later in the file is content rather than a prefix boundary.
 _MAX_PREFIX_BYTES = 8192
+
+# A Kobo firmware version, as `.kobo/version` writes it: dotted numbers and nothing else.
+_FIRMWARE = re.compile(r"^\d+(?:\.\d+)+$")
 
 
 class KoboRepairError(Exception):
@@ -63,6 +70,11 @@ class RepairOutcome:
     reason: str
     uncertain: bool = False
     backup: Path | None = None
+    relative_path: Path | None = None
+
+    @property
+    def folder(self) -> str:
+        return str(self.relative_path.parent) if self.relative_path else ""
 
 
 def drive_download_root(volume: Path) -> Path:
@@ -129,6 +141,17 @@ def repair_downloads(
 
 
 def _repair_one(
+    download: DamagedDownload,
+    drive_digests: Callable[[str], Sequence[str]],
+    backup_directory: Path,
+) -> RepairOutcome:
+    return replace(
+        _repair_outcome(download, drive_digests, backup_directory),
+        relative_path=download.relative_path,
+    )
+
+
+def _repair_outcome(
     download: DamagedDownload,
     drive_digests: Callable[[str], Sequence[str]],
     backup_directory: Path,
@@ -244,3 +267,92 @@ def _payload_offset(body: bytes) -> int | None:
         if offset > 0
     ]
     return min(offsets) if offsets else None
+
+
+def device_firmware(volume: Path) -> str | None:
+    """Read the firmware version from a mounted Kobo, and nothing else from that file.
+
+    ``.kobo/version`` is one comma-separated line that *leads with the device serial*. Only a
+    field that actually looks like a firmware version is returned, and only from the first line:
+    these records are meant to be shared, including with the upstream bug report, and the field
+    beside the version is an identifier for someone's hardware. Anything unexpected is reported
+    as unknown rather than guessed at.
+    """
+
+    path = volume / ".kobo" / "version"
+    if path.is_symlink():
+        return None
+    try:
+        first = path.read_text(encoding="utf-8", errors="strict").splitlines()[0]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return None
+    fields = first.split(",")
+    if len(fields) < 3:
+        return None
+    candidate = fields[2].strip()
+    return candidate if _FIRMWARE.match(candidate) else None
+
+
+def download_count(root: Path) -> int:
+    """How many Drive downloads exist on the device, damaged or not."""
+
+    return sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+
+
+def scan_record(
+    *,
+    volume: Path,
+    damaged: Sequence[DamagedDownload],
+    outcomes: Sequence[RepairOutcome],
+    at: datetime,
+) -> dict[str, Any]:
+    """Summarise one scan of a device, in terms that stay meaningful months later.
+
+    The corruption is intermittent and nobody — including Kobo — has a measured failure rate for
+    it. One of these per visit accumulates into that measurement, which is why the record keeps
+    counts and filenames rather than only what was repaired.
+    """
+
+    def status(outcome: RepairOutcome) -> str:
+        if outcome.repaired:
+            return "repaired"
+        return "uncertain" if outcome.uncertain else "unchanged"
+
+    statuses = [status(outcome) for outcome in outcomes]
+    return {
+        "at": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "firmware": device_firmware(volume),
+        "counts": {
+            "downloads": download_count(volume / ".kobo" / "google_drive"),
+            "damaged": len(damaged),
+            "repaired": statuses.count("repaired"),
+            "uncertain": statuses.count("uncertain"),
+            "unchanged": statuses.count("unchanged"),
+        },
+        "damaged": [
+            {
+                "name": download.name,
+                "folder": str(download.relative_path.parent),
+                "prefix_bytes": download.prefix_bytes,
+            }
+            for download in damaged
+        ],
+        "outcomes": [
+            {"name": o.name, "folder": o.folder, "status": s, "reason": o.reason}
+            for o, s in zip(outcomes, statuses, strict=True)
+        ],
+    }
+
+
+def append_scan(record: Mapping[str, Any], *, log_directory: Path) -> Path:
+    """Append one scan to the log for its month, and answer which file that was.
+
+    One file per month keeps the record appendable, small enough to upload whole after every
+    scan, and bounded in number.
+    """
+
+    log_directory.mkdir(parents=True, exist_ok=True)
+    path = log_directory / f"kobo-scans-{str(record['at'])[:7]}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, sort_keys=True) + "\n")
+    return path

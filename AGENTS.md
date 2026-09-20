@@ -12,15 +12,16 @@ free of implementation detail; it is a glossary, not a spec.
 
 ## Running the checks
 
-The full suite needs the console script on `PATH`, because ~22 CLI tests invoke
-`epub-news-feeder` as a subprocess:
+Run the suite through `uv`, which puts the console script on `PATH`:
 
-```
-PATH="$PWD/.venv/bin:$PATH" .venv/bin/python -m pytest -q
+```bash
+uv run pytest -q
 ```
 
-Without it those tests fail with `FileNotFoundError: 'epub-news-feeder'` and look exactly like
-a regression you just caused. EPUBCheck-marked tests additionally need the reviewed 5.3.0 jar
+Around 22 CLI tests invoke `epub-news-feeder` as a subprocess. Calling pytest any other way —
+`.venv/bin/python -m pytest`, for instance — fails those with
+`FileNotFoundError: 'epub-news-feeder'`, which looks exactly like a regression you just caused.
+If you must, export `PATH="$PWD/.venv/bin:$PATH"` first. EPUBCheck-marked tests additionally need the reviewed 5.3.0 jar
 at `.local/tools/epubcheck-5.3.0/epubcheck.jar` or `EPUBCHECK_JAR`; they fail closed, so never
 report a green suite while they are failing.
 
@@ -52,7 +53,9 @@ unavailable.
 
 This has been misdiagnosed twice. Before changing `epub.py`, read the first four bytes of the
 file on the device: `PK\x03\x04` is healthy, `{` is a Google error body the device prepended.
-Run `epub-news-feeder kobo-repair --volume /Volumes/KOBOeReader` — it reports without writing.
+Run `uv run --env-file .env epub-news-feeder kobo-repair` — it never modifies the device
+without `--apply`, though it does append a scan record locally and upload it unless `--no-log`.
+`--env-file` is what lets it reach Drive, both to verify payloads and to store that record.
 
 See [docs/kobo-drive-delivery.md](docs/kobo-drive-delivery.md) for the full diagnosis. The short
 version: a book that opens with a working cover and table of contents but blank pages is a
