@@ -118,6 +118,15 @@ hardware rather than the fault.
 This exists because **nobody has measured how often this bug bites, including Kobo**. The
 evidence so far is a handful of dated observations.
 
+`downloads` counts what Drive delivered. Dot-files and the `FSCK\d+.\d+` fragments
+`fsck_msdos` salvages are not downloads and are excluded — and so is the AppleDouble sidecar the
+msdos volume materialises beside a repaired file, which a repair now removes when its own write
+created it. Until 2026-09-21 none of that was filtered, so **records written before then
+overstate `downloads`**: on this device by three — two `FSCK0000.000` fragments and, in the one
+record written between the repair and the fix, a `._`-prefixed sidecar the repair had just left.
+The 29s and the single 30 in `kobo-scans-2026-09.jsonl` are 27 real downloads. Damage counts are
+unaffected; no artefact was ever reported as damaged.
+
 Be precise about what the records measure: how much damage is *present on the device* at each
 visit, not how often a download attempt fails. A damaged file that is scanned ten times without
 being touched appears in ten records; it was one bad download. Reading a failure rate out of

@@ -927,3 +927,90 @@ def test_an_unreadable_version_file_does_not_break_the_scan(
 
     assert main(["kobo-repair", "--volume", str(root), "--log-dir", str(tmp_path / "s")]) == 0
     assert "code=KOBO_DOWNLOADS_INTACT" in capsys.readouterr().out
+
+
+# --- what counts as a download ---------------------------------------------------------
+
+
+def test_filesystem_artefacts_are_not_counted_as_downloads(tmp_path: Path) -> None:
+    """The count is the denominator of a damage rate quoted to Kobo, so it has to mean
+    downloads. A FAT volume that macOS has touched carries AppleDouble sidecars and `fsck`
+    salvage files that the device never fetched."""
+
+    from epub_news_feeder.kobo import download_count
+
+    root = _device(tmp_path)
+    _write(root, "edition.epub", _epub())
+    _write(root, "guide.pdf", b"%PDF-1.7 body")
+    _write(root, "._edition.epub", b"\x00\x05\x16\x07Mac OS X")
+    _write(root, ".DS_Store", b"Bud1")
+    _write(root, "FSCK0000.000", b"salvaged fragment")
+    _write(root, "FSCK0001.001", b"salvaged fragment", folder="01_daily_news/archive")
+
+    assert download_count(root / ".kobo" / "google_drive") == 2
+
+
+def test_an_artefact_is_never_reported_as_a_damaged_download(tmp_path: Path) -> None:
+    """Numerator and denominator have to agree about what a download is, or a scan can report
+    more damage than there were downloads."""
+
+    root = _device(tmp_path)
+    _write(root, "._edition.epub", _ERROR_BODY + _epub())
+    _write(root, "FSCK0000.000", _ERROR_BODY + _epub())
+
+    assert damaged_downloads(drive_download_root(root)) == ()
+
+
+# --- the repair leaves nothing of its own behind ----------------------------------------
+
+
+def _sidecar_on_replace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the msdos VFS, which materialises an AppleDouble beside a file renamed
+    into place on the device. APFS does not, so the behaviour has to be simulated to be tested."""
+
+    real_replace = os.replace
+
+    def replacing(source: Any, destination: Any) -> None:
+        real_replace(source, destination)
+        sidecar = Path(destination).with_name(f"._{Path(destination).name}")
+        sidecar.write_bytes(b"\x00\x05\x16\x07Mac OS X")
+
+    monkeypatch.setattr(os, "replace", replacing)
+
+
+def test_a_repair_removes_the_sidecar_its_own_write_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Left behind, it is counted as a download for the life of the device, so every repair
+    inflates the very denominator these records exist to establish."""
+
+    root = _device(tmp_path)
+    path = _write(root, "edition.epub", _ERROR_BODY + _epub())
+    _sidecar_on_replace(monkeypatch)
+
+    outcomes = repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "b",
+    )
+
+    assert [o.repaired for o in outcomes] == [True]
+    assert path.read_bytes() == _epub()
+    assert not path.with_name(f"._{path.name}").exists()
+
+
+def test_a_sidecar_that_was_already_there_is_left_alone(tmp_path: Path) -> None:
+    """Only litter this run created is this run's to clear. Anything older belongs to whoever
+    put it there, and the device is someone's library."""
+
+    root = _device(tmp_path)
+    _write(root, "edition.epub", _ERROR_BODY + _epub())
+    sidecar = _write(root, "._edition.epub", b"someone else's metadata")
+
+    repair_downloads(
+        damaged_downloads(drive_download_root(root)),
+        drive_digests=_digests(_epub()),
+        backup_directory=tmp_path / "b",
+    )
+
+    assert sidecar.read_bytes() == b"someone else's metadata"

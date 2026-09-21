@@ -36,6 +36,26 @@ _MAX_PREFIX_BYTES = 8192
 # A Kobo firmware version, as `.kobo/version` writes it: dotted numbers and nothing else.
 _FIRMWARE = re.compile(r"^\d+(?:\.\d+)+$")
 
+# Files the Drive tree accumulates that the device never downloaded: AppleDouble sidecars and
+# other dot-files macOS leaves on a FAT volume, and the fragments `fsck_msdos` salvages. Counting
+# them would inflate the denominator of the damage rate these scans exist to establish, and a
+# repair that leaves one behind inflates it permanently.
+_FSCK_SALVAGE = re.compile(r"^FSCK\d+\.\d+$", re.IGNORECASE)
+
+
+def _is_artefact(path: Path) -> bool:
+    """Whether a file in the Drive tree is local debris rather than something Drive delivered."""
+
+    return path.name.startswith(".") or bool(_FSCK_SALVAGE.match(path.name))
+
+
+def _downloads(root: Path) -> Iterable[Path]:
+    """Every file under the Drive tree that the device actually downloaded."""
+
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink() and not _is_artefact(path):
+            yield path
+
 
 class KoboRepairError(Exception):
     """A Kobo volume that cannot be repaired."""
@@ -92,13 +112,12 @@ def damaged_downloads(root: Path) -> tuple[DamagedDownload, ...]:
     A file is only reported when a format signature is actually present behind the prefix, so a
     download that failed outright is left for the device to fetch again rather than "repaired"
     into a truncated file. Symbolic links are ignored: a repair resolves them and would write
-    through to a file outside the Drive tree.
+    through to a file outside the Drive tree. Local debris is ignored for the same reason the
+    count ignores it — it was never downloaded, so it cannot be a damaged download.
     """
 
     damaged: list[DamagedDownload] = []
-    for path in sorted(path for path in root.rglob("*") if path.is_file()):
-        if path.is_symlink():
-            continue
+    for path in _downloads(root):
         with path.open("rb") as stream:
             header = stream.read(_MAX_PREFIX_BYTES)
         if header.startswith(_SIGNATURES) or not header.startswith(_ERROR_SENTINEL):
@@ -227,6 +246,8 @@ def _replace_atomically(path: Path, payload: bytes) -> None:
     still leave the directory inconsistent. The backup is the answer to that, not this function.
     """
 
+    sidecar = path.with_name(f"._{path.name}")
+    inherited = sidecar.exists()
     descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.repair-")
     temporary = Path(name)
     try:
@@ -241,6 +262,12 @@ def _replace_atomically(path: Path, payload: bytes) -> None:
         with suppress(OSError):
             temporary.unlink(missing_ok=True)
         raise
+    if not inherited:
+        # The msdos volume materialises an AppleDouble beside a file renamed into place. It is
+        # ours, it is counted as a download for the life of the device, and nothing reads it —
+        # but one that predates this run is someone else's and stays.
+        with suppress(OSError):
+            sidecar.unlink(missing_ok=True)
     _sync_directory(path.parent)
 
 
@@ -296,7 +323,7 @@ def device_firmware(volume: Path) -> str | None:
 def download_count(root: Path) -> int:
     """How many Drive downloads exist on the device, damaged or not."""
 
-    return sum(1 for path in root.rglob("*") if path.is_file() and not path.is_symlink())
+    return sum(1 for _ in _downloads(root))
 
 
 def scan_record(
