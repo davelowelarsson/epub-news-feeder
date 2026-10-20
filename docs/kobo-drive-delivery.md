@@ -2,7 +2,8 @@
 
 Why Editions delivered to Google Drive arrive unreadable on a Kobo, why that is not this
 pipeline's fault, and what can actually be done about it. Investigated on a Kobo Libra Colour
-running firmware 5.18.270971, on 2026-09-06 and again in detail on 2026-09-20.
+running firmware 5.18.270971, on 2026-09-06, in detail on 2026-09-20, and with one download
+attempt measured end to end on 2026-09-21.
 
 Reported upstream as [kobolabs/epub-spec#75](https://github.com/kobolabs/epub-spec/issues/75).
 
@@ -63,16 +64,32 @@ size, and its folder as the trigger.
 Re-linking the Drive account measurably improves the success rate for a while. It does not
 repair files already on disk, and the failure rate degrades again over subsequent days.
 
-The same append-instead-of-replace pattern appears in the library index. Re-downloading an
-already-indexed Edition appends a fresh set of chapter rows without clearing the old set:
+The same append-instead-of-replace pattern appears in the library index. A duplicated set of
+chapter rows renders as empty chapters beside the real ones. `2026-09-18-daily` was recorded on
+2026-09-20; both rows below were still present when the index was read again on 2026-09-21:
 
 ```
 2026-09-18-daily    18 chapter rows   <- 9 spine documents, listed twice
-every other book     9 chapter rows
+2026-09-19-weekly   18 chapter rows   <- 9 spine documents, listed twice
+every other book     9 chapter rows, matching its spine
 ```
 
-The stale set renders as empty chapters beside the real ones. Both faults are a missing reset
-before a rewrite, in two different subsystems.
+**It did not reproduce on 2026-09-21**, on a re-download that is otherwise fully accounted for:
+the Edition was repaired and verified clean at 17:00Z, opened from the library, re-downloaded
+damaged by 17:36Z — and its index entry held exactly 10 chapter rows for an Edition whose spine
+carries 10 `itemref`s. The spine was counted rather than assumed; that day's Edition has ten
+documents where the earlier ones have nine, which is the sort of coincidence that would
+otherwise read as clean.
+
+So a re-download does not *always* duplicate the index. Whether the index fault is intermittent
+like the download fault, or depends on something not yet identified — the book being open at the
+time, say, or how far the previous read had progressed — is unknown. Two observations of damage
+and one of a re-download leaving the index correct is not enough to say. Both faults still look
+like a missing reset before a rewrite, in two different subsystems, but only the download path
+has been observed closely enough to claim it.
+
+Query the rows from a copy, never the device: chapter rows are `ContentType=9` joined to the
+book by `BookID`, not by `ContentID`.
 
 ## `kobo-repair`
 
@@ -121,9 +138,11 @@ evidence so far is a handful of dated observations.
 `downloads` counts what Drive delivered. Dot-files and the `FSCK\d+.\d+` fragments
 `fsck_msdos` salvages are not downloads and are excluded — and so is the AppleDouble sidecar the
 msdos volume materialises beside a repaired file, which a repair now removes when its own write
-created it. Until 2026-09-21 none of that was filtered, so **records written before then
-overstate `downloads`**: on this device by three — two `FSCK0000.000` fragments and, in the one
-record written between the repair and the fix, a `._`-prefixed sidecar the repair had just left.
+created it — verified against the mounted device on 2026-09-21, where a real repair left no
+sidecar and no temporary behind. Until 2026-09-21 none of that was filtered, so **records
+written before then overstate `downloads`**: on this device by three — two `FSCK0000.000`
+fragments and, in the one record written between the repair and the fix, a `._`-prefixed
+sidecar the repair had just left.
 The 29s and the single 30 in `kobo-scans-2026-09.jsonl` are 27 real downloads. Damage counts are
 unaffected; no artefact was ever reported as damaged.
 
@@ -132,6 +151,22 @@ visit, not how often a download attempt fails. A damaged file that is scanned te
 being touched appears in ten records; it was one bad download. Reading a failure rate out of
 this needs the dates and what happened between them — when the account was re-linked, when
 Editions were opened — which is why the timestamp matters as much as the counts.
+
+One attempt has been captured whole, on 2026-09-21, by bracketing it with scans:
+
+```
+16:43Z  27 downloads, 0 damaged          repaired earlier, verified
+17:00Z  27 downloads, 0 damaged          still clean, untouched
+        2026-09-21-daily opened from the library -> device re-downloads
+17:36Z  27 downloads, 1 damaged          507-byte 401 prefix, payload digest unchanged
+```
+
+That is one attempt and one failure, not a rate — but it is the first record here of the
+*attempt* rather than of damage found lying about, and it is what the counts alone cannot give.
+Reading an Edition is the only reliable way to make the device fetch one on demand, so bracketing
+a deliberate open with two scans is how any future attempt should be measured. Note what it also
+settles: the payload behind the new error body was byte-identical to the previous download, so a
+second failure on the same file changes nothing about the file.
 
 ## Options that were investigated and rejected
 
